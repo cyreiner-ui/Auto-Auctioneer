@@ -64,6 +64,9 @@ export default function Home() {
   const [checkingAccess, setCheckingAccess] = useState(true);
   const [password, setPassword] = useState("");
   const [accessError, setAccessError] = useState("");
+  const [staffUnlocked, setStaffUnlocked] = useState(false);
+  const [staffPassword, setStaffPassword] = useState("");
+  const [staffAccessError, setStaffAccessError] = useState("");
   const [role, setRole] = useState<"staff" | "auctioneer">("staff");
   const [language, setLanguage] = useState<"pt" | "en">("pt");
   const [listings, setListings] = useState(initialListings);
@@ -102,6 +105,7 @@ export default function Home() {
   const en = language === "en";
   useEffect(() => {
     fetch("/api/access").then((response) => setUnlocked(response.ok)).catch(() => setUnlocked(false)).finally(() => setCheckingAccess(false));
+    fetch("/api/staff-access").then((response) => setStaffUnlocked(response.ok)).catch(() => setStaffUnlocked(false));
   }, []);
 
   const unlock = async (event: FormEvent) => {
@@ -111,8 +115,16 @@ export default function Home() {
     if (response.ok) { setUnlocked(true); setPassword(""); } else setAccessError(en ? "Incorrect password." : "Senha incorreta.");
   };
 
+  const unlockStaff = async (event: FormEvent) => {
+    event.preventDefault();
+    setStaffAccessError("");
+    const response = await fetch("/api/staff-access", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: staffPassword }) });
+    if (response.ok) { setStaffUnlocked(true); setStaffPassword(""); } else setStaffAccessError(en ? "Incorrect staff password." : "Senha da equipe incorreta.");
+  };
+
   if (checkingAccess) return <main className="access-screen"><div className="access-card"><span className="brand-mark">✦</span><p className="muted">Loading…</p></div></main>;
   if (!unlocked) return <main className="access-screen"><form className="access-card" onSubmit={unlock}><span className="brand-mark">✦</span><strong>Knife Auctions</strong><p className="muted">{en ? "Enter the team password to continue." : "Digite a senha da equipe para continuar."}</p><label>{en ? "Password" : "Senha"}<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoFocus /></label>{accessError && <p className="access-error">{accessError}</p>}<button className="primary large" type="submit">{en ? "Enter" : "Entrar"}</button></form></main>;
+  if (role === "staff" && !staffUnlocked) return <main className="access-screen"><form className="access-card" onSubmit={unlockStaff}><span className="brand-mark">✦</span><strong>{en ? "Staff area" : "Área da equipe"}</strong><p className="muted">{en ? "Enter the staff password to continue." : "Digite a senha da equipe para continuar."}</p><label>{en ? "Staff password" : "Senha da equipe"}<input type="password" value={staffPassword} onChange={(event) => setStaffPassword(event.target.value)} autoFocus /></label>{staffAccessError && <p className="access-error">{staffAccessError}</p>}<button className="primary large" type="submit">{en ? "Enter staff area" : "Entrar na equipe"}</button><button type="button" className="secondary-access" onClick={() => setRole("auctioneer")}>{en ? "Go to auctioneer area" : "Ir para área do leiloeiro"}</button></form></main>;
 
   if (selected) return <Editor listing={selected} language={language} onBack={() => setSelected(null)} onSave={(next) => { updateListing(next); setSelected(null); setNotice(en ? "Draft saved." : "Rascunho salvo."); }} onDelete={() => { setListings((all) => all.filter((l) => l.id !== selected.id)); setSelected(null); }} />;
 
