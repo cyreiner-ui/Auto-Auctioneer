@@ -1,0 +1,3 @@
+import { NextResponse } from "next/server";
+import { getEbayListing } from "@/lib/ebay";
+export async function POST(request: Request) { const { links } = await request.json(); const results = await Promise.all(String(links || "").split(/\s+/).filter(Boolean).map(async (url) => { try { const source = await getEbayListing(url); return { ok: true, url, ...source, title: source.title.trim(), description: source.description.trim() || "Descrição não informada no anúncio original. Revise antes de aprovar." }; } catch (error) { return { ok: false, url, error: error instanceof Error ? error.message : "Não foi possível importar este link." }; } })); return NextResponse.json({ results }); }
