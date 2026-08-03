@@ -11,7 +11,7 @@ async function withImageUrls(rows: any[]) {
       }
       return { id: image.id, src, name: image.name, storagePath: image.storage_path || undefined };
     }));
-    return { id: row.id, ebayUrl: row.ebay_url, title: row.title, description: row.description, price: Number(row.price || 0), status: row.status, finalPrice: row.final_price == null ? undefined : Number(row.final_price), buyer: row.buyer || undefined, completedAt: row.completed_at || undefined, images };
+    return { id: row.id, ebayUrl: row.ebay_url, title: row.title, auctioneerNotes: row.auctioneer_notes || "", description: row.description, price: Number(row.price || 0), status: row.status, finalPrice: row.final_price == null ? undefined : Number(row.final_price), buyer: row.buyer || undefined, completedAt: row.completed_at || undefined, images };
   }));
 }
 
@@ -23,7 +23,7 @@ export async function GET() {
 
 export async function POST(request: Request) {
   const listing = await request.json();
-  const { error } = await supabaseAdmin.from("app_listings").upsert({ id: listing.id, ebay_item_id: listing.id, ebay_url: listing.ebayUrl, title: listing.title || "", description: listing.description || "", price: listing.price || 0, status: listing.status || "draft", final_price: listing.finalPrice ?? null, buyer: listing.buyer || null, completed_at: listing.completedAt || null, updated_at: new Date().toISOString() });
+  const { error } = await supabaseAdmin.from("app_listings").upsert({ id: listing.id, ebay_item_id: listing.id, ebay_url: listing.ebayUrl, title: listing.title || "", auctioneer_notes: listing.auctioneerNotes || "", description: listing.description || "", price: listing.price || 0, status: listing.status || "draft", final_price: listing.finalPrice ?? null, buyer: listing.buyer || null, completed_at: listing.completedAt || null, updated_at: new Date().toISOString() });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   const { error: deleteImagesError } = await supabaseAdmin.from("app_listing_images").delete().eq("listing_id", listing.id);
   if (deleteImagesError) return NextResponse.json({ error: deleteImagesError.message }, { status: 500 });
