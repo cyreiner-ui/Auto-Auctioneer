@@ -1,6 +1,6 @@
 export const ACTIVE_BID_PAGE_SIZE = 100;
 
-const activeBidSelection = "id, title, ebay_item_id, max_bid, currency, bid_window_start, bid_window_end, account_id, ebay_accounts(id, marketplace, refresh_token_ciphertext)";
+const activeBidSelection = "id, title, ebay_item_id, ebay_url, max_bid, currency, bid_window_start, bid_window_end, account_id, execution_mode, ebay_accounts(id, marketplace, refresh_token_ciphertext)";
 
 type Query = {
   select: (selection: string) => Query;

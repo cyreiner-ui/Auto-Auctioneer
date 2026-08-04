@@ -4,7 +4,8 @@ export type NormalizedBidInput = {
   ebayItemId: string;
   ebayUrl: string;
   title: string;
-  accountId: string;
+  accountId: string | null;
+  executionMode: "manual" | "automatic";
   maxBid: number;
   currency: string;
   allInBudget: number | null;
@@ -56,6 +57,7 @@ export function validateBidInput(input: BidInput): ValidationResult {
   const ebayItemId = String(input.ebayItemId || "").trim();
   const ebayUrl = String(input.ebayUrl || "").trim();
   const accountId = String(input.accountId || "").trim();
+  const executionMode = input.executionMode === "automatic" ? "automatic" : "manual";
   const start = normalizeDate(input.bidWindowStart);
   const end = normalizeDate(input.bidWindowEnd);
   const auctionEndAt = input.auctionEndAt === undefined || input.auctionEndAt === null || input.auctionEndAt === "" ? null : normalizeDate(input.auctionEndAt);
@@ -63,7 +65,8 @@ export function validateBidInput(input: BidInput): ValidationResult {
   const budget = optionalAmount(input.allInBudget);
   const currency = String(input.currency || "USD").trim().toUpperCase();
 
-  if (!ebayItemId || !ebayUrl || !accountId || !start || !end) return { ok: false, error: "Item, account, max bid, and bid window are required." };
+  if (!ebayItemId || !ebayUrl || !start || !end) return { ok: false, error: "Item, max bid, and bid window are required." };
+  if (executionMode === "automatic" && !accountId) return { ok: false, error: "An eBay account is required for automatic bidding." };
   if (!isEbayListingUrl(ebayUrl)) return { ok: false, error: "A valid eBay listing URL is required." };
   if (!isRestItemId(ebayItemId) && !/^\d{6,14}$/.test(ebayItemId)) return { ok: false, error: "A valid eBay item ID is required." };
   if (!Number.isFinite(maxBid) || maxBid <= 0) return { ok: false, error: "Max bid must be greater than zero." };
@@ -79,7 +82,8 @@ export function validateBidInput(input: BidInput): ValidationResult {
       ebayItemId,
       ebayUrl,
       title: String(input.title || "Untitled eBay lot").trim() || "Untitled eBay lot",
-      accountId,
+      accountId: accountId || null,
+      executionMode,
       maxBid,
       currency,
       allInBudget: budget.value,

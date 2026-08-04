@@ -51,6 +51,8 @@ test("accepts custom scheduler and Vercel cron credentials independently", () =>
 
 test("validates bid amounts, windows, URLs, and budgets", () => {
   assert.equal(validateBidInput(validBid()).ok, true);
+  assert.equal(validateBidInput(validBid({ accountId: undefined, executionMode: "manual" })).value.accountId, null);
+  assert.match(validateBidInput(validBid({ accountId: undefined, executionMode: "automatic" })).error, /account is required/);
   assert.match(validateBidInput(validBid({ maxBid: 0 })).error, /Max bid/);
   assert.match(validateBidInput(validBid({ allInBudget: 99 })).error, /budget/);
   assert.match(validateBidInput(validBid({ ebayUrl: "https://example.com/item/166824019402" })).error, /eBay listing URL/);
