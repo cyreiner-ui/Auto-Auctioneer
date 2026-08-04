@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { validateBidInput } from "../lib/bid-validation.ts";
 import { ebayApiBaseUrl, ebayAuthBaseUrl, getEbayEnvironment } from "../lib/ebay-endpoints.ts";
+import { buildEbayConsentUrl, getEbayOAuthRuName, getEbayOAuthScopes } from "../lib/ebay-oauth.ts";
 import { isSchedulerRequest } from "../lib/scheduler-auth.ts";
 import { ACTIVE_BID_PAGE_SIZE, listActiveBidLots } from "../lib/bid-window.ts";
 import scheduler from "../scheduler/index.ts";
@@ -24,6 +25,20 @@ test("selects the correct eBay sandbox and production hosts", () => {
   assert.equal(ebayAuthBaseUrl("sandbox"), "https://auth.sandbox.ebay.com");
   assert.equal(ebayApiBaseUrl("production"), "https://api.ebay.com");
   assert.throws(() => getEbayEnvironment("staging"), /EBAY_ENVIRONMENT/);
+});
+
+test("builds eBay OAuth consent with a RuName and the auction scopes", () => {
+  const ruName = "Example_Company-ExampleApp-Prod-abcd1234";
+  const url = buildEbayConsentUrl("client-id", ruName, "csrf-state", "production");
+  assert.equal(url.origin, "https://auth.ebay.com");
+  assert.equal(url.searchParams.get("redirect_uri"), ruName);
+  assert.equal(url.searchParams.get("state"), "csrf-state");
+  assert.equal(getEbayOAuthScopes(), "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/buy.offer.auction");
+});
+
+test("rejects a callback URL where eBay requires its RuName", () => {
+  assert.throws(() => getEbayOAuthRuName({ EBAY_OAUTH_RUNAME: "https://example.test/api/ebay/oauth/callback" }), /RuName, not the callback URL/);
+  assert.equal(getEbayOAuthRuName({ EBAY_OAUTH_REDIRECT_URI: "Legacy-Compatible-RuName" }), "Legacy-Compatible-RuName");
 });
 
 test("accepts custom scheduler and Vercel cron credentials independently", () => {
