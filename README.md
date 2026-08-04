@@ -13,7 +13,7 @@ The demo screen is intentionally usable without credentials for UI review. `/api
 
 ## Deployment
 
-Deploy the repository to Vercel, configure the variables from `.env.example`, and set the Supabase Auth site URL and redirect URL to the deployed domain. Keep `SUPABASE_SERVICE_ROLE_KEY`, eBay secrets, and `OPENAI_API_KEY` server-only. The bidding scheduler is configured as a Vercel Cron job at `/api/bids/run`; set `CRON_SECRET` (or `BID_SCHEDULER_SECRET`) and keep `EBAY_LIVE_BIDDING_ENABLED=false` until eBay grants production Offer API access.
+Deploy the repository to Vercel, configure the variables from `.env.example`, and set the Supabase Auth site URL and redirect URL to the deployed domain. Keep `SUPABASE_SERVICE_ROLE_KEY`, eBay secrets, and `OPENAI_API_KEY` server-only. The free bidding scheduler is a separate Cloudflare Worker under `scheduler/`; set its `BID_SCHEDULER_SECRET` secret to the same value used by Vercel, then deploy it with `npm run scheduler:deploy`. Keep `EBAY_LIVE_BIDDING_ENABLED=false` until eBay grants production Offer API access.
 
 ## Tests
 

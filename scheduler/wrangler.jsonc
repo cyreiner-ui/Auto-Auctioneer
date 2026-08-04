@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json.schemastore.org/wrangler.json",
+  "name": "auto-auctioneer-bid-scheduler",
+  "main": "./index.ts",
+  "compatibility_date": "2026-08-04",
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "vars": {
+    "BID_RUN_URL": "https://auto-auctioneer-cyreiner.vercel.app/api/bids/run"
+  }
+}
