@@ -1,3 +1,5 @@
+import { getEbayEnvironment } from "./ebay-endpoints";
+
 const value = (name: string) => process.env[name]?.trim();
 
 export function requiredEnv(name: string) {
@@ -11,6 +13,7 @@ export function supabaseUrl() {
 }
 
 export function validateBiddingConfig() {
+  getEbayEnvironment();
   if (!value("SUPABASE_URL") && !value("NEXT_PUBLIC_SUPABASE_URL")) throw new Error("SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL is not configured.");
   requiredEnv("SUPABASE_SERVICE_ROLE_KEY");
   requiredEnv("EBAY_CLIENT_ID");

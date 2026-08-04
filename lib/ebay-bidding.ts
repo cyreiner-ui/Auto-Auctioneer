@@ -1,6 +1,7 @@
 import { decryptToken } from "./token-crypto";
 import { requiredEnv } from "./runtime-config";
 import { supabaseAdmin } from "./supabase-admin";
+import { ebayApiBaseUrl } from "./ebay-endpoints";
 
 type BidLot = {
   id: string;
@@ -17,14 +18,12 @@ type EbayAccount = {
   refresh_token_ciphertext: string | null;
 };
 
-const apiBase = "https://api.ebay.com";
-
 async function refreshAccessToken(account: EbayAccount) {
   if (!account.refresh_token_ciphertext) throw new Error("The eBay account has not completed OAuth.");
   const refreshToken = decryptToken(account.refresh_token_ciphertext);
   const clientId = requiredEnv("EBAY_CLIENT_ID");
   const clientSecret = requiredEnv("EBAY_CLIENT_SECRET");
-  const response = await fetch(`${apiBase}/identity/v1/oauth2/token`, {
+  const response = await fetch(`${ebayApiBaseUrl()}/identity/v1/oauth2/token`, {
     method: "POST",
     headers: {
       Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
@@ -40,7 +39,7 @@ async function refreshAccessToken(account: EbayAccount) {
 
 async function resolveRestItemId(accessToken: string, lot: BidLot, marketplace: string) {
   if (lot.ebay_item_id.startsWith("v1|")) return lot.ebay_item_id;
-  const url = new URL(`${apiBase}/buy/browse/v1/item/get_item_by_legacy_id`);
+  const url = new URL(`${ebayApiBaseUrl()}/buy/browse/v1/item/get_item_by_legacy_id`);
   url.searchParams.set("legacy_item_id", lot.ebay_item_id);
   const response = await fetch(url, {
     headers: {
@@ -57,7 +56,7 @@ async function resolveRestItemId(accessToken: string, lot: BidLot, marketplace: 
 export async function submitProxyBid(lot: BidLot, account: EbayAccount) {
   const accessToken = await refreshAccessToken(account);
   const itemId = await resolveRestItemId(accessToken, lot, account.marketplace || requiredEnv("EBAY_MARKETPLACE_ID"));
-  const response = await fetch(`${apiBase}/buy/offer/v1_beta/bidding/${encodeURIComponent(itemId)}/place_proxy_bid`, {
+  const response = await fetch(`${ebayApiBaseUrl()}/buy/offer/v1_beta/bidding/${encodeURIComponent(itemId)}/place_proxy_bid`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,

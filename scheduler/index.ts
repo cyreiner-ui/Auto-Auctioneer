@@ -1,9 +1,9 @@
-interface SchedulerEnv {
+export interface SchedulerEnv {
   BID_RUN_URL: string;
   BID_SCHEDULER_SECRET: string;
 }
 
-interface SchedulerController {
+export interface SchedulerController {
   cron: string;
   scheduledTime: number;
 }
@@ -15,6 +15,10 @@ const scheduler = {
       headers: { "x-bid-scheduler-secret": env.BID_SCHEDULER_SECRET },
     });
 
+    if (response.status === 503) {
+      const body = await response.text().catch(() => "");
+      if (body.includes('"enabled":false')) return;
+    }
     if (!response.ok) {
       throw new Error(`Bidding endpoint returned ${response.status} for ${controller.cron}.`);
     }

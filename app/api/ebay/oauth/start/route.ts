@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { randomBytes } from "node:crypto";
 import { staffOnly } from "@/app/api/bids/auth";
+import { ebayAuthBaseUrl } from "@/lib/ebay-endpoints";
 
 export async function GET(request: Request) {
   const denied = await staffOnly(request);
@@ -10,7 +11,7 @@ export async function GET(request: Request) {
   const accountId = new URL(request.url).searchParams.get("accountId");
   if (!clientId || !redirectUri) return NextResponse.json({ error: "eBay OAuth is not configured." }, { status: 503 });
   const state = randomBytes(24).toString("hex");
-  const url = new URL("https://auth.ebay.com/oauth2/authorize");
+  const url = new URL(`${ebayAuthBaseUrl()}/oauth2/authorize`);
   url.searchParams.set("client_id", clientId);
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("response_type", "code");

@@ -1,4 +1,5 @@
 import { parseEbayItemId } from "./validation";
+import { ebayApiBaseUrl } from "./ebay-endpoints";
 
 const browserHeaders = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
@@ -82,7 +83,8 @@ export async function getEbayListing(url: string) {
   if (!clientId || !clientSecret) return getPublicEbayListing(resolved.url, itemId);
 
   try {
-    const tokenResponse = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
+    const apiBase = ebayApiBaseUrl();
+    const tokenResponse = await fetch(`${apiBase}/identity/v1/oauth2/token`, {
       method: "POST",
       headers: {
         Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
@@ -92,7 +94,7 @@ export async function getEbayListing(url: string) {
     });
     if (!tokenResponse.ok) return getPublicEbayListing(resolved.url, itemId);
     const { access_token } = await tokenResponse.json();
-    const response = await fetch(`https://api.ebay.com/buy/browse/v1/item/v1|${itemId}|0`, {
+    const response = await fetch(`${apiBase}/buy/browse/v1/item/v1|${itemId}|0`, {
       headers: {
         Authorization: `Bearer ${access_token}`,
         "X-EBAY-C-MARKETPLACE-ID": process.env.EBAY_MARKETPLACE_ID || "EBAY_US"

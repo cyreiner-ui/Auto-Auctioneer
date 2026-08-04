@@ -9,7 +9,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "npm run build && node --test tests/core.test.mjs tests/rendered-html.test.mjs",
+    "test": "npm run build && node --experimental-strip-types --test tests/core.test.mjs tests/rendered-html.test.mjs tests/bidding-contract.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "scheduler:dev": "wrangler dev --config scheduler/wrangler.jsonc",
