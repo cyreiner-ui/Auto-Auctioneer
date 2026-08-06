@@ -110,3 +110,17 @@ test("Cloudflare scheduler fails on unexpected endpoint errors", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Cloudflare scheduler ticks the finder with the same protected secret", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    globalThis.fetch = async (url, init) => { calls.push({ url, init }); return new Response("{}", { status: 200 }); };
+    await scheduler.scheduled({ cron: "* * * * *", scheduledTime: Date.now() }, { BID_RUN_URL: "https://example.test/api/bids/run", FINDER_TICK_URL: "https://example.test/api/finder/tick", BID_SCHEDULER_SECRET: "worker-secret" });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].url, "https://example.test/api/finder/tick");
+    assert.equal(calls[1].init.headers["x-bid-scheduler-secret"], "worker-secret");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

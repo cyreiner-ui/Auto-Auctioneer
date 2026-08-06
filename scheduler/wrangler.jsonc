@@ -7,6 +7,7 @@
     "crons": ["* * * * *"]
   },
   "vars": {
-    "BID_RUN_URL": "https://auto-auctioneer-cyreiner.vercel.app/api/bids/run"
+    "BID_RUN_URL": "https://auto-auctioneer-cyreiner.vercel.app/api/bids/run",
+    "FINDER_TICK_URL": "https://auto-auctioneer-cyreiner.vercel.app/api/finder/tick"
   }
 }

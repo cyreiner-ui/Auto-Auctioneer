@@ -1,6 +1,7 @@
 export interface SchedulerEnv {
   BID_RUN_URL: string;
   BID_SCHEDULER_SECRET: string;
+  FINDER_TICK_URL?: string;
 }
 
 export interface SchedulerController {
@@ -10,17 +11,24 @@ export interface SchedulerController {
 
 const scheduler = {
   async scheduled(controller: SchedulerController, env: SchedulerEnv) {
-    const response = await fetch(env.BID_RUN_URL, {
+    const bidResponse = await fetch(env.BID_RUN_URL, {
       method: "POST",
       headers: { "x-bid-scheduler-secret": env.BID_SCHEDULER_SECRET },
     });
 
-    if (response.status === 503) {
-      const body = await response.text().catch(() => "");
-      if (body.includes('"enabled":false')) return;
+    if (bidResponse.status === 503) {
+      const body = await bidResponse.text().catch(() => "");
+      if (!body.includes('"enabled":false')) throw new Error(`Bidding endpoint returned ${bidResponse.status} for ${controller.cron}.`);
+    } else if (!bidResponse.ok) {
+      throw new Error(`Bidding endpoint returned ${bidResponse.status} for ${controller.cron}.`);
     }
-    if (!response.ok) {
-      throw new Error(`Bidding endpoint returned ${response.status} for ${controller.cron}.`);
+
+    if (env.FINDER_TICK_URL) {
+      const finderResponse = await fetch(env.FINDER_TICK_URL, {
+        method: "POST",
+        headers: { "x-bid-scheduler-secret": env.BID_SCHEDULER_SECRET },
+      });
+      if (!finderResponse.ok) throw new Error(`Finder endpoint returned ${finderResponse.status} for ${controller.cron}.`);
     }
   },
 
