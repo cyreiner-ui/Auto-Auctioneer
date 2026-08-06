@@ -7,7 +7,7 @@
     "crons": ["* * * * *"]
   },
   "vars": {
-    "BID_RUN_URL": "https://auto-auctioneer-cyreiner.orlando-tora-2782.chatgpt.site/api/bids/run",
-    "FINDER_TICK_URL": "https://auto-auctioneer-cyreiner.orlando-tora-2782.chatgpt.site/api/finder/tick"
+    "BID_RUN_URL": "https://auto-auctioneer-cyreiner.vercel.app/api/bids/run",
+    "FINDER_TICK_URL": "https://auto-auctioneer-cyreiner.vercel.app/api/finder/tick"
   }
 }
