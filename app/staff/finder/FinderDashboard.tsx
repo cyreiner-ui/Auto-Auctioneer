@@ -13,6 +13,7 @@ const RUN_STATUS_LABEL: Record<string, string> = { running: "Working…", comple
 export default function FinderDashboard() {
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -41,6 +42,11 @@ export default function FinderDashboard() {
 
   const archiveIds = (ebayItemIds: string[]) => request("/api/finder/items", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ebayItemIds, dismissed: true }) });
   const deleteIds = (ids: string[]) => request("/api/finder/items", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) });
+  const copyAndArchive = async (result: FinderResult) => {
+    try { await navigator.clipboard?.writeText(result.ebay_url); } catch { /* clipboard access is best-effort */ }
+    const ok = await archiveIds([result.ebay_item_id]);
+    if (ok) { setNotice("Link copied and archived."); window.setTimeout(() => setNotice(""), 1800); }
+  };
   const latest = data?.runs[0];
 
   const friendlyError = (message: string) => {
@@ -52,6 +58,7 @@ export default function FinderDashboard() {
   return <main className="finder-page">
     <header className="finder-header"><div><Link className="back" href="/">← Back to staff panel</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Pocket-knife deal finder</h1><p className="muted">Daily snapshots delivered to {data?.settings.zip ?? "—"} · maximum {usd(data?.settings.maxCostPerKnife ?? 0)} per knife including shipping</p><div className="finder-header-links"><Link className="back finder-settings-link" href="/staff/finder/settings">Search settings</Link><Link className="back finder-settings-link" href="/staff/finder/archived">Archived items</Link></div></div><button className="primary" disabled={busy} onClick={() => void request("/api/finder/run", { method: "POST" })}>{busy ? "Working…" : "Run now"}</button></header>
     {error && <div className="notice finder-error" role="status" aria-live="polite" aria-atomic="true">{friendlyError(error)}</div>}
+    {notice && <div className="notice" role="status" aria-live="polite" aria-atomic="true">{notice}</div>}
     {!data && !error && <p className="muted" role="status" aria-live="polite">Loading…</p>}
     {data && <>
       <section className="finder-stats">
@@ -65,6 +72,7 @@ export default function FinderDashboard() {
           emptyMessage="No qualifying snapshots yet. Run the finder or wait for the daily 6:00 AM search."
           actions={[
             { label: "Archive", onClick: (result) => void archiveIds([result.ebay_item_id]) },
+            { label: "Copy & Archive", onClick: (result) => void copyAndArchive(result) },
             { label: "Delete", className: "danger", onClick: (result) => { if (window.confirm(`Delete "${result.title}"?`)) void deleteIds([result.ebay_item_id]); } },
           ]}
           bulkActions={[
