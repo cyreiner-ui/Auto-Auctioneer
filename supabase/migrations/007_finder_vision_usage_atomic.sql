@@ -1,6 +1,7 @@
 create or replace function public.reserve_finder_vision_usage(p_month text, p_paid_mode boolean, p_monthly_limit integer)
 returns table(free_analyses integer, paid_analyses integer, reserved boolean)
 language plpgsql
+set search_path = public
 as $$
 declare
   v_free integer;
