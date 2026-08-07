@@ -43,6 +43,7 @@ export default function ArchivedItemsPanel() {
         busy={busy}
         emptyMessage="No archived items yet."
         actions={[
+          { label: "View", className: "primary", onClick: (result) => window.open(result.ebay_url, "_blank", "noopener,noreferrer") },
           { label: "Restore", onClick: (result) => void restoreIds([result.ebay_item_id]) },
           { label: "Delete", className: "danger", onClick: (result) => { if (window.confirm(`Delete "${result.title}"?`)) void deleteIds([result.ebay_item_id]); } },
         ]}

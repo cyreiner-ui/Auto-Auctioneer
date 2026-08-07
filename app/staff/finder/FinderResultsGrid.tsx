@@ -32,7 +32,6 @@ export default function FinderResultsGrid({ results, busy, emptyMessage, actions
           <p className="finder-price-line">{usd(result.item_price)} + {usd(result.shipping_cost)} shipping = {usd(result.total_cost)} total</p>
           <strong className="finder-unit-price">{usd(result.cost_per_knife)} / knife</strong>
           <p className="finder-snapshot">Price captured {new Date(result.discovered_at).toLocaleString()}. Verify the current price on eBay.</p>
-          <a className="primary" href={result.ebay_url} target="_blank" rel="noreferrer" aria-label={`View ${result.title} on eBay (opens in new tab)`}>View on eBay ↗</a>
           <div className="finder-card-actions">{actions.map((action) => <button key={action.label} className={action.className} disabled={busy} aria-label={`${action.label} ${result.title}`} onClick={() => action.onClick(result)}>{action.label}</button>)}</div>
         </div>
       </article>)}
