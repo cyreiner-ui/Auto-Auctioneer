@@ -6,7 +6,7 @@ import Link from "next/link";
 type Keyword = { id: string; phrase: string; enabled: boolean };
 type Result = { ebay_item_id: string; title: string; ebay_url: string; image_url: string | null; item_price: number; shipping_cost: number; total_cost: number; cost_per_knife: number; knife_count: number; buying_options: string[]; detection_source: string; discovered_at: string };
 type Run = { id: string; trigger: string; status: string; keywords_scanned: number; items_seen: number; items_added: number; qualified: number; rejected: number; errors: string[]; started_at: string };
-type Overview = { keywords: Keyword[]; results: Result[]; runs: Run[]; counts: { pending: number; rejected: number; qualified: number }; budget: { mode: string; paidAnalyses: number; monthlyLimit: number; remaining: number; projectedMaximum: number } };
+type Overview = { keywords: Keyword[]; results: Result[]; runs: Run[]; counts: { pending: number; rejected: number; qualified: number }; budget: { mode: string; paidAnalyses: number; monthlyLimit: number; remaining: number; projectedMaximum: number }; settings: { zip: string; maxCostPerKnife: number } };
 
 const usd = (value: number) => Number(value || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 
@@ -44,7 +44,7 @@ export default function FinderDashboard() {
   const latest = data?.runs[0];
 
   return <main className="finder-page">
-    <header className="finder-header"><div><Link className="back" href="/">← Back to staff panel</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Pocket-knife deal finder</h1><p className="muted">Daily snapshots delivered to 32819 · maximum {usd(3.5)} per knife including shipping</p></div><button className="primary" disabled={busy} onClick={() => void request("/api/finder/run", { method: "POST" })}>{busy ? "Working…" : "Run now"}</button></header>
+    <header className="finder-header"><div><Link className="back" href="/">← Back to staff panel</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Pocket-knife deal finder</h1><p className="muted">Daily snapshots delivered to {data?.settings.zip ?? "—"} · maximum {usd(data?.settings.maxCostPerKnife ?? 0)} per knife including shipping</p></div><button className="primary" disabled={busy} onClick={() => void request("/api/finder/run", { method: "POST" })}>{busy ? "Working…" : "Run now"}</button></header>
     {error && <div className="notice finder-error">{error.includes("finder_") || error.includes("relation") ? "Apply the finder database migration, then reload this page." : error}</div>}
     {data && <>
       <section className="finder-stats">

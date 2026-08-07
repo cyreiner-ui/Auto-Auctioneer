@@ -8,5 +8,3 @@ export async function POST(request: Request) {
   try { return NextResponse.json(await finderTick()); }
   catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Finder tick failed." }, { status: 500 }); }
 }
-
-export async function GET(request: Request) { return POST(request); }
