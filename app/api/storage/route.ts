@@ -27,6 +27,9 @@ export async function POST() {
   const used = new Set((refs || []).map((row) => row.storage_path));
   const allFiles = nested.flatMap((result, index) => (result.data || []).map((file) => ({ ...file, path: `${folders[index]}/${file.name}` })));
   const orphaned = allFiles.filter((file) => !used.has(file.path));
-  if (orphaned.length) await supabaseAdmin.storage.from(IMAGE_BUCKET).remove(orphaned.map((file) => file.path));
+  if (orphaned.length) {
+    const { error: removeError } = await supabaseAdmin.storage.from(IMAGE_BUCKET).remove(orphaned.map((file) => file.path));
+    if (removeError) return NextResponse.json({ error: removeError.message }, { status: 500 });
+  }
   return NextResponse.json({ deleted: orphaned.length, bytesFreed: orphaned.reduce((sum, file) => sum + Number(file.metadata?.size || 0), 0) });
 }

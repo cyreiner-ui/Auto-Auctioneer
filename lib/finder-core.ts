@@ -5,6 +5,7 @@ export const FINDER_DEFAULTS = {
   resultsPerKeyword: 500,
   monthlyPaidAnalysisLimit: 50_000,
   batchSize: 5,
+  maxPlausibleKnifeCount: 50,
 } as const;
 
 const numberWords: Record<string, number> = {
@@ -23,32 +24,41 @@ export type TextAnalysis =
   | { kind: "resolved"; count: number; containsFoldingKnife: true; confidence: number }
   | { kind: "vision" };
 
-function numericCount(text: string) {
+// Patterns that require a knife/blade word directly adjacent to the number are safe to trust
+// anywhere in the listing text. Patterns that infer a count from lot/piece phrasing without that
+// anchor (auction lot numbering, bundled non-knife items, dimensions, model numbers) are only
+// trusted against the short seller-authored title, where they're far less likely to misfire.
+function numericCount(title: string, description: string) {
+  const full = `${title} ${description}`.replace(/\s+/g, " ").trim();
+  const cleanTitle = title.replace(/\s+/g, " ").trim();
   const componentPattern = /\b(\d{1,3})\s*(?:(?:folding|pocket|kitchen|fixed[ -]blade)\s+)?(?:kn(?:ife|ives)|fixed\s+blades?)\b/gi;
-  const components = [...text.matchAll(componentPattern)].map((match) => Number(match[1])).filter((value) => Number.isInteger(value) && value > 0);
+  const components = [...full.matchAll(componentPattern)].map((match) => Number(match[1])).filter((value) => Number.isInteger(value) && value > 0);
   if (components.length > 1) return components.reduce((sum, value) => sum + value, 0);
-  const patterns = [
-    /\blot\s+(?:of\s+)?(\d{1,3})\b/i,
+  const explicitMatch = full.match(/\b(\d{1,3})\s*(?:pocket\s+|folding\s+)?kn(?:ife|ives)\b/i);
+  const explicitValue = Number(explicitMatch?.[1]);
+  if (Number.isInteger(explicitValue) && explicitValue > 0) return explicitValue;
+  if (components.length === 1) return components[0];
+  // No generic "x123" pattern here: it's indistinguishable from model numbers like "SOG X42"
+  // or dimensions like "4 x 90mm" with no reliable anchor, so those are left to Gemini vision.
+  const loosePatterns = [
+    /\blot\s+of\s+(\d{1,3})\b/i,
     /\b(\d{1,3})\s*(?:pc|pcs|piece|pieces)\b/i,
-    /\b(\d{1,3})\s*(?:pocket\s+|folding\s+)?kn(?:ife|ives)\b/i,
-    /\bx\s?(\d{1,3})\b/i,
   ];
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
+  for (const pattern of loosePatterns) {
+    const match = cleanTitle.match(pattern);
     const value = Number(match?.[1]);
     if (Number.isInteger(value) && value > 0) return value;
   }
-  if (components.length === 1) return components[0];
   const words = Object.keys(numberWords).join("|");
-  const wordMatch = text.match(new RegExp(`\\b(?:lot\\s+(?:of\\s+)?)?(${words})\\s+(?:pocket\\s+|folding\\s+)?kn(?:ife|ives)\\b`, "i"));
+  const wordMatch = full.match(new RegExp(`\\b(?:lot\\s+(?:of\\s+)?)?(${words})\\s+(?:pocket\\s+|folding\\s+)?kn(?:ife|ives)\\b`, "i"));
   return wordMatch ? numberWords[wordMatch[1].toLowerCase()] : null;
 }
 
 export function analyzeListingText(title: string, description = ""): TextAnalysis {
   const text = `${title} ${description}`.replace(/\s+/g, " ").trim();
   if (selectionPattern.test(text)) return { kind: "reject", reason: "selection_listing" };
-  const count = numericCount(text);
-  if (count && foldingPattern.test(text)) return { kind: "resolved", count, containsFoldingKnife: true, confidence: 0.99 };
+  const count = numericCount(title, description);
+  if (count && count <= FINDER_DEFAULTS.maxPlausibleKnifeCount && foldingPattern.test(text)) return { kind: "resolved", count, containsFoldingKnife: true, confidence: 0.99 };
   if (!lotPattern.test(text) && foldingPattern.test(text) && knifePattern.test(text)) {
     return { kind: "resolved", count: 1, containsFoldingKnife: true, confidence: 0.95 };
   }
