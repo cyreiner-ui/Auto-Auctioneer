@@ -47,6 +47,10 @@ export default function FinderDashboard() {
     const ok = await archiveIds([result.ebay_item_id]);
     if (ok) { setNotice("Link copied and archived."); window.setTimeout(() => setNotice(""), 1800); }
   };
+  const viewAndArchive = (result: FinderResult) => {
+    window.open(result.ebay_url, "_blank", "noopener,noreferrer");
+    void archiveIds([result.ebay_item_id]).then((ok) => { if (ok) { setNotice("Opened on eBay and archived."); window.setTimeout(() => setNotice(""), 1800); } });
+  };
   const latest = data?.runs[0];
 
   const friendlyError = (message: string) => {
@@ -71,9 +75,8 @@ export default function FinderDashboard() {
           busy={busy}
           emptyMessage="No qualifying snapshots yet. Run the finder or wait for the daily 6:00 AM search."
           actions={[
-            { label: "Archive", onClick: (result) => void archiveIds([result.ebay_item_id]) },
+            { label: "View & Archive", className: "primary", onClick: (result) => viewAndArchive(result) },
             { label: "Copy & Archive", onClick: (result) => void copyAndArchive(result) },
-            { label: "Delete", className: "danger", onClick: (result) => { if (window.confirm(`Delete "${result.title}"?`)) void deleteIds([result.ebay_item_id]); } },
           ]}
           bulkActions={[
             { label: "Archive", onClick: (ids) => void archiveIds(ids) },
