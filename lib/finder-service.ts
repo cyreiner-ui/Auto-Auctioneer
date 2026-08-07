@@ -60,6 +60,32 @@ function initialRow(item: EbayFinderItem, keywordPhrases: string[], runId: strin
   return { ...base, status: "pending", reason: null, next_attempt_at: new Date().toISOString() };
 }
 
+type ExistingFinderRow = {
+  ebay_item_id: string;
+  knife_count: number | null;
+  contains_folding_knife: boolean | null;
+  confidence: number | null;
+  detection_source: string | null;
+};
+
+function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, existing: ExistingFinderRow | undefined) {
+  const fresh = initialRow(item, keywordPhrases, runId);
+  if (!existing || existing.detection_source !== "vision" || existing.knife_count == null) return fresh;
+  const deal = calculateDeal(item.itemPrice, item.shippingCost, existing.knife_count, config().maxCost);
+  return {
+    ...fresh,
+    status: deal.qualifies ? "qualified" : "rejected",
+    reason: deal.reason,
+    knife_count: existing.knife_count,
+    contains_folding_knife: existing.contains_folding_knife,
+    confidence: existing.confidence,
+    detection_source: "vision",
+    total_cost: "totalCost" in deal ? deal.totalCost : null,
+    cost_per_knife: "costPerKnife" in deal ? deal.costPerKnife : null,
+    processed_at: new Date().toISOString(),
+  };
+}
+
 async function updateRunCounts(runId: string) {
   const { data, error } = await supabaseAdmin.from("finder_items").select("status").eq("run_id", runId);
   if (error) throw new Error(error.message);
@@ -75,10 +101,14 @@ async function updateRunCounts(runId: string) {
 
 export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: string) {
   const key = runKey || `${trigger}:${trigger === "scheduled" ? easternDateKey() : randomUUID()}`;
-  const { data: existing } = await supabaseAdmin.from("finder_runs").select("*").eq("run_key", key).maybeSingle();
-  if (existing) return { run: existing, created: false };
-  const { data: run, error: runError } = await supabaseAdmin.from("finder_runs").insert({ run_key: key, trigger }).select("*").single();
-  if (runError || !run) throw new Error(runError?.message || "Could not create finder run.");
+  const { data: inserted, error: insertError } = await supabaseAdmin.from("finder_runs").upsert({ run_key: key, trigger }, { onConflict: "run_key", ignoreDuplicates: true }).select("*");
+  if (insertError) throw new Error(insertError.message);
+  if (!inserted?.length) {
+    const { data: existing, error: existingError } = await supabaseAdmin.from("finder_runs").select("*").eq("run_key", key).single();
+    if (existingError || !existing) throw new Error(existingError?.message || "Could not load existing finder run.");
+    return { run: existing, created: false };
+  }
+  const run = inserted[0];
   try {
     const { data: keywords, error: keywordError } = await supabaseAdmin.from("finder_keywords").select("phrase").eq("enabled", true).order("created_at");
     if (keywordError) throw new Error(keywordError.message);
@@ -93,12 +123,18 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
         }
       } catch (error) { errors.push(error instanceof Error ? error.message : `Search failed for ${keyword.phrase}.`); }
     }
-    const rows = [...found.values()].map(({ item, phrases }) => initialRow(item, phrases, run.id));
-    let added = 0;
-    for (let index = 0; index < rows.length; index += 200) {
-      const { data, error } = await supabaseAdmin.from("finder_items").upsert(rows.slice(index, index + 200), { onConflict: "ebay_item_id", ignoreDuplicates: true }).select("ebay_item_id");
+    const ids = [...found.keys()];
+    const existingById = new Map<string, ExistingFinderRow>();
+    for (let index = 0; index < ids.length; index += 200) {
+      const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id, knife_count, contains_folding_knife, confidence, detection_source").in("ebay_item_id", ids.slice(index, index + 200));
       if (error) throw new Error(error.message);
-      added += data?.length || 0;
+      for (const row of data || []) existingById.set(row.ebay_item_id, row);
+    }
+    const rows = [...found.values()].map(({ item, phrases }) => refreshedRow(item, phrases, run.id, existingById.get(item.itemId)));
+    const added = ids.filter((id) => !existingById.has(id)).length;
+    for (let index = 0; index < rows.length; index += 200) {
+      const { error } = await supabaseAdmin.from("finder_items").upsert(rows.slice(index, index + 200), { onConflict: "ebay_item_id" });
+      if (error) throw new Error(error.message);
     }
     await supabaseAdmin.from("finder_runs").update({ keywords_scanned: keywords?.length || 0, items_seen: found.size, items_added: added, errors }).eq("id", run.id);
     await updateRunCounts(run.id);
@@ -166,5 +202,6 @@ export async function finderOverview() {
     keywords: keywords.data || [], results: results.data || [], runs: runs.data || [],
     counts: { pending: pending.count || 0, rejected: rejected.count || 0, qualified: qualified.count || 0 },
     budget: { mode: process.env.GEMINI_PAID_MODE === "true" ? "paid" : "free", paidAnalyses: paid, monthlyLimit: config().monthlyLimit, remaining: Math.max(0, config().monthlyLimit - paid), projectedMaximum: paid * 0.001 },
+    settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: config().maxCost },
   };
 }

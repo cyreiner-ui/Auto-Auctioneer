@@ -16,14 +16,9 @@ function monthlyLimit() { return Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMI
 
 async function reserveUsage() {
   const month = monthKey();
-  const { data, error } = await supabaseAdmin.from("finder_vision_usage").select("free_analyses, paid_analyses").eq("month", month).maybeSingle();
+  const { data, error } = await supabaseAdmin.rpc("reserve_finder_vision_usage", { p_month: month, p_paid_mode: paidMode(), p_monthly_limit: monthlyLimit() }).single();
   if (error) throw new Error(error.message);
-  const free = Number(data?.free_analyses || 0);
-  const paid = Number(data?.paid_analyses || 0);
-  if (paidMode() && paid >= monthlyLimit()) throw new VisionBudgetError("Monthly Gemini analysis limit reached.");
-  const values = paidMode() ? { month, free_analyses: free, paid_analyses: paid + 1, updated_at: new Date().toISOString() } : { month, free_analyses: free + 1, paid_analyses: paid, updated_at: new Date().toISOString() };
-  const { error: saveError } = await supabaseAdmin.from("finder_vision_usage").upsert(values);
-  if (saveError) throw new Error(saveError.message);
+  if (!data?.reserved) throw new VisionBudgetError("Monthly Gemini analysis limit reached.");
 }
 
 function compactEbayImage(url: string) { return url.replace(/s-l\d+/i, "s-l640"); }
