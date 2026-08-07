@@ -205,3 +205,9 @@ export async function finderOverview() {
     settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: config().maxCost },
   };
 }
+
+export async function archivedFinderItems() {
+  const { data, error } = await supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").not("dismissed_at", "is", null).order("dismissed_at", { ascending: false }).limit(500);
+  if (error) throw new Error(error.message);
+  return { results: data || [] };
+}
