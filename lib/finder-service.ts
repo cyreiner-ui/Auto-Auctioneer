@@ -188,11 +188,11 @@ export async function finderTick(date = new Date()) {
 export async function finderOverview() {
   const [keywords, results, runs, pending, rejected, qualified, usage] = await Promise.all([
     supabaseAdmin.from("finder_keywords").select("*").order("created_at"),
-    supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").order("discovered_at", { ascending: false }).limit(500),
+    supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").is("dismissed_at", null).order("discovered_at", { ascending: false }).limit(500),
     supabaseAdmin.from("finder_runs").select("*").order("started_at", { ascending: false }).limit(10),
     supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).eq("status", "pending"),
     supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).in("status", ["rejected", "error"]),
-    supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).eq("status", "qualified"),
+    supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).eq("status", "qualified").is("dismissed_at", null),
     supabaseAdmin.from("finder_vision_usage").select("*").eq("month", monthKey()).maybeSingle(),
   ]);
   const firstError = [keywords.error, results.error, runs.error, pending.error, rejected.error, qualified.error, usage.error].find(Boolean);
