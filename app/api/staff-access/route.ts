@@ -16,3 +16,9 @@ export async function POST(request: Request) {
   response.cookies.set(COOKIE_NAME, staffSessionToken(expected), { httpOnly: true, sameSite: "lax", secure: true, maxAge: 60 * 60 * 24 * 30, path: "/" });
   return response;
 }
+
+export async function DELETE() {
+  const response = NextResponse.json({ ok: true });
+  response.cookies.set(COOKIE_NAME, "", { httpOnly: true, sameSite: "lax", secure: true, maxAge: 0, path: "/" });
+  return response;
+}
