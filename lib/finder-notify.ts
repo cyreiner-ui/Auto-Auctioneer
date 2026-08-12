@@ -1,4 +1,4 @@
-const RESEND_API_URL = "https://api.resend.com/emails";
+import nodemailer from "nodemailer";
 
 export type NotifiableFinderItem = {
   ebay_item_id: string;
@@ -13,12 +13,13 @@ export type NotifiableFinderItem = {
 };
 
 const usd = (value: number | null) => (value == null ? "—" : Number(value).toLocaleString("en-US", { style: "currency", currency: "USD" }));
+const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char] as string));
 
 function renderEmailHtml(items: NotifiableFinderItem[]) {
   const rows = items.map((item) => `
     <tr>
       <td style="padding:12px 0;border-bottom:1px solid #e5e5e5;">
-        <a href="${item.ebay_url}" style="font-weight:600;color:#111;text-decoration:none;">${item.title}</a><br/>
+        <a href="${item.ebay_url}" style="font-weight:600;color:#111;text-decoration:none;">${escapeHtml(item.title)}</a><br/>
         <span>${item.knife_count ?? "?"} knives · ${usd(item.total_cost)} total · ${usd(item.cost_per_knife)}/knife</span><br/>
         <a href="${item.ebay_url}">View on eBay</a>
       </td>
@@ -26,22 +27,31 @@ function renderEmailHtml(items: NotifiableFinderItem[]) {
   return `<table style="width:100%;border-collapse:collapse;font-family:sans-serif;">${rows}</table>`;
 }
 
+function transportConfig() {
+  const host = process.env.SMTP_HOST?.trim();
+  const user = process.env.SMTP_USER?.trim();
+  const password = process.env.SMTP_PASSWORD?.trim();
+  if (!host || !user || !password) return null;
+  const port = Number(process.env.SMTP_PORT || 587);
+  return { host, port, secure: port === 465, auth: { user, pass: password } };
+}
+
 export async function sendQualifiedItemsEmail(items: NotifiableFinderItem[]) {
   if (!items.length) return { ok: true, skipped: true as const };
-  const apiKey = process.env.RESEND_API_KEY?.trim();
-  const from = process.env.FINDER_ALERT_EMAIL_FROM?.trim();
+  const transportOptions = transportConfig();
+  const from = process.env.FINDER_ALERT_EMAIL_FROM?.trim() || transportOptions?.auth.user;
   const to = (process.env.FINDER_ALERT_EMAILS || "").split(",").map((address) => address.trim()).filter(Boolean);
-  if (!apiKey || !from || !to.length) return { ok: false, skipped: true as const, message: "Email alerts are not configured (RESEND_API_KEY/FINDER_ALERT_EMAIL_FROM/FINDER_ALERT_EMAILS)." };
-  const response = await fetch(RESEND_API_URL, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
+  if (!transportOptions || !from || !to.length) return { ok: false, skipped: true as const, message: "Email alerts are not configured (SMTP_HOST/SMTP_USER/SMTP_PASSWORD/FINDER_ALERT_EMAILS)." };
+  try {
+    const transporter = nodemailer.createTransport(transportOptions);
+    await transporter.sendMail({
       from,
       to,
       subject: `${items.length} new pocket knife deal${items.length === 1 ? "" : "s"} found`,
       html: renderEmailHtml(items),
-    }),
-  });
-  if (!response.ok) return { ok: false, message: `Resend request failed (${response.status}): ${await response.text().catch(() => "")}` };
-  return { ok: true };
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Sending the alert email failed." };
+  }
 }

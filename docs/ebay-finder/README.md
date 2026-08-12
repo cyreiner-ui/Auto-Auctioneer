@@ -34,11 +34,18 @@ watching against eBay's API rate limits.
 
 ## Email alerts
 
-Set `RESEND_API_KEY`, `FINDER_ALERT_EMAIL_FROM` (a sender verified in your
-Resend account — the sandbox `onboarding@resend.dev` address only delivers to
-the Resend account owner's own email, so a verified sending domain is needed
-to reach both staff members), and `FINDER_ALERT_EMAILS` (comma-separated
-recipient addresses). When a finder run or vision pass qualifies new items, one
-email listing all of them is sent to the configured recipients. If any of
-these three variables is unset, email sending is skipped silently (useful for
-local development).
+Alerts send over plain SMTP (`lib/finder-notify.ts`, via `nodemailer`) using
+an existing mailbox — no separate email-provider account needed. Set:
+
+- `SMTP_HOST` / `SMTP_PORT` — e.g. `smtp.gmail.com` / `587` for Gmail.
+- `SMTP_USER` — the sending mailbox address (e.g. a Gmail address).
+- `SMTP_PASSWORD` — an **app password**, not the account's login password.
+  For Gmail: turn on 2-Step Verification, then create one at
+  https://myaccount.google.com/apppasswords.
+- `FINDER_ALERT_EMAIL_FROM` — defaults to `SMTP_USER` if unset.
+- `FINDER_ALERT_EMAILS` — comma-separated recipient addresses (both staff).
+
+When a finder run or vision pass qualifies new items, one email listing all
+of them is sent to the configured recipients. If `SMTP_HOST`/`SMTP_USER`/
+`SMTP_PASSWORD`/`FINDER_ALERT_EMAILS` aren't all set, email sending is
+skipped silently (useful for local development).
