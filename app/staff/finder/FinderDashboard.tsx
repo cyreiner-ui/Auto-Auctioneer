@@ -4,8 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import FinderResultsGrid, { type FinderResult } from "./FinderResultsGrid";
 
-type Run = { id: string; trigger: string; status: string; keywords_scanned: number; items_seen: number; items_added: number; qualified: number; rejected: number; errors: string[]; started_at: string };
-type Overview = { results: FinderResult[]; runs: Run[]; counts: { pending: number; rejected: number; qualified: number }; settings: { zip: string; maxCostPerKnife: number } };
+type Run = { id: string; trigger: string; status: string; keywords_scanned: number; current_keyword: string | null; items_seen: number; items_added: number; qualified: number; rejected: number; errors: string[]; started_at: string };
+type Overview = { results: FinderResult[]; runs: Run[]; keywords: { id: string; phrase: string; enabled: boolean }[]; counts: { pending: number; rejected: number; qualified: number }; settings: { zip: string; maxCostPerKnife: number } };
 
 const usd = (value: number) => Number(value || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 const RUN_STATUS_LABEL: Record<string, string> = { running: "Working…", completed: "Done", failed: "Had a problem" };
@@ -25,8 +25,9 @@ export default function FinderDashboard() {
 
   useEffect(() => { const timer = window.setTimeout(() => void load().catch((reason) => setError(reason.message)), 0); return () => window.clearTimeout(timer); }, [load]);
   useEffect(() => {
-    if (!data?.counts.pending && !data?.runs.some((run) => run.status === "running")) return;
-    const timer = window.setInterval(() => void load().catch(() => undefined), 15000);
+    const runningNow = data?.runs.some((run) => run.status === "running");
+    if (!data?.counts.pending && !runningNow) return;
+    const timer = window.setInterval(() => void load().catch(() => undefined), runningNow ? 2000 : 15000);
     return () => window.clearInterval(timer);
   }, [data, load]);
 
@@ -56,6 +57,8 @@ export default function FinderDashboard() {
     void archiveIds([result.ebay_item_id]).then((ok) => { if (ok) { setNotice("Opened on eBay and archived."); window.setTimeout(() => setNotice(""), 1800); } });
   };
   const latest = data?.runs[0];
+  const totalKeywords = data?.keywords.filter((keyword) => keyword.enabled).length || latest?.keywords_scanned || 0;
+  const progressPercent = latest?.status === "running" && totalKeywords ? Math.min(100, Math.round((latest.keywords_scanned / totalKeywords) * 100)) : 0;
 
   const friendlyError = (message: string) => {
     if (message.includes("finder_") || message.includes("relation")) return "Apply the finder database migration, then reload this page.";
@@ -72,7 +75,9 @@ export default function FinderDashboard() {
       <section className="finder-stats">
         <div><small>GOOD DEALS FOUND</small><strong>{data.counts.qualified}</strong></div><div><small>STILL CHECKING</small><strong>{data.counts.pending}</strong></div><div><small>NOT A MATCH</small><strong>{data.counts.rejected}</strong></div>
       </section>
-      <section className="finder-runs"><div className="section-title"><div><p className="eyebrow">LATEST SEARCH</p><h2>{latest ? new Date(latest.started_at).toLocaleString() : "Not run yet"}</h2></div>{latest && <span className={`run-status ${latest.status}`}>{RUN_STATUS_LABEL[latest.status] || latest.status}</span>}</div>{latest && <p className="muted">Found {latest.qualified} good deal{latest.qualified === 1 ? "" : "s"} from {latest.items_added} new listing{latest.items_added === 1 ? "" : "s"}.</p>}{latest?.errors?.map((message) => <p className="finder-run-error" key={message}>{message}</p>)}</section>
+      <section className="finder-runs"><div className="section-title"><div><p className="eyebrow">LATEST SEARCH</p><h2>{latest ? new Date(latest.started_at).toLocaleString() : "Not run yet"}</h2></div>{latest && <span className={`run-status ${latest.status}`}>{RUN_STATUS_LABEL[latest.status] || latest.status}</span>}</div>
+        {latest?.status === "running" && <div className="finder-progress"><div className="budget-meter" role="progressbar" aria-valuenow={progressPercent} aria-valuemin={0} aria-valuemax={100} aria-label="Search progress"><span style={{ width: `${progressPercent}%` }} /></div><p className="muted">Searching {latest.keywords_scanned}/{totalKeywords || "…"}{latest.current_keyword ? `: “${latest.current_keyword}”` : ""}</p></div>}
+        {latest && latest.status !== "running" && <p className="muted">Found {latest.qualified} good deal{latest.qualified === 1 ? "" : "s"} from {latest.items_added} new listing{latest.items_added === 1 ? "" : "s"}.</p>}{latest?.errors?.map((message) => <p className="finder-run-error" key={message}>{message}</p>)}</section>
       <section className="finder-results"><div className="section-title"><div><p className="eyebrow">QUALIFYING SNAPSHOTS</p><h2>Deals at or below $3.50 per knife</h2></div></div>
         <FinderResultsGrid
           results={data.results}

@@ -143,6 +143,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     if (keywordError) throw new Error(keywordError.message);
     const found = new Map<string, { item: EbayFinderItem; phrases: string[] }>();
     const errors: string[] = [];
+    let scanned = 0;
     for (const keyword of keywords || []) {
       try {
         for (const item of await searchEbayKeyword(keyword.phrase, config().searchDepth)) {
@@ -151,6 +152,8 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
           else found.set(item.itemId, { item, phrases: [keyword.phrase] });
         }
       } catch (error) { errors.push(error instanceof Error ? error.message : `Search failed for ${keyword.phrase}.`); }
+      scanned++;
+      await supabaseAdmin.from("finder_runs").update({ keywords_scanned: scanned, current_keyword: keyword.phrase }).eq("id", run.id);
     }
     const ids = [...found.keys()];
     const existingById = new Map<string, ExistingFinderRow>();
@@ -165,7 +168,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
       const { error } = await supabaseAdmin.from("finder_items").upsert(rows.slice(index, index + 200), { onConflict: "ebay_item_id" });
       if (error) throw new Error(error.message);
     }
-    await supabaseAdmin.from("finder_runs").update({ keywords_scanned: keywords?.length || 0, items_seen: found.size, items_added: added, errors }).eq("id", run.id);
+    await supabaseAdmin.from("finder_runs").update({ keywords_scanned: keywords?.length || 0, current_keyword: null, items_seen: found.size, items_added: added, errors }).eq("id", run.id);
     await updateRunCounts(run.id);
     await notifyNewlyQualified(rows.filter((row) => row.status === "qualified").map((row) => row.ebay_item_id));
     const { data: refreshed } = await supabaseAdmin.from("finder_runs").select("*").eq("id", run.id).single();
