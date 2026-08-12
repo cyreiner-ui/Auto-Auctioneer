@@ -2,7 +2,36 @@ import { randomUUID } from "node:crypto";
 import { searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
 import { analyzeListingText, calculateDeal, FINDER_DEFAULTS, isDailyFinderHour, monthKey } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
+import { addSnipe } from "./gixen-client";
+import { sendQualifiedItemsEmail } from "./finder-notify";
 import { supabaseAdmin } from "./supabase-admin";
+
+async function notifyNewlyQualified(ebayItemIds: string[]) {
+  if (!ebayItemIds.length) return;
+  const { data, error } = await supabaseAdmin
+    .from("finder_items")
+    .select("ebay_item_id, title, ebay_url, image_url, item_price, shipping_cost, total_cost, cost_per_knife, knife_count, notified_at, gixen_status")
+    .eq("status", "qualified")
+    .in("ebay_item_id", ebayItemIds);
+  if (error || !data?.length) return;
+  const unnotified = data.filter((row) => !row.notified_at);
+  if (unnotified.length) {
+    const emailResult = await sendQualifiedItemsEmail(unnotified);
+    if (emailResult.ok) {
+      await supabaseAdmin.from("finder_items").update({ notified_at: new Date().toISOString() }).in("ebay_item_id", unnotified.map((row) => row.ebay_item_id));
+    }
+  }
+  const unsent = data.filter((row) => !row.gixen_status);
+  for (const row of unsent) {
+    const totalCost = row.total_cost != null ? Number(row.total_cost) : Number(row.item_price) + Number(row.shipping_cost || 0);
+    const result = await addSnipe({ itemId: row.ebay_item_id, maxBid: totalCost });
+    await supabaseAdmin.from("finder_items").update({
+      gixen_status: result.ok ? "sent" : "failed",
+      gixen_message: result.message,
+      gixen_sent_at: result.ok ? new Date().toISOString() : null,
+    }).eq("ebay_item_id", row.ebay_item_id);
+  }
+}
 
 type FinderRow = {
   ebay_item_id: string;
@@ -138,6 +167,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     }
     await supabaseAdmin.from("finder_runs").update({ keywords_scanned: keywords?.length || 0, items_seen: found.size, items_added: added, errors }).eq("id", run.id);
     await updateRunCounts(run.id);
+    await notifyNewlyQualified(rows.filter((row) => row.status === "qualified").map((row) => row.ebay_item_id));
     const { data: refreshed } = await supabaseAdmin.from("finder_runs").select("*").eq("id", run.id).single();
     return { run: refreshed, created: true };
   } catch (error) {
@@ -153,6 +183,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   let processed = 0;
   let deferred = 0;
   const runIds = new Set<string>();
+  const qualifiedIds: string[] = [];
   for (const row of (data || []) as FinderRow[]) {
     if (row.run_id) runIds.add(row.run_id);
     try {
@@ -163,6 +194,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       const reason = !vision.containsFoldingKnife ? "no_folding_knife" : vision.confidence < config().confidence ? (vision.uncertaintyReason || "low_confidence") : vision.knifeCount < 1 ? "invalid_count" : deal?.reason;
       const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: qualifies ? "qualified" : "rejected", reason, knife_count: vision.knifeCount || null, contains_folding_knife: vision.containsFoldingKnife, confidence: vision.confidence, detection_source: "vision", total_cost: deal && "totalCost" in deal ? deal.totalCost : null, cost_per_knife: deal && "costPerKnife" in deal ? deal.costPerKnife : null, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
       if (saveError) throw new Error(saveError.message);
+      if (qualifies) qualifiedIds.push(row.ebay_item_id);
       processed++;
     } catch (itemError) {
       if (itemError instanceof VisionQuotaError || itemError instanceof VisionBudgetError) {
@@ -175,6 +207,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
     }
   }
   for (const runId of runIds) await updateRunCounts(runId);
+  await notifyNewlyQualified(qualifiedIds);
   return { processed, deferred };
 }
 
