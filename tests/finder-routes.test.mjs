@@ -137,23 +137,59 @@ test("DELETE /api/finder/items removes the matching rows", async () => {
   });
 });
 
-test("POST /api/finder/items/gixen sends the item's total cost to Gixen and persists the result", async () => {
+test("POST /api/finder/items/gixen sends the entered max bid to Gixen and persists it", async () => {
   await withEnv({ ...BASE_ENV, GIXEN_USERNAME: "buyer", GIXEN_PASSWORD: "secret" }, async () => {
     await withRoutesBackend({ finder_items: [{ ebay_item_id: "v1|1|0", item_price: 30, shipping_cost: 5, total_cost: 35, buying_options: ["AUCTION"] }] }, async (fake) => {
-      const missingId = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({})));
+      const missingId = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({ maxBid: 40 })));
       assert.equal(missingId.status, 400);
 
-      const notFound = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({ ebayItemId: "does-not-exist" })));
+      const notFound = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({ ebayItemId: "does-not-exist", maxBid: 40 })));
       assert.equal(notFound.status, 404);
 
       let seenMaxBid;
       await withFetch([{ test: (url) => url.includes("gixen.com/api.php"), respond: (url) => { seenMaxBid = new URL(url).searchParams.get("maxbid"); return textResponse("OK v1|1|0 ADDED"); } }], async () => {
-        const response = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({ ebayItemId: "v1|1|0" })));
+        const response = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({ ebayItemId: "v1|1|0", maxBid: 42.5 })));
         assert.equal(response.status, 200);
         const body = await response.json();
         assert.equal(body.ok, true);
-        assert.equal(seenMaxBid, "35.00");
+        assert.equal(seenMaxBid, "42.50", "the user-entered bid is sent, not the item's total_cost");
         assert.equal(fake.tables.finder_items[0].gixen_status, "sent");
+        assert.equal(fake.tables.finder_items[0].max_bid, 42.5);
+      });
+    });
+  });
+});
+
+test("POST /api/finder/items/gixen rejects a missing, zero, negative, or non-numeric max bid", async () => {
+  await withEnv({ ...BASE_ENV, GIXEN_USERNAME: "buyer", GIXEN_PASSWORD: "secret" }, async () => {
+    await withRoutesBackend({ finder_items: [{ ebay_item_id: "v1|1|0", item_price: 30, shipping_cost: 5, total_cost: 35, buying_options: ["AUCTION"] }] }, async () => {
+      for (const maxBid of [undefined, 0, -5, "not-a-number"]) {
+        const body = maxBid === undefined ? {} : { maxBid };
+        const response = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({ ebayItemId: "v1|1|0", ...body })));
+        assert.equal(response.status, 400, `maxBid=${JSON.stringify(maxBid)} should be rejected`);
+        assert.match((await response.json()).error, /valid max bid/i);
+      }
+    });
+  });
+});
+
+test("POST /api/finder/items/gixen persists the entered max bid even when the Gixen send fails", async () => {
+  await withEnv({ ...BASE_ENV, GIXEN_USERNAME: "buyer", GIXEN_PASSWORD: "secret" }, async () => {
+    await withRoutesBackend({ finder_items: [{ ebay_item_id: "v1|1|0", item_price: 30, shipping_cost: 5, total_cost: 35, buying_options: ["AUCTION"] }] }, async (fake) => {
+      await withFetch([{ test: (url) => url.includes("gixen.com/api.php"), respond: () => textResponse("ERROR (211): item already ended") }], async () => {
+        const response = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({ ebayItemId: "v1|1|0", maxBid: 42.5 })));
+        const body = await response.json();
+        assert.equal(body.ok, false);
+        assert.equal(fake.tables.finder_items[0].gixen_status, "failed");
+        assert.equal(fake.tables.finder_items[0].max_bid, 42.5, "the typed bid must survive a failed send");
+      });
+
+      await withFetch([{ test: (url) => url.includes("gixen.com/api.php"), respond: (url) => textResponse(`OK ${new URL(url).searchParams.get("maxbid")} ADDED`) }], async () => {
+        const retry = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({ ebayItemId: "v1|1|0", maxBid: 50 })));
+        const retryBody = await retry.json();
+        assert.equal(retryBody.ok, true, "a corrected bid on retry should succeed");
+        assert.equal(fake.tables.finder_items[0].gixen_status, "sent");
+        assert.equal(fake.tables.finder_items[0].max_bid, 50, "the corrected bid overwrites the earlier one");
       });
     });
   });
@@ -171,12 +207,13 @@ test("POST /api/finder/items/gixen drives the browser automation path when GIXEN
       };
       __setGixenDriver(driver);
       try {
-        const response = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({ ebayItemId: "v1|1|0" })));
+        const response = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({ ebayItemId: "v1|1|0", maxBid: 42.5 })));
         assert.equal(response.status, 200);
         const body = await response.json();
         assert.equal(body.ok, true);
-        assert.equal(seenMaxBid, "35.00");
+        assert.equal(seenMaxBid, "42.50");
         assert.equal(fake.tables.finder_items[0].gixen_status, "sent");
+        assert.equal(fake.tables.finder_items[0].max_bid, 42.5);
       } finally {
         __resetGixenDriver();
       }

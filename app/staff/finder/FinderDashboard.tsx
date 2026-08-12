@@ -43,9 +43,9 @@ export default function FinderDashboard() {
 
   const archiveIds = (ebayItemIds: string[]) => request("/api/finder/items", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ebayItemIds, dismissed: true }) });
   const deleteIds = (ids: string[]) => request("/api/finder/items", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) });
-  const retryGixen = async (result: FinderResult) => {
-    const payload = await request("/api/finder/items/gixen", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ebayItemId: result.ebay_item_id }) });
-    if (payload) { setNotice(payload.ok ? "Sent to Gixen." : `Gixen send failed: ${payload.message || ""}`); window.setTimeout(() => setNotice(""), 2600); }
+  const setBidAndSend = async (result: FinderResult, maxBid: number) => {
+    const payload = await request("/api/finder/items/gixen", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ebayItemId: result.ebay_item_id, maxBid }) });
+    if (payload) { setNotice(payload.ok ? "Bid saved and sent to Gixen." : `Gixen send failed: ${payload.message || ""}`); window.setTimeout(() => setNotice(""), 2600); }
   };
   const copyAndArchive = async (result: FinderResult) => {
     try { await navigator.clipboard?.writeText(result.ebay_url); } catch { /* clipboard access is best-effort */ }
@@ -86,12 +86,12 @@ export default function FinderDashboard() {
           actions={[
             { label: "View & Archive", className: "primary", onClick: (result) => viewAndArchive(result) },
             { label: "Copy & Archive", onClick: (result) => void copyAndArchive(result) },
-            { label: "Retry Gixen", visible: (result) => result.gixen_status === "failed", onClick: (result) => void retryGixen(result) },
           ]}
           bulkActions={[
             { label: "Archive", onClick: (ids) => void archiveIds(ids) },
             { label: "Delete", className: "danger", onClick: (ids) => { if (window.confirm(`Delete ${ids.length} item${ids.length === 1 ? "" : "s"}?`)) void deleteIds(ids); } },
           ]}
+          bidAction={{ onSubmit: setBidAndSend }}
         />
       </section>
     </>}

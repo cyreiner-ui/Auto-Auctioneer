@@ -1,11 +1,14 @@
-# Gixen auto-send
+# Sending items to Gixen
 
-Every time the finder qualifies a new item, it's automatically added to your
-Gixen account's snipe queue — no click required. This removes the manual
-"WhatsApp it, then type it into Gixen" step.
+Qualifying an item no longer sends anything to Gixen automatically.
+Auction-format items sit on the `/staff/finder` results grid with no Gixen
+action until you enter your real max bid and press "Set & Send" on that
+item's card. Fixed-price (Buy It Now) items are still marked "Not an
+auction" automatically at qualification time — Gixen never sees those.
 
 Gixen still does the actual sniping at auction close; this integration only
-adds/removes items from Gixen's snipe list.
+adds/removes items from Gixen's snipe list, with the bid you actually typed
+in.
 
 ## How it sends to Gixen
 
@@ -24,13 +27,15 @@ redeploy needed.
 
 ## What this does — and doesn't — do
 
-- The app does **not** decide your real max bid. It sends a placeholder max
-  bid (the qualifying total cost, i.e. item price + shipping) just so Gixen
-  accepts the item into the queue. **You must log into Gixen and set the real
-  max bid yourself before each auction closes**, same as before.
-- If a send fails (bad credentials, Gixen API error, etc.), the item's card
-  in `/staff/finder` shows a "Gixen send failed" badge with a "Retry Gixen"
-  button.
+- You set your real max bid directly on the item's card in `/staff/finder`
+  before anything is sent — there is no placeholder bid anymore, and nothing
+  reaches Gixen until you do this. The bid you enter is saved on the item
+  even if the send to Gixen fails, so a failed attempt never loses what you
+  typed — the card's "Retry with this bid" button resubmits it.
+- Once an item shows "Sent to Gixen," the app has no way to change that
+  snipe's bid in place (Gixen's driver only supports adding or deleting a
+  snipe, not updating one) — correct it directly on Gixen's own site if you
+  need to change the bid after a successful send.
 - Gixen only snipes eBay **auctions** — a fixed-price (Buy It Now) listing has
   no bid to time, and Gixen rejects it. The finder still surfaces fixed-price
   deals (they're useful for manual purchase), but `addSnipe` is only ever
@@ -66,6 +71,6 @@ automated tests (only the driver-seam logic in `lib/gixen-client.ts` is).
 Before turning on `GIXEN_AUTOMATION_MODE=browser` in production, validate it
 live first: use the single-item "Retry Gixen" button on one real qualified
 item in `/staff/finder` and confirm the item actually appears in Gixen's own
-"My Snipes" list, before relying on the unattended background loop. Since
-adding a snipe only ever sets a placeholder max bid (see above), this is
-low-stakes — no real bid gets placed by this step alone.
+"My Snipes" list, before relying on this for every auction item going
+forward. Since Gixen still requires you to type in a real max bid before
+sending, testing this live with a deliberately low bid is low-stakes.

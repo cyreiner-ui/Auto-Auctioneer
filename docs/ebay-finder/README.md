@@ -4,7 +4,7 @@ The staff finder lives at `/staff/finder`. It searches the first 500 eBay Best M
 
 ## Setup
 
-1. Apply `supabase/migrations/006_ebay_finder.sql` and `010_finder_brand_keywords.sql` to the existing Supabase project.
+1. Apply `supabase/migrations/006_ebay_finder.sql`, `010_finder_brand_keywords.sql`, and `013_finder_items_max_bid.sql` to the existing Supabase project.
 2. Set `GEMINI_API_KEY` to a key from a dedicated Google AI Studio project.
 3. Keep `GEMINI_PAID_MODE=false` while using the free tier. If billing is later enabled, set it to `true`; the app stops after `GEMINI_MONTHLY_ANALYSIS_LIMIT` paid analyses in each UTC calendar month.
 4. Set the deployed scheduler's `FINDER_TICK_URL` to the app's `/api/finder/tick` URL and deploy the scheduler with the same `BID_SCHEDULER_SECRET` used by the app.
@@ -53,3 +53,9 @@ When a finder run or vision pass qualifies new items, one email listing all
 of them is sent to the configured recipients. If `SMTP_HOST`/`SMTP_USER`/
 `SMTP_PASSWORD`/`FINDER_ALERT_EMAILS` aren't all set, email sending is
 skipped silently (useful for local development).
+
+Only auction-format qualifying items trigger this email — fixed-price (Buy
+It Now) listings never need a Gixen bid, so they don't need this alert. The
+email's purpose is specifically to prompt you to open `/staff/finder` and
+enter a real max bid on the new auction item(s) before they close (see
+`docs/gixen-integration/README.md`).

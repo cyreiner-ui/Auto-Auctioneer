@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
 import { analyzeListingText, calculateDeal, FINDER_DEFAULTS, isDailyFinderHour, monthKey } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
-import { addSnipe, isAuctionFormat } from "./gixen-client";
+import { isAuctionFormat } from "./gixen-client";
 import { sendQualifiedItemsEmail } from "./finder-notify";
 import { supabaseAdmin } from "./supabase-admin";
 
@@ -14,15 +14,14 @@ async function notifyNewlyQualified(ebayItemIds: string[]) {
     .eq("status", "qualified")
     .in("ebay_item_id", ebayItemIds);
   if (error || !data?.length) return;
-  const unnotified = data.filter((row) => !row.notified_at);
+  const unnotified = data.filter((row) => !row.notified_at && isAuctionFormat(row.buying_options));
   if (unnotified.length) {
     const emailResult = await sendQualifiedItemsEmail(unnotified);
     if (emailResult.ok) {
       await supabaseAdmin.from("finder_items").update({ notified_at: new Date().toISOString() }).in("ebay_item_id", unnotified.map((row) => row.ebay_item_id));
     }
   }
-  const unsent = data.filter((row) => !row.gixen_status);
-  const [notAuction, snipeable] = [unsent.filter((row) => !isAuctionFormat(row.buying_options)), unsent.filter((row) => isAuctionFormat(row.buying_options))];
+  const notAuction = data.filter((row) => !row.gixen_status && !isAuctionFormat(row.buying_options));
   if (notAuction.length) {
     await supabaseAdmin.from("finder_items").update({
       gixen_status: "not_auction",
@@ -30,15 +29,10 @@ async function notifyNewlyQualified(ebayItemIds: string[]) {
       gixen_sent_at: null,
     }).in("ebay_item_id", notAuction.map((row) => row.ebay_item_id));
   }
-  for (const row of snipeable) {
-    const totalCost = row.total_cost != null ? Number(row.total_cost) : Number(row.item_price) + Number(row.shipping_cost || 0);
-    const result = await addSnipe({ itemId: row.ebay_item_id, maxBid: totalCost });
-    await supabaseAdmin.from("finder_items").update({
-      gixen_status: result.ok ? "sent" : "failed",
-      gixen_message: result.message,
-      gixen_sent_at: result.ok ? new Date().toISOString() : null,
-    }).eq("ebay_item_id", row.ebay_item_id);
-  }
+  // Auction-format items are intentionally left alone here — gixen_status
+  // stays whatever it already was (null on first qualification). Sending to
+  // Gixen now only happens when a human enters a real max bid via
+  // POST /api/finder/items/gixen (the inline bid control in FinderResultsGrid).
 }
 
 type FinderRow = {

@@ -35,7 +35,6 @@ const TOKEN_URL = "https://api.sandbox.ebay.com/identity/v1/oauth2/token";
 const SEARCH_URL = "https://api.sandbox.ebay.com/buy/browse/v1/item_summary/search";
 const tokenRoute = { test: (url) => url.startsWith(TOKEN_URL), respond: () => jsonResponse({ access_token: "fake-token" }) };
 const gixenOkRoute = { test: (url) => url.includes("gixen.com/api.php"), respond: () => textResponse("OK snipe ADDED") };
-const gixenFailRoute = { test: (url) => url.includes("gixen.com/api.php"), respond: () => textResponse("ERROR (211): item already ended") };
 const imageRoute = { test: (url) => url.includes("i.ebayimg.com"), respond: () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/jpeg" } }) };
 const geminiRoute = (body) => ({ test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => jsonResponse({ candidates: [{ content: { parts: [{ text: JSON.stringify(body) }] } }] }) });
 
@@ -76,15 +75,16 @@ function mockMailer(t, capture) {
   }));
 }
 
-test("startFinderRun finds a qualifying item, sends it to Gixen, and emails the alert", async (t) => {
+test("startFinderRun qualifies an auction item, emails the alert, but does not auto-send to Gixen", async (t) => {
   await withEnv(ENV, async () => {
     const sent = [];
     mockMailer(t, sent);
+    let gixenCalled = false;
     await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
       await withFetch([
         tokenRoute,
         { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem()] }) },
-        gixenOkRoute,
+        { test: (url) => url.includes("gixen.com/api.php"), respond: () => { gixenCalled = true; return textResponse("OK snipe ADDED"); } },
       ], async () => {
         const { run, created } = await startFinderRun("manual", "run-1");
         assert.equal(created, true);
@@ -97,11 +97,45 @@ test("startFinderRun finds a qualifying item, sends it to Gixen, and emails the 
         assert.equal(item.knife_count, 10);
         assert.equal(item.cost_per_knife, 3.5);
         assert.equal(item.detection_source, "text");
-        assert.equal(item.gixen_status, "sent");
-        assert.ok(item.gixen_sent_at);
+        assert.equal(item.gixen_status, undefined, "qualifying no longer auto-sends to Gixen");
+        assert.equal(item.gixen_sent_at, undefined);
+        assert.equal(item.max_bid, undefined);
         assert.ok(item.notified_at);
+        assert.equal(gixenCalled, false);
         assert.equal(sent.length, 1);
         assert.match(sent[0].html, /Lot of 10 Smith &amp; Wesson Pocket Knives/);
+      });
+    });
+  });
+});
+
+test("startFinderRun only emails auction-format items in a mixed qualifying batch", async (t) => {
+  await withEnv(ENV, async () => {
+    const sent = [];
+    mockMailer(t, sent);
+    await withFakeBackend({
+      finder_keywords: [
+        { id: "k1", phrase: "auction lot", enabled: true, created_at: "2026-01-01" },
+        { id: "k2", phrase: "fixed lot", enabled: true, created_at: "2026-01-02" },
+      ],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: (url) => new URL(url).searchParams.get("q") === "fixed lot"
+            ? jsonResponse({ itemSummaries: [ebayItem({ itemId: "v1|2|0", itemWebUrl: "https://www.ebay.com/itm/2", title: "Lot of 10 Fixed Price Pocket Knives", buyingOptions: ["FIXED_PRICE"] })] })
+            : jsonResponse({ itemSummaries: [ebayItem()] }),
+        },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-mixed");
+        assert.equal(run.qualified, 2);
+        assert.equal(sent.length, 1, "only the auction item should trigger an alert email");
+        assert.match(sent[0].html, /Lot of 10 Smith &amp; Wesson Pocket Knives/);
+        assert.doesNotMatch(sent[0].html, /Fixed Price/);
+        const fixedItem = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|2|0");
+        assert.equal(fixedItem.gixen_status, "not_auction");
+        assert.equal(fixedItem.notified_at, undefined);
       });
     });
   });
@@ -128,13 +162,14 @@ test("startFinderRun never sends a fixed-price (non-auction) qualifying item to 
   });
 });
 
-test("startFinderRun sends a newly-qualified item to Gixen via the browser automation path when enabled", async (t) => {
+test("startFinderRun does not auto-send to Gixen even when GIXEN_AUTOMATION_MODE=browser", async (t) => {
   await withEnv({ ...ENV, GIXEN_AUTOMATION_MODE: "browser" }, async () => {
     mockMailer(t, []);
+    let addSnipeCalls = 0;
     const driver = {
       async launch() { return { page: {} }; },
       async login() {},
-      async submitAddSnipe(page, params) { return { ok: true, message: `added ${params.itemId}` }; },
+      async submitAddSnipe(page, params) { addSnipeCalls += 1; return { ok: true, message: `added ${params.itemId}` }; },
       async submitDeleteSnipe() { return { ok: true, message: "n/a" }; },
     };
     __setGixenDriver(driver);
@@ -147,8 +182,9 @@ test("startFinderRun sends a newly-qualified item to Gixen via the browser autom
           const { run } = await startFinderRun("manual", "browser-run-1");
           assert.equal(run.qualified, 1);
           const [item] = fake.tables.finder_items;
-          assert.equal(item.gixen_status, "sent");
-          assert.ok(item.gixen_sent_at);
+          assert.equal(item.gixen_status, undefined);
+          assert.equal(item.gixen_sent_at, undefined);
+          assert.equal(addSnipeCalls, 0);
         });
       });
     } finally {
@@ -227,7 +263,7 @@ test("processPendingFinderItems resolves a pending item through vision and notif
         assert.equal(item.cost_per_knife, 3.125);
         assert.equal(item.attempts, 1);
         assert.equal(item.next_attempt_at, null);
-        assert.equal(item.gixen_status, "sent");
+        assert.equal(item.gixen_status, undefined, "qualifying via vision no longer auto-sends to Gixen either");
         assert.ok(item.notified_at);
         assert.equal(sent.length, 1);
       });
@@ -386,26 +422,9 @@ test("a failed email send does not stamp notified_at, so it retries next tick", 
         await startFinderRun("manual", "run-email-fail");
         const [item] = fake.tables.finder_items;
         assert.equal(item.notified_at, undefined);
-        assert.equal(item.gixen_status, "sent", "Gixen still succeeds independently of the email failure");
+        assert.equal(item.gixen_status, undefined, "Gixen sending is unaffected either way, since it no longer happens automatically at qualification time");
       });
     });
     assert.equal(sent.length, 0);
-  });
-});
-
-test("a failed Gixen send does not block the email notification", async (t) => {
-  await withEnv(ENV, async () => {
-    const sent = [];
-    mockMailer(t, sent);
-    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
-      await withFetch([tokenRoute, { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem()] }) }, gixenFailRoute], async () => {
-        await startFinderRun("manual", "run-gixen-fail");
-        const [item] = fake.tables.finder_items;
-        assert.equal(item.gixen_status, "failed");
-        assert.match(item.gixen_message, /ERROR/);
-        assert.ok(item.notified_at, "email still succeeds independently of the Gixen failure");
-        assert.equal(sent.length, 1);
-      });
-    });
   });
 });
