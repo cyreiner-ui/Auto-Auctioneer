@@ -9,7 +9,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "npm run build && node --experimental-strip-types --test tests/core.test.mjs tests/rendered-html.test.mjs tests/bidding-contract.test.mjs tests/finder-contract.test.mjs",
+    "test": "npm run build && node --experimental-strip-types --import ./tests/helpers/register-ts-resolve.mjs --test tests/core.test.mjs tests/rendered-html.test.mjs tests/bidding-contract.test.mjs tests/finder-contract.test.mjs tests/gixen-client.test.mjs tests/finder-notify.test.mjs tests/ebay-finder.test.mjs tests/gemini-vision.test.mjs tests/finder-service.test.mjs tests/finder-routes.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "scheduler:dev": "wrangler dev --config scheduler/wrangler.jsonc",
