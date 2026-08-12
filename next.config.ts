@@ -11,9 +11,12 @@ const nextConfig: NextConfig = {
   // route's deployed function bundle or Vercel silently drops it.
   serverExternalPackages: ["playwright-core", "@sparticuz/chromium"],
   outputFileTracingIncludes: {
-    "/api/finder/tick": ["./node_modules/@sparticuz/chromium/bin/**"],
-    "/api/finder/items/gixen": ["./node_modules/@sparticuz/chromium/bin/**"],
-    "/api/finder/run": ["./node_modules/@sparticuz/chromium/bin/**"],
+    // playwright-core loads browsers.json (and other files) via a runtime
+    // path Next's static tracing doesn't follow, so include the whole
+    // package rather than chase individual missing files one at a time.
+    "/api/finder/tick": ["./node_modules/@sparticuz/chromium/bin/**", "./node_modules/playwright-core/**"],
+    "/api/finder/items/gixen": ["./node_modules/@sparticuz/chromium/bin/**", "./node_modules/playwright-core/**"],
+    "/api/finder/run": ["./node_modules/@sparticuz/chromium/bin/**", "./node_modules/playwright-core/**"],
   },
 };
 
