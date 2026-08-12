@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import nodemailer from "nodemailer";
 import { monthKey } from "../lib/finder-core.ts";
+import { __resetGixenDriver, __setGixenDriver } from "../lib/gixen-client.ts";
 import {
   archivedFinderItems,
   finderOverview,
@@ -103,6 +104,35 @@ test("startFinderRun finds a qualifying item, sends it to Gixen, and emails the 
         assert.match(sent[0].html, /Lot of 10 Smith &amp; Wesson Pocket Knives/);
       });
     });
+  });
+});
+
+test("startFinderRun sends a newly-qualified item to Gixen via the browser automation path when enabled", async (t) => {
+  await withEnv({ ...ENV, GIXEN_AUTOMATION_MODE: "browser" }, async () => {
+    mockMailer(t, []);
+    const driver = {
+      async launch() { return { page: {} }; },
+      async login() {},
+      async submitAddSnipe(page, params) { return { ok: true, message: `added ${params.itemId}` }; },
+      async submitDeleteSnipe() { return { ok: true, message: "n/a" }; },
+    };
+    __setGixenDriver(driver);
+    try {
+      await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+        await withFetch([
+          tokenRoute,
+          { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem()] }) },
+        ], async () => {
+          const { run } = await startFinderRun("manual", "browser-run-1");
+          assert.equal(run.qualified, 1);
+          const [item] = fake.tables.finder_items;
+          assert.equal(item.gixen_status, "sent");
+          assert.ok(item.gixen_sent_at);
+        });
+      });
+    } finally {
+      __resetGixenDriver();
+    }
   });
 });
 

@@ -7,6 +7,7 @@ import { GET as overviewGet } from "../app/api/finder/route.ts";
 import { POST as runPost } from "../app/api/finder/run/route.ts";
 import { POST as tickPost } from "../app/api/finder/tick/route.ts";
 import { GET as archivedGet } from "../app/api/finder/archived/route.ts";
+import { __resetGixenDriver, __setGixenDriver } from "../lib/gixen-client.ts";
 import { COOKIE_NAME, staffSessionToken } from "../lib/staff-auth.ts";
 import { supabaseAdmin } from "../lib/supabase-admin.ts";
 import { createFakeSupabase } from "./helpers/fake-supabase.mjs";
@@ -154,6 +155,31 @@ test("POST /api/finder/items/gixen sends the item's total cost to Gixen and pers
         assert.equal(seenMaxBid, "35.00");
         assert.equal(fake.tables.finder_items[0].gixen_status, "sent");
       });
+    });
+  });
+});
+
+test("POST /api/finder/items/gixen drives the browser automation path when GIXEN_AUTOMATION_MODE=browser", async () => {
+  await withEnv({ ...BASE_ENV, GIXEN_USERNAME: "buyer", GIXEN_PASSWORD: "secret", GIXEN_AUTOMATION_MODE: "browser" }, async () => {
+    await withRoutesBackend({ finder_items: [{ ebay_item_id: "v1|1|0", item_price: 30, shipping_cost: 5, total_cost: 35 }] }, async (fake) => {
+      let seenMaxBid;
+      const driver = {
+        async launch() { return { page: {} }; },
+        async login() {},
+        async submitAddSnipe(page, params) { seenMaxBid = params.maxBid; return { ok: true, message: `added ${params.itemId}` }; },
+        async submitDeleteSnipe() { return { ok: true, message: "n/a" }; },
+      };
+      __setGixenDriver(driver);
+      try {
+        const response = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({ ebayItemId: "v1|1|0" })));
+        assert.equal(response.status, 200);
+        const body = await response.json();
+        assert.equal(body.ok, true);
+        assert.equal(seenMaxBid, "35.00");
+        assert.equal(fake.tables.finder_items[0].gixen_status, "sent");
+      } finally {
+        __resetGixenDriver();
+      }
     });
   });
 });
