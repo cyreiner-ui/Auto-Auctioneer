@@ -16,6 +16,10 @@ The default search destination is ZIP 32819, the qualifying ceiling is $3.50 inc
 
 Paid mode reserves $0.001 per vision analysis and refuses the 50,001st analysis with the default 50,000 monthly limit. Use a dedicated Google project and configure Google billing alerts at $40 and $50 as an independent safeguard.
 
+## Free-tier rate limits
+
+`GEMINI_BATCH_SIZE` controls how many pending items get a vision analysis per scheduler tick (once a minute). Google's free-tier limits vary by model and change over time — check the live numbers at https://aistudio.google.com under Rate Limits for the exact model in `GEMINI_MODEL`, rather than trusting a cached number here. As of this writing, `gemini-3.1-flash-lite`'s free tier allows 20 requests/minute and 500 requests/day; `GEMINI_BATCH_SIZE=18` leaves a small margin under the per-minute cap so a whole day's allowance gets used promptly rather than trickling out over 24 hours. If you exceed the daily cap, the app defers remaining items by an hour rather than failing (see `VisionQuotaError` handling in `lib/finder-service.ts`).
+
 ## Brand-targeted keywords
 
 `010_finder_brand_keywords.sql` seeds `finder_keywords` with lot-style phrases
