@@ -3,6 +3,11 @@ import { addSnipe } from "@/lib/gixen-client";
 import { requireStaff } from "@/lib/staff-auth";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
+// addSnipe drives a headless browser (see lib/gixen-client.ts), which needs
+// the Node runtime and more time than the platform default.
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
 export async function POST(request: Request) {
   if (!(await requireStaff(request))) return NextResponse.json({ error: "Staff access required." }, { status: 403 });
   const body = await request.json().catch(() => ({}));

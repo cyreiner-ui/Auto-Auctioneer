@@ -1,12 +1,26 @@
 # Gixen auto-send
 
 Every time the finder qualifies a new item, it's automatically added to your
-Gixen account's snipe queue via Gixen's HTTP API (`lib/gixen-client.ts`) — no
-click required. This removes the manual "WhatsApp it, then type it into
-Gixen" step.
+Gixen account's snipe queue — no click required. This removes the manual
+"WhatsApp it, then type it into Gixen" step.
 
 Gixen still does the actual sniping at auction close; this integration only
 adds/removes items from Gixen's snipe list.
+
+## How it sends to Gixen
+
+Gixen's HTTP API is dead for this account (every call returns `ERROR (501):
+API DISABLED`), and Gixen no longer offers a self-service way to re-enable
+it. `lib/gixen-client.ts` (`addSnipe`/`deleteSnipe`) now drives Gixen's own
+website with a headless browser instead — logging in and filling out the
+same "Add Snipe" form a staff member would use by hand.
+
+Set `GIXEN_AUTOMATION_MODE=browser` to use this. Leaving it unset (or `api`)
+keeps the old HTTP-API code path, which is dead but harmless — it just
+always fails cleanly with a "not configured"/`501` message rather than doing
+anything. This flag is a rollback switch: if the browser automation ever
+misbehaves, flipping it back to `api` disables Gixen sending instantly, no
+redeploy needed.
 
 ## What this does — and doesn't — do
 
@@ -26,6 +40,11 @@ use for the Gixen web dashboard. These are used server-side only
 
 ## Testing
 
-Gixen has no sandbox environment. Test against a real Gixen account, ideally
-against a low-stakes eBay listing, and confirm the item appears in your
-Gixen snipe list after a finder run qualifies it.
+Gixen has no sandbox environment, and its page markup isn't covered by
+automated tests (only the driver-seam logic in `lib/gixen-client.ts` is).
+Before turning on `GIXEN_AUTOMATION_MODE=browser` in production, validate it
+live first: use the single-item "Retry Gixen" button on one real qualified
+item in `/staff/finder` and confirm the item actually appears in Gixen's own
+"My Snipes" list, before relying on the unattended background loop. Since
+adding a snipe only ever sets a placeholder max bid (see above), this is
+low-stakes — no real bid gets placed by this step alone.

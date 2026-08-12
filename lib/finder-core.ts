@@ -18,6 +18,13 @@ const foldingPattern = /\b(?:folding|foldable|pocket\s*kn(?:ife|ives)|pen\s*kn(?
 const knifePattern = /\bkn(?:ife|ives)\b/i;
 const lotPattern = /\b(?:lot|bulk|assorted|collection|group|bundle)\b/i;
 const selectionPattern = /\b(?:choose|choice|select)\s+(?:one|1|a)\b|\b(?:each|per\s+knife|sold\s+separately)\b/i;
+// Anchored to the title only: a seller stating outright that a "knife" lot holds no knives
+// (empty display boxes, manuals-only estate finds) is a far stronger and safer signal than
+// scanning the full description, where an aside about one empty accessory (e.g. a sheath) sold
+// alongside real knives would otherwise cause a false rejection.
+const noKnifePattern = /\bempty\s+(?:\w+\s+){0,2}box(?:es)?\b|\bbox(?:es)?\s+only\b|\bno\s+knives?\b/i;
+// Catalog references like "No. 6 & 8" enumerate model numbers, never a count of items.
+const catalogReferencePattern = /\bno\.?\s*\d+(?:\s*(?:&|,|and)\s*\d+)+\b/gi;
 
 export type TextAnalysis =
   | { kind: "reject"; reason: string }
@@ -28,21 +35,35 @@ export type TextAnalysis =
 // anywhere in the listing text. Patterns that infer a count from lot/piece phrasing without that
 // anchor (auction lot numbering, bundled non-knife items, dimensions, model numbers) are only
 // trusted against the short seller-authored title, where they're far less likely to misfire.
+//
+// The title and description are matched independently, never concatenated into one string, for
+// two reasons: (1) it stops a trailing number in the title (a model name) from fusing with a
+// leading "knife" word at the start of the description into a false match, and (2) sellers very
+// commonly paste the title into the description too, and matching each field once and then
+// de-duplicating identical values (rather than summing every match found) keeps that restatement
+// from silently doubling the count. Distinct values are still summed, so a genuine mixed lot like
+// "10 folding knives and 2 kitchen knives" is unaffected.
 function numericCount(title: string, description: string) {
-  const full = `${title} ${description}`.replace(/\s+/g, " ").trim();
-  const cleanTitle = title.replace(/\s+/g, " ").trim();
-  const componentPattern = /\b(\d{1,3})\s*(?:(?:folding|pocket|kitchen|fixed[ -]blade)\s+)?(?:kn(?:ife|ives)|fixed\s+blades?)\b/gi;
-  const components = [...full.matchAll(componentPattern)].map((match) => Number(match[1])).filter((value) => Number.isInteger(value) && value > 0);
+  const stripCatalogReferences = (text: string) => text.replace(catalogReferencePattern, " ");
+  const cleanTitle = stripCatalogReferences(title).replace(/\s+/g, " ").trim();
+  const cleanDescription = stripCatalogReferences(description).replace(/\s+/g, " ").trim();
+
+  // The lookbehind excludes hyphenated model codes like "FE-024" or "SL-13", where the digits
+  // are part of a product name rather than a quantity.
+  const componentPattern = /(?<![A-Za-z]-)\b(\d{1,3})\s*(?:(?:folding|pocket|kitchen|fixed[ -]blade)\s+)?(?:kn(?:ife|ives)|fixed\s+blades?)\b/gi;
+  const matchValues = (text: string) => [...text.matchAll(componentPattern)].map((match) => Number(match[1])).filter((value) => Number.isInteger(value) && value > 0);
+  const components = [...new Set([...matchValues(cleanTitle), ...matchValues(cleanDescription)])];
   if (components.length > 1) return components.reduce((sum, value) => sum + value, 0);
-  const explicitMatch = full.match(/\b(\d{1,3})\s*(?:pocket\s+|folding\s+)?kn(?:ife|ives)\b/i);
-  const explicitValue = Number(explicitMatch?.[1]);
+
+  const explicitPattern = /(?<![A-Za-z]-)\b(\d{1,3})\s*(?:pocket\s+|folding\s+)?kn(?:ife|ives)\b/i;
+  const explicitValue = Number((cleanTitle.match(explicitPattern) ?? cleanDescription.match(explicitPattern))?.[1]);
   if (Number.isInteger(explicitValue) && explicitValue > 0) return explicitValue;
   if (components.length === 1) return components[0];
   // No generic "x123" pattern here: it's indistinguishable from model numbers like "SOG X42"
   // or dimensions like "4 x 90mm" with no reliable anchor, so those are left to Gemini vision.
   const loosePatterns = [
     /\blot\s+of\s+(\d{1,3})\b/i,
-    /\b(\d{1,3})\s*(?:pc|pcs|piece|pieces)\b/i,
+    /\b(\d{1,3})[\s-]*(?:pc|pcs|piece|pieces)\b/i,
   ];
   for (const pattern of loosePatterns) {
     const match = cleanTitle.match(pattern);
@@ -50,13 +71,15 @@ function numericCount(title: string, description: string) {
     if (Number.isInteger(value) && value > 0) return value;
   }
   const words = Object.keys(numberWords).join("|");
-  const wordMatch = full.match(new RegExp(`\\b(?:lot\\s+(?:of\\s+)?)?(${words})\\s+(?:pocket\\s+|folding\\s+)?kn(?:ife|ives)\\b`, "i"));
+  const wordPattern = new RegExp(`\\b(?:lot\\s+(?:of\\s+)?)?(${words})\\s+(?:pocket\\s+|folding\\s+)?kn(?:ife|ives)\\b`, "i");
+  const wordMatch = cleanTitle.match(wordPattern) ?? cleanDescription.match(wordPattern);
   return wordMatch ? numberWords[wordMatch[1].toLowerCase()] : null;
 }
 
 export function analyzeListingText(title: string, description = ""): TextAnalysis {
   const text = `${title} ${description}`.replace(/\s+/g, " ").trim();
   if (selectionPattern.test(text)) return { kind: "reject", reason: "selection_listing" };
+  if (noKnifePattern.test(title.replace(/\s+/g, " ").trim())) return { kind: "reject", reason: "no_knives_included" };
   const count = numericCount(title, description);
   if (count && count <= FINDER_DEFAULTS.maxPlausibleKnifeCount && foldingPattern.test(text)) return { kind: "resolved", count, containsFoldingKnife: true, confidence: 0.99 };
   if (!lotPattern.test(text) && foldingPattern.test(text) && knifePattern.test(text)) {
