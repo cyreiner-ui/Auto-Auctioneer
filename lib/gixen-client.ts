@@ -24,6 +24,14 @@ function gixenItemId(ebayItemId: string) {
   return match ? match[1] : ebayItemId;
 }
 
+// Gixen only snipes eBay auctions — a fixed-price (Buy It Now) listing has no
+// bid to time, so Gixen silently rejects it. The finder itself still
+// surfaces fixed-price deals for manual purchase; only auction-format items
+// should ever reach addSnipe.
+export function isAuctionFormat(buyingOptions: string[] | null | undefined) {
+  return Array.isArray(buyingOptions) && buyingOptions.includes("AUCTION");
+}
+
 // --- Dead HTTP API path (Gixen returns "ERROR (501): API DISABLED" for this
 // account and offers no way to re-enable it) — kept only as a documented,
 // always-fails-cleanly fallback state for GIXEN_AUTOMATION_MODE=api, and
@@ -89,8 +97,14 @@ function realDriver(): GixenDriver {
       await form.locator('input[name="newmaxbid"]').fill(maxBid);
       await form.locator('input[type="submit"]').click();
       await page.waitForLoadState("domcontentloaded", { timeout: 30_000 });
-      const html = await page.content();
-      if (html.includes(itemId)) return { ok: true, message: `Added item ${itemId} to Gixen's snipe queue.` };
+      // Checking the raw page HTML for itemId is unreliable: a rejected
+      // submission (e.g. Gixen refusing a non-auction listing) can redisplay
+      // the submitted id in the sticky form field or an error message,
+      // producing a false positive. Require the id to appear in an actual
+      // snipe-list row instead, the same signal submitDeleteSnipe already
+      // trusts to confirm list membership.
+      const added = await page.locator("tr", { hasText: itemId }).count();
+      if (added > 0) return { ok: true, message: `Added item ${itemId} to Gixen's snipe queue.` };
       const bodyText = await page.locator("body").innerText().catch(() => "");
       console.error(`[gixen-client] add-snipe not confirmed for item ${itemId}. Page text:`, bodyText.slice(0, 2000));
       return { ok: false, message: "Could not confirm the item was added to Gixen's snipe queue." };

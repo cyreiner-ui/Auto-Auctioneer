@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
 import { analyzeListingText, calculateDeal, FINDER_DEFAULTS, isDailyFinderHour, monthKey } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
-import { addSnipe } from "./gixen-client";
+import { addSnipe, isAuctionFormat } from "./gixen-client";
 import { sendQualifiedItemsEmail } from "./finder-notify";
 import { supabaseAdmin } from "./supabase-admin";
 
@@ -10,7 +10,7 @@ async function notifyNewlyQualified(ebayItemIds: string[]) {
   if (!ebayItemIds.length) return;
   const { data, error } = await supabaseAdmin
     .from("finder_items")
-    .select("ebay_item_id, title, ebay_url, image_url, item_price, shipping_cost, total_cost, cost_per_knife, knife_count, notified_at, gixen_status")
+    .select("ebay_item_id, title, ebay_url, image_url, item_price, shipping_cost, total_cost, cost_per_knife, knife_count, notified_at, gixen_status, buying_options")
     .eq("status", "qualified")
     .in("ebay_item_id", ebayItemIds);
   if (error || !data?.length) return;
@@ -22,7 +22,15 @@ async function notifyNewlyQualified(ebayItemIds: string[]) {
     }
   }
   const unsent = data.filter((row) => !row.gixen_status);
-  for (const row of unsent) {
+  const [notAuction, snipeable] = [unsent.filter((row) => !isAuctionFormat(row.buying_options)), unsent.filter((row) => isAuctionFormat(row.buying_options))];
+  if (notAuction.length) {
+    await supabaseAdmin.from("finder_items").update({
+      gixen_status: "not_auction",
+      gixen_message: "Gixen only snipes eBay auctions; this is a fixed-price listing.",
+      gixen_sent_at: null,
+    }).in("ebay_item_id", notAuction.map((row) => row.ebay_item_id));
+  }
+  for (const row of snipeable) {
     const totalCost = row.total_cost != null ? Number(row.total_cost) : Number(row.item_price) + Number(row.shipping_cost || 0);
     const result = await addSnipe({ itemId: row.ebay_item_id, maxBid: totalCost });
     await supabaseAdmin.from("finder_items").update({

@@ -139,7 +139,7 @@ test("DELETE /api/finder/items removes the matching rows", async () => {
 
 test("POST /api/finder/items/gixen sends the item's total cost to Gixen and persists the result", async () => {
   await withEnv({ ...BASE_ENV, GIXEN_USERNAME: "buyer", GIXEN_PASSWORD: "secret" }, async () => {
-    await withRoutesBackend({ finder_items: [{ ebay_item_id: "v1|1|0", item_price: 30, shipping_cost: 5, total_cost: 35 }] }, async (fake) => {
+    await withRoutesBackend({ finder_items: [{ ebay_item_id: "v1|1|0", item_price: 30, shipping_cost: 5, total_cost: 35, buying_options: ["AUCTION"] }] }, async (fake) => {
       const missingId = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({})));
       assert.equal(missingId.status, 400);
 
@@ -161,7 +161,7 @@ test("POST /api/finder/items/gixen sends the item's total cost to Gixen and pers
 
 test("POST /api/finder/items/gixen drives the browser automation path when GIXEN_AUTOMATION_MODE=browser", async () => {
   await withEnv({ ...BASE_ENV, GIXEN_USERNAME: "buyer", GIXEN_PASSWORD: "secret", GIXEN_AUTOMATION_MODE: "browser" }, async () => {
-    await withRoutesBackend({ finder_items: [{ ebay_item_id: "v1|1|0", item_price: 30, shipping_cost: 5, total_cost: 35 }] }, async (fake) => {
+    await withRoutesBackend({ finder_items: [{ ebay_item_id: "v1|1|0", item_price: 30, shipping_cost: 5, total_cost: 35, buying_options: ["AUCTION"] }] }, async (fake) => {
       let seenMaxBid;
       const driver = {
         async launch() { return { page: {} }; },
@@ -180,6 +180,23 @@ test("POST /api/finder/items/gixen drives the browser automation path when GIXEN
       } finally {
         __resetGixenDriver();
       }
+    });
+  });
+});
+
+test("POST /api/finder/items/gixen skips fixed-price (non-auction) items without calling Gixen", async () => {
+  await withEnv({ ...BASE_ENV, GIXEN_USERNAME: "buyer", GIXEN_PASSWORD: "secret" }, async () => {
+    await withRoutesBackend({ finder_items: [{ ebay_item_id: "v1|1|0", item_price: 30, shipping_cost: 5, total_cost: 35, buying_options: ["FIXED_PRICE"] }] }, async (fake) => {
+      let gixenCalled = false;
+      await withFetch([{ test: (url) => url.includes("gixen.com/api.php"), respond: () => { gixenCalled = true; return textResponse("OK v1|1|0 ADDED"); } }], async () => {
+        const response = await gixenRetry(asStaff("https://x.test/api/finder/items/gixen", jsonBody({ ebayItemId: "v1|1|0" })));
+        assert.equal(response.status, 200);
+        const body = await response.json();
+        assert.equal(body.ok, false);
+        assert.equal(gixenCalled, false);
+        assert.equal(fake.tables.finder_items[0].gixen_status, "not_auction");
+        assert.equal(fake.tables.finder_items[0].gixen_sent_at, null);
+      });
     });
   });
 });

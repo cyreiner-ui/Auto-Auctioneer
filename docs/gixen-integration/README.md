@@ -31,6 +31,27 @@ redeploy needed.
 - If a send fails (bad credentials, Gixen API error, etc.), the item's card
   in `/staff/finder` shows a "Gixen send failed" badge with a "Retry Gixen"
   button.
+- Gixen only snipes eBay **auctions** — a fixed-price (Buy It Now) listing has
+  no bid to time, and Gixen rejects it. The finder still surfaces fixed-price
+  deals (they're useful for manual purchase), but `addSnipe` is only ever
+  called for items whose `buying_options` includes `AUCTION`; everything else
+  is marked "Not an auction" and never reaches Gixen.
+
+## A false positive found during live validation (2026-08-12)
+
+The first live "Retry Gixen" test on a real qualified item reported success
+(`gixen_status: "sent"`), but the item never appeared in Gixen's own "My
+Snipes" list. Root cause: that item was a fixed-price listing (see above),
+which Gixen's Add Snipe form silently rejects — but the rejection page still
+contained the submitted item id (most likely the sticky form value), and the
+old success check (`page.content().includes(itemId)` on the raw page HTML)
+treated that as confirmation. Fixed two ways: (1) the auction-only filter
+above stops non-auction items from ever reaching Gixen, and (2)
+`submitAddSnipe` in `lib/gixen-client.ts` now confirms success by checking
+for an actual snipe-list table row (`page.locator("tr", { hasText: itemId
+})`), the same list-membership signal `submitDeleteSnipe` already used to
+confirm removal — checking a specific table row is far harder to spoof than
+scanning the whole page's HTML.
 
 ## Setup
 

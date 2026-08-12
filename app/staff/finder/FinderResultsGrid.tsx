@@ -7,7 +7,7 @@ export type FinderResult = { ebay_item_id: string; title: string; ebay_url: stri
 type ResultAction = { label: string; className?: string; visible?: (result: FinderResult) => boolean; onClick: (result: FinderResult) => void };
 type BulkAction = { label: string; className?: string; onClick: (ids: string[]) => void };
 
-const GIXEN_BADGE: Record<string, string> = { sent: "Sent to Gixen", failed: "Gixen send failed" };
+const GIXEN_BADGE: Record<string, string> = { sent: "Sent to Gixen", failed: "Gixen send failed", not_auction: "Not an auction" };
 
 const usd = (value: number) => Number(value || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 

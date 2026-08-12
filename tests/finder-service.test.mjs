@@ -48,7 +48,7 @@ function ebayItem(overrides = {}) {
     image: { imageUrl: "https://i.ebayimg.com/1.jpg" },
     price: { value: "30.00", currency: "USD" },
     shippingOptions: [{ shippingCost: { value: "5.00", currency: "USD" } }],
-    buyingOptions: ["FIXED_PRICE"],
+    buyingOptions: ["AUCTION"],
     ...overrides,
   };
 }
@@ -102,6 +102,27 @@ test("startFinderRun finds a qualifying item, sends it to Gixen, and emails the 
         assert.ok(item.notified_at);
         assert.equal(sent.length, 1);
         assert.match(sent[0].html, /Lot of 10 Smith &amp; Wesson Pocket Knives/);
+      });
+    });
+  });
+});
+
+test("startFinderRun never sends a fixed-price (non-auction) qualifying item to Gixen", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    let gixenCalled = false;
+    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem({ buyingOptions: ["FIXED_PRICE"] })] }) },
+        { test: (url) => url.includes("gixen.com/api.php"), respond: () => { gixenCalled = true; return textResponse("OK snipe ADDED"); } },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-fixed-price");
+        assert.equal(run.qualified, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.gixen_status, "not_auction");
+        assert.equal(item.gixen_sent_at, null);
+        assert.equal(gixenCalled, false, "Gixen (which only snipes auctions) should never be called for a fixed-price listing");
       });
     });
   });
@@ -191,7 +212,7 @@ test("processPendingFinderItems resolves a pending item through vision and notif
     await withFakeBackend({
       finder_items: [{
         ebay_item_id: "v1|9|0", run_id: null, title: "Mixed pocket knife lot", short_description: "",
-        image_url: "https://i.ebayimg.com/9.jpg", item_price: 20, shipping_cost: 5,
+        image_url: "https://i.ebayimg.com/9.jpg", item_price: 20, shipping_cost: 5, buying_options: ["AUCTION"],
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
