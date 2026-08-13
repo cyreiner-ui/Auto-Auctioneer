@@ -237,6 +237,10 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   // fresh OAuth round trip per item on top of the per-item Browse API call.
   let sharedToken: string | undefined;
   const tokenForLookup = async () => { if (!sharedToken) sharedToken = await appToken(); return sharedToken; };
+  // Once Gemini's quota/budget is exhausted, every further vision call in this batch would just
+  // 429 again — pointless. But shipping-only rows (row.knife_count already known) never touch
+  // Gemini at all, so they must keep processing regardless; only skip the *vision* attempts.
+  let visionExhaustedMessage: string | null = null;
   for (const row of rows) {
     if (row.run_id) runIds.add(row.run_id);
     const maxCost = resolveMaxCostPerKnife(row.keyword_phrases || [], keywordMaxCost, config().maxCost);
@@ -254,6 +258,11 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         if (saveError) throw new Error(saveError.message);
         if (qualifies) qualifiedIds.push(row.ebay_item_id);
         processed++;
+        continue;
+      }
+      if (visionExhaustedMessage) {
+        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: visionExhaustedMessage }).eq("ebay_item_id", row.ebay_item_id);
+        deferred++;
         continue;
       }
       const vision = await countKnivesWithGemini({ title: row.title, description: row.short_description, imageUrl: row.image_url || "" });
@@ -281,7 +290,8 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       if (itemError instanceof VisionQuotaError || itemError instanceof VisionBudgetError) {
         await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: itemError.message }).eq("ebay_item_id", row.ebay_item_id);
         deferred++;
-        break;
+        visionExhaustedMessage = itemError.message;
+        continue;
       }
       const attempts = row.attempts + 1;
       await supabaseAdmin.from("finder_items").update({ status: attempts >= 3 ? "error" : "pending", reason: itemError instanceof Error ? itemError.message : "Vision analysis failed.", attempts, next_attempt_at: attempts >= 3 ? null : new Date(Date.now() + 15 * 60 * 1000).toISOString(), processed_at: attempts >= 3 ? new Date().toISOString() : null }).eq("ebay_item_id", row.ebay_item_id);
