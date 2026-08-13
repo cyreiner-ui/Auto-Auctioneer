@@ -62,7 +62,15 @@ export async function countKnivesWithGemini(input: { title: string; description:
     }),
   });
   if (response.status === 429) throw new VisionQuotaError("Gemini free quota is temporarily exhausted.");
-  if (!response.ok) throw new Error(`Gemini analysis failed (${response.status}).`);
+  if (!response.ok) {
+    // Google's error body (e.g. "Generative Language API has not been used in project ... before
+    // or it is disabled", "API key not valid", permission/model-access errors) is far more useful
+    // for diagnosing a broken key/project than the bare status code, and previously wasn't
+    // captured anywhere — it only ever showed up as "Gemini analysis failed (403)." with no way
+    // to tell which of several possible causes was the actual one.
+    const body = await response.text().catch(() => "");
+    throw new Error(`Gemini analysis failed (${response.status})${body ? `: ${body.slice(0, 300)}` : ""}.`);
+  }
   const payload = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
   const text = payload.candidates?.[0]?.content?.parts?.find((part) => part.text)?.text || "";
   const parsed = JSON.parse(text) as Partial<VisionCount>;
