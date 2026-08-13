@@ -55,8 +55,48 @@ const config = () => ({
   confidence: Number(process.env.GEMINI_CONFIDENCE_THRESHOLD || FINDER_DEFAULTS.confidence),
   searchDepth: Number(process.env.EBAY_FINDER_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.resultsPerKeyword),
   batchSize: Number(process.env.GEMINI_BATCH_SIZE || FINDER_DEFAULTS.batchSize),
+  processConcurrency: Number(process.env.FINDER_PROCESS_CONCURRENCY || FINDER_DEFAULTS.processConcurrency),
+  scanConcurrency: Number(process.env.EBAY_FINDER_SCAN_CONCURRENCY || FINDER_DEFAULTS.scanConcurrency),
   monthlyLimit: Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyPaidAnalysisLimit),
 });
+
+// Runs `worker` over `items` with at most `concurrency` in flight at once, preserving each
+// result at its original index. Plain Promise.all(items.map(...)) would fire every item at
+// once — fine for a handful of keywords, but with thousands of pending items or dozens of
+// keywords that saturates outbound connections and blows through third-party rate limits.
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  async function runNext(): Promise<void> {
+    const index = cursor++;
+    if (index >= items.length) return;
+    results[index] = await worker(items[index], index);
+    return runNext();
+  }
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, runNext));
+  return results;
+}
+
+// How long a "running" finder_runs row is trusted to genuinely still be in progress before a
+// new startFinderRun call is willing to start its own scan alongside it. This exists to stop
+// two overlapping scans (e.g. a double click on "Run now", or a manual run landing on top of
+// the daily scheduled one) from duplicating eBay calls and interleaving writes to the same
+// pending queue. It intentionally does NOT try to detect or repair a run that got orphaned by a
+// crash/timeout — a run stuck in "running" for longer than this window is simply no longer
+// treated as active, and a fresh run is allowed to start. With the scan and batch phases now
+// running concurrently (see mapWithConcurrency above), a genuine run finishes in well under a
+// minute, so this window has generous headroom without risking a long-dead row blocking things
+// indefinitely.
+const RUN_LOCK_WINDOW_MS = 15 * 60 * 1000;
+
+async function findActiveRun() {
+  const { data, error } = await supabaseAdmin.from("finder_runs").select("*").eq("status", "running").order("started_at", { ascending: false }).limit(1).maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!data) return null;
+  const startedAt = new Date(data.started_at).getTime();
+  if (!Number.isFinite(startedAt) || Date.now() - startedAt > RUN_LOCK_WINDOW_MS) return null;
+  return data;
+}
 
 function easternDateKey(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
@@ -162,6 +202,8 @@ async function updateRunCounts(runId: string) {
 }
 
 export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: string) {
+  const active = await findActiveRun();
+  if (active) return { run: active, created: false };
   const key = runKey || `${trigger}:${trigger === "scheduled" ? easternDateKey() : randomUUID()}`;
   const { data: inserted, error: insertError } = await supabaseAdmin.from("finder_runs").upsert({ run_key: key, trigger }, { onConflict: "run_key", ignoreDuplicates: true }).select("*");
   if (insertError) throw new Error(insertError.message);
@@ -178,11 +220,18 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const found = new Map<string, { item: EbayFinderItem; phrases: string[] }>();
     const errors: string[] = [];
     let scanned = 0;
+    const totalKeywords = keywords?.length || 0;
     // Fetch the eBay app token once and reuse it across every keyword search in this run —
     // fetching it fresh per keyword adds a whole extra network round trip per keyword, which
     // stacks up fast against this route's serverless time budget once there are 30+ keywords.
-    const token = keywords?.length ? await appToken() : null;
-    for (const keyword of keywords || []) {
+    const token = totalKeywords ? await appToken() : null;
+    // Progress-write interval for the loop below: writing after every single keyword adds a
+    // sequential DB round trip per keyword on top of the search itself, which used to be a
+    // meaningful fraction of the whole scan's time once there were 30+ keywords. Every 5th
+    // completion (plus always the last) keeps the "Searching X/Y" UI reasonably live without
+    // paying for it on every keyword.
+    const PROGRESS_WRITE_EVERY = 5;
+    async function scanKeyword(keyword: { phrase: string; max_cost_per_knife?: number | null }) {
       try {
         for (const item of await searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined)) {
           const current = found.get(item.itemId);
@@ -191,8 +240,15 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
         }
       } catch (error) { errors.push(error instanceof Error ? error.message : `Search failed for ${keyword.phrase}.`); }
       scanned++;
-      await supabaseAdmin.from("finder_runs").update({ keywords_scanned: scanned, current_keyword: keyword.phrase }).eq("id", run.id);
+      if (scanned % PROGRESS_WRITE_EVERY === 0 || scanned === totalKeywords) {
+        await supabaseAdmin.from("finder_runs").update({ keywords_scanned: scanned, current_keyword: keyword.phrase }).eq("id", run.id);
+      }
     }
+    // Keyword searches run with bounded concurrency instead of one at a time — sequentially,
+    // 30+ keywords (each up to 3 paginated eBay calls) risked exceeding the route's serverless
+    // time budget before the scan even finished, which is exactly what left production runs
+    // stuck at "running" with a partial keywords_scanned count and no way to retry that day.
+    await mapWithConcurrency(keywords || [], config().scanConcurrency, scanKeyword);
     const ids = [...found.keys()];
     const existingById = new Map<string, ExistingFinderRow>();
     for (let index = 0; index < ids.length; index += 200) {
@@ -233,15 +289,20 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   let deferred = 0;
   const runIds = new Set<string>();
   const qualifiedIds: string[] = [];
-  // Shared across every shipping lookup in this batch, fetched lazily on first use — avoids a
-  // fresh OAuth round trip per item on top of the per-item Browse API call.
-  let sharedToken: string | undefined;
-  const tokenForLookup = async () => { if (!sharedToken) sharedToken = await appToken(); return sharedToken; };
+  // Shared across every shipping lookup in this batch. Caching the in-flight *promise* (rather
+  // than checking-then-awaiting-then-caching the resolved value) is what makes this safe under
+  // concurrency: tokenForLookup runs fully synchronously up to the point it returns, so two rows
+  // racing for the token can never both see it unset and each fire their own OAuth round trip.
+  let tokenPromise: Promise<string> | undefined;
+  const tokenForLookup = () => { if (!tokenPromise) tokenPromise = appToken(); return tokenPromise; };
   // Once Gemini's quota/budget is exhausted, every further vision call in this batch would just
   // 429 again — pointless. But shipping-only rows (row.knife_count already known) never touch
   // Gemini at all, so they must keep processing regardless; only skip the *vision* attempts.
+  // Concurrent rows may each independently discover the exhaustion (the reservation itself is
+  // enforced atomically server-side via the reserve_finder_vision_usage RPC) — that's fine, this
+  // flag only short-circuits rows that haven't started yet by the time it's set.
   let visionExhaustedMessage: string | null = null;
-  for (const row of rows) {
+  async function processRow(row: FinderRow) {
     if (row.run_id) runIds.add(row.run_id);
     const maxCost = resolveMaxCostPerKnife(row.keyword_phrases || [], keywordMaxCost, config().maxCost);
     try {
@@ -258,12 +319,12 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         if (saveError) throw new Error(saveError.message);
         if (qualifies) qualifiedIds.push(row.ebay_item_id);
         processed++;
-        continue;
+        return;
       }
       if (visionExhaustedMessage) {
         await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: visionExhaustedMessage }).eq("ebay_item_id", row.ebay_item_id);
         deferred++;
-        continue;
+        return;
       }
       const vision = await countKnivesWithGemini({ title: row.title, description: row.short_description, imageUrl: row.image_url || "" });
       const confident = vision.confidence >= config().confidence && vision.knifeCount > 0 && vision.knifeCount <= FINDER_DEFAULTS.maxPlausibleKnifeCount && vision.containsFoldingKnife;
@@ -291,12 +352,18 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: itemError.message }).eq("ebay_item_id", row.ebay_item_id);
         deferred++;
         visionExhaustedMessage = itemError.message;
-        continue;
+        return;
       }
       const attempts = row.attempts + 1;
       await supabaseAdmin.from("finder_items").update({ status: attempts >= 3 ? "error" : "pending", reason: itemError instanceof Error ? itemError.message : "Vision analysis failed.", attempts, next_attempt_at: attempts >= 3 ? null : new Date(Date.now() + 15 * 60 * 1000).toISOString(), processed_at: attempts >= 3 ? new Date().toISOString() : null }).eq("ebay_item_id", row.ebay_item_id);
     }
   }
+  // Bounded concurrency instead of one row at a time — sequentially, at the old batchSize of 5
+  // this queue drained at 5 items/minute (one tick), which took hours against a backlog in the
+  // thousands. Each row's Gemini/eBay calls and DB writes are independent by ebay_item_id, so
+  // running several at once is safe; the shared token and vision-exhaustion flag above are the
+  // only cross-row state, and both are written synchronously with no await in between.
+  await mapWithConcurrency(rows, config().processConcurrency, processRow);
   for (const runId of runIds) await updateRunCounts(runId);
   await notifyNewlyQualified(qualifiedIds);
   return { processed, deferred };

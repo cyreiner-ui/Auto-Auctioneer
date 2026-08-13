@@ -4,7 +4,18 @@ export const FINDER_DEFAULTS = {
   confidence: 0.9,
   resultsPerKeyword: 500,
   monthlyPaidAnalysisLimit: 50_000,
-  batchSize: 5,
+  // Items pulled off the pending queue per tick, and how many of them (vision + shipping
+  // lookups) run concurrently. At the old batchSize of 5 processed one at a time, a queue of a
+  // few thousand items (typical after a daily scan) took most of a day to drain at one tick per
+  // minute. Concurrency is kept modest to stay well clear of Gemini's per-minute rate limit —
+  // hitting it just defers items an hour anyway (see VisionQuotaError handling), so being too
+  // aggressive is self-defeating, not merely wasteful.
+  batchSize: 40,
+  processConcurrency: 8,
+  // Keyword searches in startFinderRun's scan phase run with this much concurrency. Scanning
+  // 30+ keywords one at a time risked exceeding the API route's serverless time budget before
+  // the scan even finished (see the throttled progress-write comment in finder-service.ts).
+  scanConcurrency: 6,
   maxPlausibleKnifeCount: 50,
 } as const;
 
