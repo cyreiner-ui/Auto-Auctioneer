@@ -79,9 +79,13 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker:
 
 // How long a "running" finder_runs row is trusted to genuinely still be in progress before it's
 // treated as orphaned (crashed or hit the route's serverless timeout mid-scan) and reconciled to
-// "failed" by reconcileOrphanedRuns below. With the scan and batch phases now running
-// concurrently (see mapWithConcurrency above), a genuine run finishes in well under a minute, so
-// this window has generous headroom without risking a long-dead row blocking things indefinitely.
+// "failed" by reconcileOrphanedRuns below. This only needs to cover the scan phase itself (see
+// mapWithConcurrency above) — a genuine scan finishes in well under a minute — because
+// updateRunCounts now finalizes a run as "completed" as soon as its scan is written, rather than
+// waiting for every item it discovered to clear the (separately tracked) vision/shipping pending
+// queue. That queue can legitimately take much longer than this window to drain — a single
+// Gemini rate-limit hit defers a whole batch by an hour (see VisionQuotaError handling) — so it
+// must never be what this window is measuring, or a perfectly healthy run gets flagged abandoned.
 const RUN_LOCK_WINDOW_MS = 15 * 60 * 1000;
 
 // Flips any "running" finder_runs row older than RUN_LOCK_WINDOW_MS to "failed". Without this, a
@@ -198,16 +202,21 @@ function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: str
   };
 }
 
+// Called once right after startFinderRun finishes writing its scan results, and again later
+// whenever processPendingFinderItems resolves one of this run's items (it tracks run_id from
+// whatever pending rows it happened to pick up, regardless of which run — or day — discovered
+// them). Always finalizes the run as "completed": a run's own scan work is done by the time this
+// is reachable at all, and leftover pending items are just background vision/shipping lookups
+// that the "STILL CHECKING" counter already surfaces on its own — they must not keep the run row
+// reading "running" while they drain, or a run with a real backlog (see the comment on
+// RUN_LOCK_WINDOW_MS) gets wrongly reconciled as abandoned before it ever gets the chance.
 async function updateRunCounts(runId: string) {
   const { data, error } = await supabaseAdmin.from("finder_items").select("status").eq("run_id", runId);
   if (error) throw new Error(error.message);
   const rows = data || [];
-  const pending = rows.filter((row) => row.status === "pending").length;
   const qualified = rows.filter((row) => row.status === "qualified").length;
   const rejected = rows.filter((row) => row.status === "rejected" || row.status === "error").length;
-  const values: Record<string, unknown> = { qualified, rejected };
-  if (!pending) Object.assign(values, { status: "completed", completed_at: new Date().toISOString() });
-  const { error: saveError } = await supabaseAdmin.from("finder_runs").update(values).eq("id", runId);
+  const { error: saveError } = await supabaseAdmin.from("finder_runs").update({ qualified, rejected, status: "completed", completed_at: new Date().toISOString() }).eq("id", runId);
   if (saveError) throw new Error(saveError.message);
 }
 

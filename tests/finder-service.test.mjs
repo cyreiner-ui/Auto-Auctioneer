@@ -866,6 +866,42 @@ test("finderTick does not touch a run that is still genuinely within its lock wi
   });
 });
 
+test("startFinderRun completes immediately even when it discovers items still awaiting vision, instead of staying \"running\" until the pending queue drains", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem({
+          title: "Assorted pocket knife lot", shortDescription: "",
+        })] }) },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-with-pending-vision");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "pending", "an ambiguous listing with no resolved count must fall through to the vision queue");
+        assert.equal(run.status, "completed", "the run's own scan work is done — it must not wait on the separately-tracked vision queue to drain");
+        assert.ok(run.completed_at);
+      });
+      // Even long after the lock window would have elapsed, this run must stay "completed" and
+      // never get swept up by reconcileOrphanedRuns (exercised here via the findActiveRun check
+      // that every startFinderRun call makes) — it was never left "running" in the first place,
+      // regardless of how long its item still sits pending vision analysis.
+      fake.tables.finder_runs.find((row) => row.run_key === "run-with-pending-vision").started_at = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [] }) },
+      ], async () => {
+        const { created } = await startFinderRun("manual", "run-after-pending-vision");
+        assert.equal(created, true, "the earlier run's still-pending vision item must not be mistaken for an active run blocking a fresh scan");
+      });
+      const stale = fake.tables.finder_runs.find((row) => row.run_key === "run-with-pending-vision");
+      assert.equal(stale.status, "completed", "a run that already completed its scan must never be reconciled to \"failed\" no matter how stale its pending vision item is");
+    });
+  });
+});
+
 test("startFinderRun's concurrent keyword scan collects every keyword's results across multiple concurrency waves", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
