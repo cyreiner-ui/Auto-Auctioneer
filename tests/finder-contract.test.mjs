@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeListingText, calculateDeal, finderPages, isDailyFinderHour, monthKey } from "../lib/finder-core.ts";
+import { analyzeListingText, calculateDeal, finderPages, isDailyFinderHour, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife } from "../lib/finder-core.ts";
 
 test("extracts explicit numeric and word lot counts", () => {
   assert.deepEqual(analyzeListingText("Lot of 12 folding pocket knives"), { kind: "resolved", count: 12, containsFoldingKnife: true, confidence: 0.99 });
@@ -47,6 +47,11 @@ test("still sums a genuine mixed lot with distinct sub-counts split across title
   const title = "Mixed pocket knife lot";
   const description = "This lot includes 10 folding knives and 2 kitchen knives, all used.";
   assert.deepEqual(analyzeListingText(title, description), { kind: "resolved", count: 12, containsFoldingKnife: true, confidence: 0.99 });
+});
+
+test("resolves a real-world lot title where an internal 'Knives' plural precedes the actual count", () => {
+  const title = `Ozark Trail Folding lockback pocket Knives 3.25" length blade. 4 knives LOT`;
+  assert.deepEqual(analyzeListingText(title), { kind: "resolved", count: 4, containsFoldingKnife: true, confidence: 0.99 });
 });
 
 test("does not mistake a hyphenated model code for a knife count", () => {
@@ -98,4 +103,33 @@ test("uses calendar month keys and Eastern daily hour", () => {
 
 test("paginates 500 eBay results as 200, 200, and 100", () => {
   assert.deepEqual(finderPages(500), [{ offset: 0, limit: 200 }, { offset: 200, limit: 200 }, { offset: 400, limit: 100 }]);
+});
+
+test("resolveMaxCostPerKnife falls back to the global default when no matched keyword has an override", () => {
+  assert.equal(resolveMaxCostPerKnife(["knife lot"], new Map([["knife lot", null]]), 3.5), 3.5);
+  assert.equal(resolveMaxCostPerKnife([], new Map(), 3.5), 3.5);
+});
+
+test("resolveMaxCostPerKnife takes the highest override among multiple matched keywords", () => {
+  const overrides = new Map([["spyderco knife lot", 8], ["benchmade knife lot", 6], ["knife lot", null]]);
+  assert.equal(resolveMaxCostPerKnife(["spyderco knife lot", "benchmade knife lot", "knife lot"], overrides, 3.5), 8);
+});
+
+test("resolveMaxCostPerKnife ignores a zero or negative override as invalid", () => {
+  const overrides = new Map([["knife lot", 0], ["bad", -5]]);
+  assert.equal(resolveMaxCostPerKnife(["knife lot", "bad"], overrides, 3.5), 3.5);
+});
+
+test("isShippingLookupWorthwhile allows a lookup when the price alone still leaves room to qualify", () => {
+  assert.equal(isShippingLookupWorthwhile(30, 10, 3.5), true, "$3/knife before shipping could still qualify");
+  assert.equal(isShippingLookupWorthwhile(35, 10, 3.5), true, "exactly at the ceiling before shipping is still worth checking");
+});
+
+test("isShippingLookupWorthwhile skips a lookup when the price alone already exceeds the ceiling", () => {
+  assert.equal(isShippingLookupWorthwhile(100, 10, 3.5), false, "shipping can only add cost, so $10/knife before shipping can never qualify at $3.50");
+});
+
+test("isShippingLookupWorthwhile rejects invalid inputs", () => {
+  assert.equal(isShippingLookupWorthwhile(30, 0, 3.5), false);
+  assert.equal(isShippingLookupWorthwhile(NaN, 10, 3.5), false);
 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { searchEbayKeyword } from "../lib/ebay-finder.ts";
+import { getItemShippingCost, searchEbayKeyword } from "../lib/ebay-finder.ts";
 import { jsonResponse, textResponse, withEnv, withFetch } from "./helpers/fake-fetch.mjs";
 
 const EBAY_ENV = { EBAY_CLIENT_ID: "client-id", EBAY_CLIENT_SECRET: "client-secret", EBAY_ENVIRONMENT: "sandbox" };
@@ -135,6 +135,40 @@ test("throws when the search request fails", async () => {
   await withEnv(EBAY_ENV, async () => {
     await withFetch([tokenRoute, { test: (url) => url.startsWith(SEARCH_URL), respond: () => textResponse("server error", { status: 500 }) }], async () => {
       await assert.rejects(() => searchEbayKeyword("knife lot", 10), /failed \(500\)/);
+    });
+  });
+});
+
+const ITEM_URL = "https://api.sandbox.ebay.com/buy/browse/v1/item/";
+
+test("getItemShippingCost returns the computed shipping cost from the single-item endpoint", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    await withFetch([
+      tokenRoute,
+      { test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ shippingOptions: [{ shippingCost: { value: "9.99", currency: "USD" } }] }) },
+    ], async () => {
+      const result = await getItemShippingCost("v1|1|0");
+      assert.deepEqual(result, { value: 9.99, currency: "USD" });
+    });
+  });
+});
+
+test("getItemShippingCost returns a null value for a listing with no usable shipping option (e.g. local pickup only)", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    await withFetch([
+      tokenRoute,
+      { test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ shippingOptions: [] }) },
+    ], async () => {
+      const result = await getItemShippingCost("v1|1|0");
+      assert.deepEqual(result, { value: null, currency: "" });
+    });
+  });
+});
+
+test("getItemShippingCost throws when the item lookup fails", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    await withFetch([tokenRoute, { test: (url) => url.startsWith(ITEM_URL), respond: () => textResponse("not found", { status: 404 }) }], async () => {
+      await assert.rejects(() => getItemShippingCost("v1|1|0"), /failed \(404\)/);
     });
   });
 });
