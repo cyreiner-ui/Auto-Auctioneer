@@ -49,6 +49,11 @@ test("still sums a genuine mixed lot with distinct sub-counts split across title
   assert.deepEqual(analyzeListingText(title, description), { kind: "resolved", count: 12, containsFoldingKnife: true, confidence: 0.99 });
 });
 
+test("resolves a real-world lot title where an internal 'Knives' plural precedes the actual count", () => {
+  const title = `Ozark Trail Folding lockback pocket Knives 3.25" length blade. 4 knives LOT`;
+  assert.deepEqual(analyzeListingText(title), { kind: "resolved", count: 4, containsFoldingKnife: true, confidence: 0.99 });
+});
+
 test("does not mistake a hyphenated model code for a knife count", () => {
   const title = "New Folding Knife Lot Fox Edge Smith & Wesson Camillus 3-Piece Bundle NIB";
   const description = "Fox Edge Mandatory Fun FE-024 folding knife with an 8Cr13MoV stainless steel blade and ball bearing pivot.";

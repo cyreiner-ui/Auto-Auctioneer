@@ -107,7 +107,13 @@ type ExistingFinderRow = {
 
 function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, existing: ExistingFinderRow | undefined) {
   const fresh = initialRow(item, keywordPhrases, runId);
-  if (!existing || existing.detection_source !== "vision" || existing.knife_count == null) return fresh;
+  // Only fall back to a stale vision count when the *current* text re-analysis is itself still
+  // ambiguous (fresh.status === "pending"). If the (possibly since-fixed) text parser now
+  // conclusively resolves or rejects the listing, trust it outright and discard the old
+  // vision-derived data — the text path's confidence (0.95-0.99, pattern-anchored) is inherently
+  // more reliable than a single-image vision call, and this is what lets already-fixed parser
+  // bugs self-correct for free on the next scan instead of staying wrong forever.
+  if (!existing || existing.detection_source !== "vision" || existing.knife_count == null || fresh.status !== "pending") return fresh;
   const deal = calculateDeal(item.itemPrice, item.shippingCost, existing.knife_count, config().maxCost);
   return {
     ...fresh,
@@ -199,10 +205,10 @@ export async function processPendingFinderItems(limit = config().batchSize) {
     if (row.run_id) runIds.add(row.run_id);
     try {
       const vision = await countKnivesWithGemini({ title: row.title, description: row.short_description, imageUrl: row.image_url || "" });
-      const confident = vision.confidence >= config().confidence && vision.knifeCount > 0 && vision.containsFoldingKnife;
+      const confident = vision.confidence >= config().confidence && vision.knifeCount > 0 && vision.knifeCount <= FINDER_DEFAULTS.maxPlausibleKnifeCount && vision.containsFoldingKnife;
       const deal = confident ? calculateDeal(Number(row.item_price), row.shipping_cost == null ? null : Number(row.shipping_cost), vision.knifeCount, config().maxCost) : null;
       const qualifies = Boolean(confident && deal?.qualifies);
-      const reason = !vision.containsFoldingKnife ? "no_folding_knife" : vision.confidence < config().confidence ? (vision.uncertaintyReason || "low_confidence") : vision.knifeCount < 1 ? "invalid_count" : deal?.reason;
+      const reason = !vision.containsFoldingKnife ? "no_folding_knife" : vision.confidence < config().confidence ? (vision.uncertaintyReason || "low_confidence") : vision.knifeCount < 1 ? "invalid_count" : vision.knifeCount > FINDER_DEFAULTS.maxPlausibleKnifeCount ? "implausible_count" : deal?.reason;
       const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: qualifies ? "qualified" : "rejected", reason, knife_count: vision.knifeCount || null, contains_folding_knife: vision.containsFoldingKnife, confidence: vision.confidence, detection_source: "vision", total_cost: deal && "totalCost" in deal ? deal.totalCost : null, cost_per_knife: deal && "costPerKnife" in deal ? deal.costPerKnife : null, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
       if (saveError) throw new Error(saveError.message);
       if (qualifies) qualifiedIds.push(row.ebay_item_id);

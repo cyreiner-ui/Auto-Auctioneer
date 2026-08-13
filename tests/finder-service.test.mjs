@@ -204,6 +204,70 @@ test("a failing keyword search is captured in the run's errors without aborting 
   });
 });
 
+test("startFinderRun discards a stale vision count once the (now-fixed) text parser resolves the listing on its own", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const title = "New Folding Knife Lot Fox Edge Smith & Wesson Camillus 3-Piece Bundle NIB";
+    const description = "Fox Edge Mandatory Fun FE-024 folding knife with an 8Cr13MoV stainless steel blade and ball bearing pivot.";
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
+      finder_items: [{
+        ebay_item_id: "v1|1|0", run_id: "old-run", keyword_phrases: ["knife lot"], title, short_description: description,
+        ebay_url: "https://www.ebay.com/itm/1", image_url: "https://i.ebayimg.com/1.jpg",
+        item_price: 20, shipping_cost: 5, currency: "USD", buying_options: ["AUCTION"],
+        status: "qualified", knife_count: 24, contains_folding_knife: true, confidence: 0.7,
+        detection_source: "vision", discovered_at: "2026-01-01",
+      }],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem({
+          title, shortDescription: description,
+          price: { value: "20.00", currency: "USD" },
+          shippingOptions: [{ shippingCost: { value: "5.00", currency: "USD" } }],
+        })] }) },
+      ], async () => {
+        await startFinderRun("manual", "run-stale-vision-fix");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.detection_source, "text");
+        assert.equal(item.knife_count, 3);
+        assert.equal(item.status, "rejected", "the true count of 3 puts this over budget even though the stale count of 24 wrongly qualified it");
+        assert.equal(item.reason, "over_budget");
+      });
+    });
+  });
+});
+
+test("startFinderRun still preserves a vision count when the current text parser is still ambiguous", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "tsa confiscated knives", enabled: true, created_at: "2026-01-01" }],
+      finder_items: [{
+        ebay_item_id: "v1|1|0", run_id: "old-run", keyword_phrases: ["tsa confiscated knives"],
+        title: "TSA confiscated knives assorted lot", short_description: "",
+        ebay_url: "https://www.ebay.com/itm/1", image_url: "https://i.ebayimg.com/1.jpg",
+        item_price: 20, shipping_cost: 5, currency: "USD", buying_options: ["AUCTION"],
+        status: "qualified", knife_count: 6, contains_folding_knife: true, confidence: 0.8,
+        detection_source: "vision", discovered_at: "2026-01-01",
+      }],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem({
+          title: "TSA confiscated knives assorted lot", shortDescription: "",
+          price: { value: "20.00", currency: "USD" }, shippingOptions: [{ shippingCost: { value: "5.00", currency: "USD" } }],
+        })] }) },
+      ], async () => {
+        await startFinderRun("manual", "run-still-ambiguous");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.detection_source, "vision");
+        assert.equal(item.knife_count, 6);
+      });
+    });
+  });
+});
+
 test("processPendingFinderItems resolves a pending item through vision and notifies", async (t) => {
   await withEnv(ENV, async () => {
     const sent = [];
@@ -230,6 +294,29 @@ test("processPendingFinderItems resolves a pending item through vision and notif
         assert.equal(item.gixen_status, "sent");
         assert.ok(item.notified_at);
         assert.equal(sent.length, 1);
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems rejects an implausibly large vision-reported knife count as a sanity guard", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [{
+        ebay_item_id: "v1|9|0", run_id: null, title: "Mixed pocket knife lot", short_description: "",
+        image_url: "https://i.ebayimg.com/9.jpg", item_price: 20, shipping_cost: 5, buying_options: ["AUCTION"],
+        status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+      }],
+    }, async (fake) => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 500, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected");
+        assert.equal(item.reason, "implausible_count");
+        assert.equal(item.detection_source, "vision");
       });
     });
   });
