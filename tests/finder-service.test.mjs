@@ -457,7 +457,7 @@ test("processPendingFinderItems rejects an implausibly large vision-reported kni
   });
 });
 
-test("a VisionBudgetError defers the item without bumping attempts and stops the batch", async (t) => {
+test("a VisionBudgetError defers the item without bumping attempts, and short-circuits remaining vision attempts in the batch without wasting another Gemini call", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
     const pastAttempt = new Date(Date.now() - 60_000).toISOString();
@@ -472,18 +472,45 @@ test("a VisionBudgetError defers the item without bumping attempts and stops the
       await withFetch([], async () => {
         const { processed, deferred } = await processPendingFinderItems(5);
         assert.equal(processed, 0);
-        assert.equal(deferred, 1);
+        assert.equal(deferred, 2, "both items should be deferred — the second short-circuited rather than actually re-hitting Gemini");
         const first = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|1|0");
         assert.equal(first.attempts, 0, "attempts must not increment on a budget defer");
         assert.equal(first.status, "pending");
         assert.ok(new Date(first.next_attempt_at).getTime() > Date.now() + 55 * 60 * 1000);
         const second = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|2|0");
-        assert.equal(second.next_attempt_at, pastAttempt, "the second item must not be touched once the batch stops");
+        assert.equal(second.attempts, 0, "attempts must not increment on the short-circuited defer either");
+        assert.ok(new Date(second.next_attempt_at).getTime() > Date.now() + 55 * 60 * 1000, "the second item should also be deferred an hour, without ever calling Gemini again");
       });
     } finally {
       supabaseAdmin.from = restoreFrom;
       supabaseAdmin.rpc = restoreRpc;
     }
+  });
+});
+
+test("a Gemini quota/budget exhaustion does not block a shipping-only lookup queued later in the same batch", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [
+        { ebay_item_id: "v1|1|0", run_id: null, title: "Mixed pocket knife lot", short_description: "", image_url: "https://i.ebayimg.com/1.jpg", item_price: 20, shipping_cost: null, buying_options: ["AUCTION"], status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt },
+        { ebay_item_id: "v1|2|0", run_id: null, title: "Lot of 10 Pocket Knives", short_description: "", knife_count: 10, detection_source: "text", contains_folding_knife: true, confidence: 0.99, item_price: 20, shipping_cost: null, buying_options: ["AUCTION"], status: "pending", attempts: 0, next_attempt_at: new Date(Date.now() - 30_000).toISOString(), discovered_at: new Date(Date.now() - 30_000).toISOString() },
+      ],
+    }, async (fake) => {
+      fake.setRpc("reserve_finder_vision_usage", () => ({ data: { reserved: false }, error: null }));
+      await withFetch([tokenRoute, itemShippingRoute(5), gixenOkRoute], async () => {
+        const { processed, deferred } = await processPendingFinderItems(5);
+        assert.equal(processed, 1, "the shipping-only item should still be processed despite Gemini being exhausted");
+        assert.equal(deferred, 1);
+        const visionItem = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|1|0");
+        assert.equal(visionItem.status, "pending");
+        assert.equal(visionItem.attempts, 0);
+        const shippingOnlyItem = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|2|0");
+        assert.equal(shippingOnlyItem.status, "qualified", "unaffected by the unrelated vision quota exhaustion");
+        assert.equal(shippingOnlyItem.cost_per_knife, 2.5);
+      });
+    });
   });
 });
 
