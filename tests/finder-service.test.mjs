@@ -215,6 +215,28 @@ test("startFinderRun is idempotent for the same run key", async (t) => {
   });
 });
 
+test("startFinderRun fetches the eBay app token once and reuses it across every keyword search", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    let tokenCalls = 0;
+    await withFakeBackend({
+      finder_keywords: [
+        { id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" },
+        { id: "k2", phrase: "pocket knife lot", enabled: true, created_at: "2026-01-02" },
+        { id: "k3", phrase: "folding knife lot", enabled: true, created_at: "2026-01-03" },
+      ],
+    }, async () => {
+      await withFetch([
+        { test: (url) => url.startsWith(TOKEN_URL), respond: () => { tokenCalls++; return jsonResponse({ access_token: "fake-token" }); } },
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [] }) },
+      ], async () => {
+        await startFinderRun("manual", "run-shared-token");
+        assert.equal(tokenCalls, 1, "one shared token should cover all 3 keyword searches, not one fetch per keyword");
+      });
+    });
+  });
+});
+
 test("a failing keyword search is captured in the run's errors without aborting the run", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
@@ -555,6 +577,30 @@ test("startFinderRun rejects immediately as over_budget without a shipping looku
         assert.equal(item.status, "rejected");
         assert.equal(item.reason, "over_budget");
         assert.equal(item.shipping_cost, null);
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems reuses one eBay app token across multiple shipping lookups in the same batch", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    let tokenCalls = 0;
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [
+        { ebay_item_id: "v1|1|0", run_id: null, title: "Lot of 10 Pocket Knives", short_description: "", knife_count: 10, detection_source: "text", contains_folding_knife: true, confidence: 0.99, item_price: 20, shipping_cost: null, buying_options: ["AUCTION"], status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt },
+        { ebay_item_id: "v1|2|0", run_id: null, title: "Lot of 8 Pocket Knives", short_description: "", knife_count: 8, detection_source: "text", contains_folding_knife: true, confidence: 0.99, item_price: 15, shipping_cost: null, buying_options: ["AUCTION"], status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt },
+      ],
+    }, async () => {
+      await withFetch([
+        { test: (url) => url.startsWith(TOKEN_URL), respond: () => { tokenCalls++; return jsonResponse({ access_token: "fake-token" }); } },
+        itemShippingRoute(5),
+        gixenOkRoute,
+      ], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 2);
+        assert.equal(tokenCalls, 1, "one shared token should cover both shipping lookups, not one fetch per item");
       });
     });
   });
