@@ -791,3 +791,130 @@ test("a failed email send does not stamp notified_at, so it retries next tick", 
     assert.equal(sent.length, 0);
   });
 });
+
+test("startFinderRun returns the already-active run instead of starting a duplicate scan", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    let searchCalls = 0;
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
+      finder_runs: [{ id: "active-run", run_key: "manual:already-active", trigger: "manual", status: "running", started_at: new Date().toISOString() }],
+    }, async () => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => { searchCalls++; return jsonResponse({ itemSummaries: [ebayItem()] }); } },
+      ], async () => {
+        const { run, created } = await startFinderRun("manual");
+        assert.equal(created, false);
+        assert.equal(run.id, "active-run");
+        assert.equal(searchCalls, 0, "a run already in progress should block a new scan rather than duplicating it");
+      });
+    });
+  });
+});
+
+test("startFinderRun treats a running run older than the lock window as abandoned and starts a fresh scan", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    let searchCalls = 0;
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
+      finder_runs: [{ id: "stale-run", run_key: "manual:stale", trigger: "manual", status: "running", started_at: new Date(Date.now() - 20 * 60 * 1000).toISOString() }],
+    }, async () => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => { searchCalls++; return jsonResponse({ itemSummaries: [ebayItem()] }); } },
+      ], async () => {
+        const { run, created } = await startFinderRun("manual", "run-after-stale");
+        assert.equal(created, true);
+        assert.notEqual(run.id, "stale-run");
+        assert.equal(searchCalls, 1, "a run stuck 'running' well past the lock window should not block a fresh scan");
+      });
+    });
+  });
+});
+
+test("startFinderRun's concurrent keyword scan collects every keyword's results across multiple concurrency waves", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const keywordCount = 8;
+    const finder_keywords = Array.from({ length: keywordCount }, (_, i) => ({ id: `k${i}`, phrase: `keyword ${i}`, enabled: true, created_at: `2026-01-01T00:00:0${i}Z` }));
+    await withFakeBackend({ finder_keywords }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: (url) => {
+            const index = new URL(url).searchParams.get("q").split(" ")[1];
+            return jsonResponse({ itemSummaries: [ebayItem({ itemId: `v1|${index}|0`, itemWebUrl: `https://www.ebay.com/itm/${index}`, title: `Lot of 10 Pocket Knives Batch ${index}` })] });
+          },
+        },
+        gixenOkRoute,
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-wide-scan");
+        assert.equal(run.status, "completed");
+        assert.equal(run.keywords_scanned, keywordCount, "the final tally should count every keyword regardless of the concurrency wave it ran in");
+        assert.equal(fake.tables.finder_items.length, keywordCount, "every keyword's distinct item should be captured despite concurrent scanning");
+        assert.equal(run.qualified, keywordCount);
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems's vision-exhaustion short-circuit still limits repeated RPC calls across concurrency waves", async (t) => {
+  await withEnv({ ...ENV, FINDER_PROCESS_CONCURRENCY: "2" }, async () => {
+    mockMailer(t, []);
+    const rowBase = { run_id: null, title: "Pocket knife lot", short_description: "", image_url: "https://i.ebayimg.com/x.jpg", item_price: 20, shipping_cost: 5, status: "pending", attempts: 0 };
+    const finder_items = Array.from({ length: 6 }, (_, i) => ({ ...rowBase, ebay_item_id: `v1|${i}|0`, next_attempt_at: new Date(Date.now() - (60 - i) * 1000).toISOString(), discovered_at: new Date(Date.now() - (60 - i) * 1000).toISOString() }));
+    const fake = createFakeSupabase({ finder_items });
+    let rpcCalls = 0;
+    fake.setRpc("reserve_finder_vision_usage", () => { rpcCalls++; return { data: { reserved: false }, error: null }; });
+    const restoreFrom = supabaseAdmin.from;
+    const restoreRpc = supabaseAdmin.rpc;
+    supabaseAdmin.from = fake.from.bind(fake);
+    supabaseAdmin.rpc = fake.rpc.bind(fake);
+    try {
+      await withFetch([], async () => {
+        const { processed, deferred } = await processPendingFinderItems(6);
+        assert.equal(processed, 0);
+        assert.equal(deferred, 6);
+        assert.equal(rpcCalls, 2, "only the first wave (bounded by processConcurrency) should actually hit the reservation RPC; later waves should short-circuit on the in-memory flag");
+      });
+    } finally {
+      supabaseAdmin.from = restoreFrom;
+      supabaseAdmin.rpc = restoreRpc;
+    }
+  });
+});
+
+test("processPendingFinderItems processes a full batch concurrently without cross-row interference", async (t) => {
+  await withEnv({ ...ENV, FINDER_PROCESS_CONCURRENCY: "5" }, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    const finder_items = Array.from({ length: 5 }, (_, i) => ({
+      ebay_item_id: `v1|${i}|0`, run_id: "run-concurrent", title: `Lot of ${i + 1} Pocket Knives`, short_description: "",
+      knife_count: i + 1, detection_source: "text", contains_folding_knife: true, confidence: 0.99,
+      item_price: 3 * (i + 1), shipping_cost: null, buying_options: ["AUCTION"], status: "pending", attempts: 0,
+      next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+    }));
+    await withFakeBackend({ finder_items, finder_runs: [{ id: "run-concurrent", run_key: "manual:concurrent-batch", trigger: "manual", status: "running", started_at: pastAttempt }] }, async (fake) => {
+      let tokenCalls = 0;
+      await withFetch([
+        { test: (url) => url.startsWith(TOKEN_URL), respond: () => { tokenCalls++; return jsonResponse({ access_token: "fake-token" }); } },
+        itemShippingRoute(0.5),
+        gixenOkRoute,
+      ], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 5, "every independent row in the batch should be processed despite running concurrently");
+        assert.equal(tokenCalls, 1, "the shared token cache must still dedupe correctly when every row starts at once");
+        for (let i = 0; i < 5; i++) {
+          const item = fake.tables.finder_items.find((row) => row.ebay_item_id === `v1|${i}|0`);
+          assert.equal(item.shipping_cost, 0.5, `row ${i} must get its own correct shipping cost, not another row's`);
+          assert.equal(item.knife_count, i + 1, `row ${i}'s own knife_count must be untouched by other rows processing concurrently`);
+        }
+        const run = fake.tables.finder_runs.find((row) => row.id === "run-concurrent");
+        assert.equal(run.status, "completed", "the run should be recomputed as completed once every one of its items clears the pending queue");
+      });
+    });
+  });
+});
