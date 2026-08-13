@@ -98,6 +98,13 @@ export function resolveMaxCostPerKnife(matchedPhrases: string[], keywordOverride
   return overrides.length ? Math.max(...overrides) : defaultMax;
 }
 
+// Shipping only ever adds cost, so if the item price alone (ignoring shipping) already exceeds
+// the ceiling, no shipping value could ever make the listing qualify — not worth spending an
+// extra eBay lookup call to find out.
+export function isShippingLookupWorthwhile(itemPrice: number, knifeCount: number, max: number = FINDER_DEFAULTS.maxCostPerKnife) {
+  return Number.isFinite(itemPrice) && Number.isFinite(knifeCount) && knifeCount > 0 && itemPrice / knifeCount <= max;
+}
+
 export function calculateDeal(itemPrice: number, shippingCost: number | null, knifeCount: number, max: number = FINDER_DEFAULTS.maxCostPerKnife) {
   if (!Number.isFinite(itemPrice) || itemPrice < 0) return { qualifies: false, reason: "invalid_price" as const };
   if (shippingCost == null || !Number.isFinite(shippingCost) || shippingCost < 0) return { qualifies: false, reason: "missing_shipping" as const };

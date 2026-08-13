@@ -38,6 +38,29 @@ function shippingCost(item: { shippingOptions?: Array<{ shippingCost?: { value?:
   return costs[0] || { value: null, currency: "" };
 }
 
+async function browseHeaders() {
+  const token = await appToken();
+  const marketplace = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
+  const zip = process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip;
+  return {
+    Authorization: `Bearer ${token}`,
+    "X-EBAY-C-MARKETPLACE-ID": marketplace,
+    "X-EBAY-C-ENDUSERCTX": `contextualLocation=country%3DUS%2Czip%3D${encodeURIComponent(zip)}`,
+  };
+}
+
+// eBay's item_summary/search endpoint frequently omits a computed shippingCost for listings
+// using CALCULATED (weight/location-based) shipping, even with a contextualLocation header —
+// the single-item endpoint reliably computes it. Call this only for listings worth the extra
+// request (see isShippingLookupWorthwhile in finder-core.ts).
+export async function getItemShippingCost(itemId: string) {
+  const url = `${ebayApiBaseUrl()}/buy/browse/v1/item/${encodeURIComponent(itemId)}`;
+  const response = await fetch(url, { headers: await browseHeaders() });
+  if (!response.ok) throw new Error(`eBay item lookup for "${itemId}" failed (${response.status}).`);
+  const payload = await response.json() as { shippingOptions?: Array<{ shippingCost?: { value?: string; currency?: string } }> };
+  return shippingCost(payload);
+}
+
 export async function searchEbayKeyword(keyword: string, requested: number = FINDER_DEFAULTS.resultsPerKeyword) {
   const token = await appToken();
   const marketplace = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
