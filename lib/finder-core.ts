@@ -7,7 +7,7 @@ export const FINDER_DEFAULTS = {
   // Items pulled off the pending queue per tick, and how many of them (vision + shipping
   // lookups) run concurrently. At the old batchSize of 5 processed one at a time, a queue of a
   // few thousand items (typical after a daily scan) took most of a day to drain at one tick per
-  // minute. Concurrency is kept modest to stay well clear of Gemini's per-minute rate limit —
+  // minute. Concurrency is kept modest to stay well clear of Moondream's per-minute rate limit —
   // hitting it just defers items an hour anyway (see VisionQuotaError handling), so being too
   // aggressive is self-defeating, not merely wasteful.
   batchSize: 40,
@@ -88,7 +88,7 @@ function numericCount(title: string, description: string) {
   if (Number.isInteger(explicitValue) && explicitValue > 0) return explicitValue;
   if (components.length === 1) return components[0];
   // No generic "x123" pattern here: it's indistinguishable from model numbers like "SOG X42"
-  // or dimensions like "4 x 90mm" with no reliable anchor, so those are left to Gemini vision.
+  // or dimensions like "4 x 90mm" with no reliable anchor, so those are left to Moondream vision.
   const loosePatterns = [
     /\blot\s+of\s+(\d{1,3})\b/i,
     /\b(\d{1,3})[\s-]*(?:pc|pcs|piece|pieces|pk|pack)\b/i,

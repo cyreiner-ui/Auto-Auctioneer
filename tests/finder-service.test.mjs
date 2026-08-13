@@ -19,8 +19,8 @@ const ENV = {
   EBAY_CLIENT_SECRET: "client-secret",
   EBAY_ENVIRONMENT: "sandbox",
   EBAY_FINDER_MAX_PER_KNIFE: "3.50",
-  GEMINI_API_KEY: "gemini-key",
-  GEMINI_CONFIDENCE_THRESHOLD: "0.90",
+  MOONDREAM_API_KEY: "moondream-key",
+  MOONDREAM_CONFIDENCE_THRESHOLD: "0.90",
   GIXEN_USERNAME: "buyer",
   GIXEN_PASSWORD: "secret",
   SMTP_HOST: "smtp.gmail.com",
@@ -38,7 +38,7 @@ const tokenRoute = { test: (url) => url.startsWith(TOKEN_URL), respond: () => js
 const itemShippingRoute = (value) => ({ test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ shippingOptions: value == null ? [] : [{ shippingCost: { value: String(value), currency: "USD" } }] }) });
 const gixenOkRoute = { test: (url) => url.includes("gixen.com/api.php"), respond: () => textResponse("OK snipe ADDED") };
 const imageRoute = { test: (url) => url.includes("i.ebayimg.com"), respond: () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/jpeg" } }) };
-const geminiRoute = (body) => ({ test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => jsonResponse({ candidates: [{ content: { parts: [{ text: JSON.stringify(body) }] } }] }) });
+const moondreamRoute = (body) => ({ test: (url) => url.includes("api.moondream.ai"), respond: () => jsonResponse({ request_id: "req_1", answer: JSON.stringify(body) }) });
 
 function ebayItem(overrides = {}) {
   return {
@@ -54,7 +54,7 @@ function ebayItem(overrides = {}) {
   };
 }
 
-// Installs the fake Supabase client (shared by finder-service.ts and gemini-vision.ts)
+// Installs the fake Supabase client (shared by finder-service.ts and moondream-vision.ts)
 // and a mocked nodemailer transport, running `fn` with both live for the duration.
 async function withFakeBackend(seed, fn) {
   const fake = createFakeSupabase(seed);
@@ -392,7 +392,7 @@ test("processPendingFinderItems resolves a pending item's ceiling using its matc
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ knifeCount: 10, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), gixenOkRoute], async () => {
+      await withFetch([imageRoute, moondreamRoute({ knifeCount: 10, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), gixenOkRoute], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -415,7 +415,7 @@ test("processPendingFinderItems resolves a pending item through vision and notif
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), gixenOkRoute], async () => {
+      await withFetch([imageRoute, moondreamRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), gixenOkRoute], async () => {
         const { processed, deferred } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         assert.equal(deferred, 0);
@@ -445,7 +445,7 @@ test("processPendingFinderItems rejects an implausibly large vision-reported kni
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ knifeCount: 500, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" })], async () => {
+      await withFetch([imageRoute, moondreamRoute({ knifeCount: 500, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -457,7 +457,7 @@ test("processPendingFinderItems rejects an implausibly large vision-reported kni
   });
 });
 
-test("a VisionBudgetError defers the item without bumping attempts, and short-circuits remaining vision attempts in the batch without wasting another Gemini call", async (t) => {
+test("a VisionBudgetError defers the item without bumping attempts, and short-circuits remaining vision attempts in the batch without wasting another Moondream call", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
     const pastAttempt = new Date(Date.now() - 60_000).toISOString();
@@ -472,14 +472,14 @@ test("a VisionBudgetError defers the item without bumping attempts, and short-ci
       await withFetch([], async () => {
         const { processed, deferred } = await processPendingFinderItems(5);
         assert.equal(processed, 0);
-        assert.equal(deferred, 2, "both items should be deferred — the second short-circuited rather than actually re-hitting Gemini");
+        assert.equal(deferred, 2, "both items should be deferred — the second short-circuited rather than actually re-hitting Moondream");
         const first = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|1|0");
         assert.equal(first.attempts, 0, "attempts must not increment on a budget defer");
         assert.equal(first.status, "pending");
         assert.ok(new Date(first.next_attempt_at).getTime() > Date.now() + 55 * 60 * 1000);
         const second = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|2|0");
         assert.equal(second.attempts, 0, "attempts must not increment on the short-circuited defer either");
-        assert.ok(new Date(second.next_attempt_at).getTime() > Date.now() + 55 * 60 * 1000, "the second item should also be deferred an hour, without ever calling Gemini again");
+        assert.ok(new Date(second.next_attempt_at).getTime() > Date.now() + 55 * 60 * 1000, "the second item should also be deferred an hour, without ever calling Moondream again");
       });
     } finally {
       supabaseAdmin.from = restoreFrom;
@@ -488,7 +488,7 @@ test("a VisionBudgetError defers the item without bumping attempts, and short-ci
   });
 });
 
-test("a Gemini quota/budget exhaustion does not block a shipping-only lookup queued later in the same batch", async (t) => {
+test("a Moondream quota/budget exhaustion does not block a shipping-only lookup queued later in the same batch", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
     const pastAttempt = new Date(Date.now() - 60_000).toISOString();
@@ -501,7 +501,7 @@ test("a Gemini quota/budget exhaustion does not block a shipping-only lookup que
       fake.setRpc("reserve_finder_vision_usage", () => ({ data: { reserved: false }, error: null }));
       await withFetch([tokenRoute, itemShippingRoute(5), gixenOkRoute], async () => {
         const { processed, deferred } = await processPendingFinderItems(5);
-        assert.equal(processed, 1, "the shipping-only item should still be processed despite Gemini being exhausted");
+        assert.equal(processed, 1, "the shipping-only item should still be processed despite Moondream being exhausted");
         assert.equal(deferred, 1);
         const visionItem = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|1|0");
         assert.equal(visionItem.status, "pending");
@@ -525,7 +525,7 @@ test("a generic analysis error bumps attempts and errors out at the third try", 
         status: "pending", attempts: 2, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, { test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => textResponse("server error", { status: 500 }) }], async () => {
+      await withFetch([imageRoute, { test: (url) => url.includes("api.moondream.ai"), respond: () => textResponse("server error", { status: 500 }) }], async () => {
         const { processed, deferred } = await processPendingFinderItems(5);
         assert.equal(processed, 0);
         assert.equal(deferred, 0);
@@ -533,7 +533,7 @@ test("a generic analysis error bumps attempts and errors out at the third try", 
         assert.equal(item.attempts, 3);
         assert.equal(item.status, "error");
         assert.equal(item.next_attempt_at, null);
-        assert.match(item.reason, /Gemini analysis failed \(500\)/);
+        assert.match(item.reason, /Moondream analysis failed \(500\)/);
       });
     });
   });
@@ -550,7 +550,7 @@ test("a generic analysis error under the retry limit stays pending for a later r
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, { test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => textResponse("server error", { status: 500 }) }], async () => {
+      await withFetch([imageRoute, { test: (url) => url.includes("api.moondream.ai"), respond: () => textResponse("server error", { status: 500 }) }], async () => {
         await processPendingFinderItems(5);
         const [item] = fake.tables.finder_items;
         assert.equal(item.attempts, 1);
@@ -644,7 +644,7 @@ test("processPendingFinderItems looks up shipping after vision resolves the coun
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([tokenRoute, imageRoute, geminiRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), itemShippingRoute(5), gixenOkRoute], async () => {
+      await withFetch([tokenRoute, imageRoute, moondreamRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), itemShippingRoute(5), gixenOkRoute], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -669,7 +669,7 @@ test("processPendingFinderItems skips the shipping lookup and rejects immediatel
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" })], async () => {
+      await withFetch([imageRoute, moondreamRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;

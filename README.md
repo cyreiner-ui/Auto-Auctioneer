@@ -21,4 +21,4 @@ Deploy the repository to Vercel, configure the variables from `.env.example`, an
 
 ## eBay deal finder
 
-The staff-only pocket-knife finder searches eBay daily, calculates shipping to ZIP 32819, and uses Gemini only when listing text does not establish the knife count. Apply `supabase/migrations/006_ebay_finder.sql`, configure the `GEMINI_*` and `EBAY_FINDER_*` variables shown in `.env.example`, and point the scheduler's `FINDER_TICK_URL` at `/api/finder/tick`. See `docs/ebay-finder/README.md` for operating details.
+The staff-only pocket-knife finder searches eBay daily, calculates shipping to ZIP 32819, and uses Moondream vision only when listing text does not establish the knife count. Apply `supabase/migrations/006_ebay_finder.sql`, configure the `MOONDREAM_*` and `EBAY_FINDER_*` variables shown in `.env.example`, and point the scheduler's `FINDER_TICK_URL` at `/api/finder/tick`. See `docs/ebay-finder/README.md` for operating details.

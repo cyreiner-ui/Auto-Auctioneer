@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appToken, getItemShippingCost, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
 import { analyzeListingText, calculateDeal, FINDER_DEFAULTS, isDailyFinderHour, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife } from "./finder-core";
-import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
+import { countKnivesWithMoondream, VisionBudgetError, VisionQuotaError } from "./moondream-vision";
 import { isAuctionFormat } from "./gixen-client";
 import { sendQualifiedItemsEmail } from "./finder-notify";
 import { supabaseAdmin } from "./supabase-admin";
@@ -52,12 +52,12 @@ type FinderRow = {
 
 const config = () => ({
   maxCost: Number(process.env.EBAY_FINDER_MAX_PER_KNIFE || FINDER_DEFAULTS.maxCostPerKnife),
-  confidence: Number(process.env.GEMINI_CONFIDENCE_THRESHOLD || FINDER_DEFAULTS.confidence),
+  confidence: Number(process.env.MOONDREAM_CONFIDENCE_THRESHOLD || FINDER_DEFAULTS.confidence),
   searchDepth: Number(process.env.EBAY_FINDER_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.resultsPerKeyword),
-  batchSize: Number(process.env.GEMINI_BATCH_SIZE || FINDER_DEFAULTS.batchSize),
+  batchSize: Number(process.env.MOONDREAM_BATCH_SIZE || FINDER_DEFAULTS.batchSize),
   processConcurrency: Number(process.env.FINDER_PROCESS_CONCURRENCY || FINDER_DEFAULTS.processConcurrency),
   scanConcurrency: Number(process.env.EBAY_FINDER_SCAN_CONCURRENCY || FINDER_DEFAULTS.scanConcurrency),
-  monthlyLimit: Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyPaidAnalysisLimit),
+  monthlyLimit: Number(process.env.MOONDREAM_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyPaidAnalysisLimit),
 });
 
 // Runs `worker` over `items` with at most `concurrency` in flight at once, preserving each
@@ -84,7 +84,7 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker:
 // updateRunCounts now finalizes a run as "completed" as soon as its scan is written, rather than
 // waiting for every item it discovered to clear the (separately tracked) vision/shipping pending
 // queue. That queue can legitimately take much longer than this window to drain — a single
-// Gemini rate-limit hit defers a whole batch by an hour (see VisionQuotaError handling) — so it
+// Moondream rate-limit hit defers a whole batch by an hour (see VisionQuotaError handling) — so it
 // must never be what this window is measuring, or a perfectly healthy run gets flagged abandoned.
 const RUN_LOCK_WINDOW_MS = 15 * 60 * 1000;
 
@@ -314,9 +314,9 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   // racing for the token can never both see it unset and each fire their own OAuth round trip.
   let tokenPromise: Promise<string> | undefined;
   const tokenForLookup = () => { if (!tokenPromise) tokenPromise = appToken(); return tokenPromise; };
-  // Once Gemini's quota/budget is exhausted, every further vision call in this batch would just
+  // Once Moondream's quota/budget is exhausted, every further vision call in this batch would just
   // 429 again — pointless. But shipping-only rows (row.knife_count already known) never touch
-  // Gemini at all, so they must keep processing regardless; only skip the *vision* attempts.
+  // Moondream at all, so they must keep processing regardless; only skip the *vision* attempts.
   // Concurrent rows may each independently discover the exhaustion (the reservation itself is
   // enforced atomically server-side via the reserve_finder_vision_usage RPC) — that's fine, this
   // flag only short-circuits rows that haven't started yet by the time it's set.
@@ -328,7 +328,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       if (row.knife_count != null) {
         // The text parser already resolved the count on discovery; this row is only pending
         // because the search result was missing a shipping cost, and initialRow already
-        // confirmed the price alone leaves room to qualify — no need to touch Gemini at all.
+        // confirmed the price alone leaves room to qualify — no need to touch Moondream at all.
         const shipping = await getItemShippingCost(row.ebay_item_id, await tokenForLookup());
         const shippingValue = shipping.value != null && (shipping.currency === "" || shipping.currency === "USD") ? shipping.value : null;
         const deal = shippingValue != null ? calculateDeal(Number(row.item_price), shippingValue, row.knife_count, maxCost) : null;
@@ -345,7 +345,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         deferred++;
         return;
       }
-      const vision = await countKnivesWithGemini({ title: row.title, description: row.short_description, imageUrl: row.image_url || "" });
+      const vision = await countKnivesWithMoondream({ title: row.title, description: row.short_description, imageUrl: row.image_url || "" });
       const confident = vision.confidence >= config().confidence && vision.knifeCount > 0 && vision.knifeCount <= FINDER_DEFAULTS.maxPlausibleKnifeCount && vision.containsFoldingKnife;
       let shippingValue = row.shipping_cost == null ? null : Number(row.shipping_cost);
       let shippingSource = row.shipping_source;
@@ -379,7 +379,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   }
   // Bounded concurrency instead of one row at a time — sequentially, at the old batchSize of 5
   // this queue drained at 5 items/minute (one tick), which took hours against a backlog in the
-  // thousands. Each row's Gemini/eBay calls and DB writes are independent by ebay_item_id, so
+  // thousands. Each row's Moondream/eBay calls and DB writes are independent by ebay_item_id, so
   // running several at once is safe; the shared token and vision-exhaustion flag above are the
   // only cross-row state, and both are written synchronously with no await in between.
   await mapWithConcurrency(rows, config().processConcurrency, processRow);
@@ -415,7 +415,10 @@ export async function finderOverview() {
   return {
     keywords: keywords.data || [], results: results.data || [], runs: runs.data || [],
     counts: { pending: pending.count || 0, rejected: rejected.count || 0, qualified: qualified.count || 0 },
-    budget: { mode: process.env.GEMINI_PAID_MODE === "true" ? "paid" : "free", paidAnalyses: paid, monthlyLimit: config().monthlyLimit, remaining: Math.max(0, config().monthlyLimit - paid), projectedMaximum: paid * 0.001 },
+    // Moondream bills per-token (not a flat per-call rate), so this is an approximation: roughly
+    // 2,500 input tokens (prompt text + one resized listing image) at $0.30/M plus ~180 output
+    // tokens at $2.50/M works out to about $0.0012/analysis.
+    budget: { mode: process.env.MOONDREAM_PAID_MODE === "true" ? "paid" : "free", paidAnalyses: paid, monthlyLimit: config().monthlyLimit, remaining: Math.max(0, config().monthlyLimit - paid), projectedMaximum: paid * 0.0012 },
     settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: config().maxCost },
   };
 }

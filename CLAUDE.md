@@ -39,12 +39,12 @@ Two unrelated, non-overlapping schemes — don't conflate them:
 Entry point: `lib/finder-service.ts`, UI at `/staff/finder` (`app/staff/finder/`). Runs once daily (6am America/New_York) plus on every scheduler tick for already-pending items:
 
 1. `startFinderRun` searches eBay's Browse API (`lib/ebay-finder.ts`) for each enabled keyword phrase (`finder_keywords` table, editable at `/staff/finder/settings`), and upserts every result into `finder_items`.
-2. Each item first goes through fast regex-based title/description parsing (`lib/finder-core.ts::analyzeListingText`) to try to resolve a knife count without spending an API call. Only genuinely ambiguous listings fall through to Gemini vision (`lib/gemini-vision.ts`, called from `processPendingFinderItems`) — this ordering exists specifically for cost control (see the Gemini budget note below).
+2. Each item first goes through fast regex-based title/description parsing (`lib/finder-core.ts::analyzeListingText`) to try to resolve a knife count without spending an API call. Only genuinely ambiguous listings fall through to Moondream vision (`lib/moondream-vision.ts`, called from `processPendingFinderItems`) — this ordering exists specifically for cost control (see the Moondream budget note below).
 3. `calculateDeal` qualifies an item if `(price + shipping) / knifeCount <= maxCostPerKnife` (per-keyword override via `finder_keywords.max_cost_per_knife`, else the `EBAY_FINDER_MAX_PER_KNIFE` default).
 4. Newly qualified auction-format items trigger one summary email (`lib/finder-notify.ts`, plain SMTP/nodemailer) — fixed-price listings never need one, since only auctions need a Gixen bid.
 5. Gixen sniping is never automatic: a staff member must type a real max bid and press "Set & Send" on `/staff/finder` before `lib/gixen-client.ts` does anything. Gixen's HTTP API is dead for this account, so `gixen-client.ts` drives Gixen's own website with a headless browser (`playwright-core` + `@sparticuz/chromium`) when `GIXEN_AUTOMATION_MODE=browser`; leaving it unset/`api` is an inert rollback switch.
 
-Gemini vision has a hard monthly spend guardrail (`GEMINI_MONTHLY_ANALYSIS_LIMIT`, tracked in `finder_vision_usage`) enforced via `VisionBudgetError`/`VisionQuotaError` in `lib/finder-service.ts` — items are deferred an hour rather than the run failing when a rate/spend cap is hit.
+Moondream vision has a hard monthly spend guardrail (`MOONDREAM_MONTHLY_ANALYSIS_LIMIT`, tracked in `finder_vision_usage`) enforced via `VisionBudgetError`/`VisionQuotaError` in `lib/finder-service.ts` — items are deferred an hour rather than the run failing when a rate/spend cap is hit.
 
 ## Bidding feature (present but hidden)
 

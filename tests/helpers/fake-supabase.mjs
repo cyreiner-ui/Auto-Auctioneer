@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 // A minimal in-memory stand-in for the Supabase JS client, supporting exactly the
-// chained query-builder calls used by lib/finder-service.ts, lib/gemini-vision.ts,
+// chained query-builder calls used by lib/finder-service.ts, lib/moondream-vision.ts,
 // and the app/api/finder/** route handlers. Not a general Supabase mock — extend the
 // Builder methods below if a new call shape shows up.
 

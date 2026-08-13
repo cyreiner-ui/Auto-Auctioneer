@@ -1,12 +1,12 @@
 # eBay pocket-knife finder
 
-The staff finder lives at `/staff/finder`. It searches the first 500 eBay Best Match results for each enabled phrase, stores each eBay item once, and only sends textually ambiguous listings to Gemini.
+The staff finder lives at `/staff/finder`. It searches the first 500 eBay Best Match results for each enabled phrase, stores each eBay item once, and only sends textually ambiguous listings to Moondream.
 
 ## Setup
 
 1. Apply `supabase/migrations/006_ebay_finder.sql`, `010_finder_brand_keywords.sql`, and `013_finder_items_max_bid.sql` to the existing Supabase project.
-2. Set `GEMINI_API_KEY` to a key from a dedicated Google AI Studio project.
-3. Keep `GEMINI_PAID_MODE=false` while using the free tier. If billing is later enabled, set it to `true`; the app stops after `GEMINI_MONTHLY_ANALYSIS_LIMIT` paid analyses in each UTC calendar month.
+2. Set `MOONDREAM_API_KEY` to a key from a Moondream Cloud workspace (https://moondream.ai) — no credit card is required for the free tier.
+3. Keep `MOONDREAM_PAID_MODE=false` while using the free tier. If billing is later enabled, set it to `true`; the app stops after `MOONDREAM_MONTHLY_ANALYSIS_LIMIT` paid analyses in each UTC calendar month.
 4. Set the deployed scheduler's `FINDER_TICK_URL` to the app's `/api/finder/tick` URL and deploy the scheduler with the same `BID_SCHEDULER_SECRET` used by the app.
 5. To enable email alerts and Gixen auto-send, see the sections below.
 
@@ -14,11 +14,11 @@ The default search destination is ZIP 32819, the qualifying ceiling is $3.50 inc
 
 ## Billing guardrail
 
-Paid mode reserves $0.001 per vision analysis and refuses the 50,001st analysis with the default 50,000 monthly limit. Use a dedicated Google project and configure Google billing alerts at $40 and $50 as an independent safeguard.
+Moondream bills per-token rather than per-analysis, so `paidAnalyses * 0.0012` (used for the `projectedMaximum` figure shown in the finder settings UI) is an approximation, not an exact spend figure — treat the `MOONDREAM_MONTHLY_ANALYSIS_LIMIT` cap as a call-count safety net rather than a literal dollar cap. Check https://moondream.ai/pricing for current per-token rates as an independent safeguard.
 
 ## Free-tier rate limits
 
-`GEMINI_BATCH_SIZE` controls how many pending items get a vision analysis per scheduler tick (once a minute). Google's free-tier limits vary by model and change over time — check the live numbers at https://aistudio.google.com under Rate Limits for the exact model in `GEMINI_MODEL`, rather than trusting a cached number here. As of this writing, `gemini-3.1-flash-lite`'s free tier allows 20 requests/minute and 500 requests/day; `GEMINI_BATCH_SIZE=18` leaves a small margin under the per-minute cap so a whole day's allowance gets used promptly rather than trickling out over 24 hours. If you exceed the daily cap, the app defers remaining items by an hour rather than failing (see `VisionQuotaError` handling in `lib/finder-service.ts`).
+`MOONDREAM_BATCH_SIZE` controls how many pending items get a vision analysis per scheduler tick (once a minute). Moondream's free tier allows 2 requests/second (10/second once $10+ in paid credits has been added) and roughly 5,000 requests/day — check the live numbers at https://docs.moondream.ai/pricing, since these change over time. Because `FINDER_PROCESS_CONCURRENCY` (default 8) can burst several vision calls in the same second, some calls within a batch may hit the per-second cap; those get deferred an hour rather than failing the whole batch (see `VisionQuotaError` handling in `lib/finder-service.ts`), so a few 429s during a busy tick are expected and harmless — the queue just drains over a couple of extra ticks.
 
 ## Brand-targeted keywords
 
