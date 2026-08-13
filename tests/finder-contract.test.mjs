@@ -54,6 +54,37 @@ test("resolves a real-world lot title where an internal 'Knives' plural precedes
   assert.deepEqual(analyzeListingText(title), { kind: "resolved", count: 4, containsFoldingKnife: true, confidence: 0.99 });
 });
 
+test("bridges a brand name between the digit and the knife word, confirmed against real listing titles", () => {
+  assert.deepEqual(analyzeListingText("4 Kershaw KNIVES   Camping Fishing    Lot JJ7"), { kind: "resolved", count: 4, containsFoldingKnife: true, confidence: 0.99 });
+  assert.deepEqual(analyzeListingText("10 GERBER PARAFRAME KNIVES    Fishing Camping EXCELLENT    Loc 1714"), { kind: "resolved", count: 10, containsFoldingKnife: true, confidence: 0.99 });
+  assert.deepEqual(analyzeListingText("3 ASSORTED KERSHAW KNIVES   FISHING   CAMPING TOOLS   Lot G1"), { kind: "resolved", count: 3, containsFoldingKnife: true, confidence: 0.99 });
+});
+
+test("bridges filler words on both sides of the brand name (adjectives before, model name after)", () => {
+  assert.deepEqual(analyzeListingText("10 MED SIZE GERBER PARAFRAME KNIVES    Fishing Camping        Loc G411"), { kind: "resolved", count: 10, containsFoldingKnife: true, confidence: 0.99 });
+  assert.deepEqual(analyzeListingText("6 LARGE GERBER PARAFRAME KNIVES    Fishing Camping EXCELLENT    Loc U135"), { kind: "resolved", count: 6, containsFoldingKnife: true, confidence: 0.99 });
+});
+
+test("does not treat a lot number before a brand name as a quantity", () => {
+  assert.deepEqual(analyzeListingText("Lot 45 Buck Knife"), { kind: "vision" });
+});
+
+test("does not sum a title's stated total with a brand-anchored breakdown of that same total", () => {
+  const title = "3 Knives   1 BYRD/ 2 COAST KNIVES   Airport Confiscation          LOT 508";
+  assert.deepEqual(analyzeListingText(title), { kind: "resolved", count: 3, containsFoldingKnife: true, confidence: 0.99 });
+});
+
+test("trusts the title's own count over generic/reused boilerplate in the description", () => {
+  const title = "3 Kershaw KNIVES   Camping Fishing    Lot 106";
+  const description = "Buy Now 2 Kershaw KNIVES. picture shows the lot you will receive. Let your friends know.";
+  assert.deepEqual(analyzeListingText(title, description), { kind: "resolved", count: 3, containsFoldingKnife: true, confidence: 0.99 });
+});
+
+test("accepts the common 'knifes' misspelling and the 'pk'/'pack' piece abbreviation", () => {
+  assert.deepEqual(analyzeListingText("Vintage Pocket Knife Lot 25 Knifes And Multitools"), { kind: "resolved", count: 25, containsFoldingKnife: true, confidence: 0.99 });
+  assert.deepEqual(analyzeListingText("Frost Cutlery Lot Green Handle Folding Pocket Knives Stainless Clip Liner 12 Pk"), { kind: "resolved", count: 12, containsFoldingKnife: true, confidence: 0.99 });
+});
+
 test("does not mistake a hyphenated model code for a knife count", () => {
   const title = "New Folding Knife Lot Fox Edge Smith & Wesson Camillus 3-Piece Bundle NIB";
   const description = "Fox Edge Mandatory Fun FE-024 folding knife with an 8Cr13MoV stainless steel blade and ball bearing pivot.";

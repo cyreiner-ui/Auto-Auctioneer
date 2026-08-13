@@ -14,9 +14,26 @@ const numberWords: Record<string, number> = {
   sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, pair: 2,
 };
 
-const foldingPattern = /\b(?:folding|foldable|pocket\s*kn(?:ife|ives)|pen\s*kn(?:ife|ives)|penknife|jack\s*kn(?:ife|ives)|jackknife|swiss\s+army)\b/i;
-const knifePattern = /\bkn(?:ife|ives)\b/i;
+const foldingPattern = /\b(?:folding|foldable|pocket\s*kn(?:ife|ives|ifes)|pen\s*kn(?:ife|ives|ifes)|penknife|jack\s*kn(?:ife|ives|ifes)|jackknife|swiss\s+army)\b/i;
+const knifePattern = /\bkn(?:ife|ives|ifes)\b/i;
 const lotPattern = /\b(?:lot|bulk|assorted|collection|group|bundle)\b/i;
+// Mainstream brands whose flagship consumer lines are folding pocket knives — well known to this
+// business already (the same names are seeded as finder_keywords). A count anchored to one of
+// these is trusted the same way an explicit "folding"/"pocket knife" mention is, and title-only
+// numeric extraction (see numericCount) is allowed to bridge the brand/model name that otherwise
+// sits between the digit and the knife word (e.g. "4 Kershaw Knives", "10 Gerber Paraframe Knives").
+const brandNames = [
+  "buck", "gerber", "kershaw", "leatherman", "schrade", "case", "spyderco", "benchmade", "victorinox",
+  "old\\s*timer", "camillus", "boker", "imperial", "winchester", "browning",
+  "smith\\s*(?:and|&)\\s*wesson", "s&w", "crkt", "sog", "civivi", "cold\\s*steel",
+  "frost(?:\\s+cutlery)?", "m-tech", "ozark\\s*trail", "rough\\s*ry?der", "byrd", "coast",
+  "elk\\s*ridge", "opinel", "colt", "mossy\\s*oak", "tac\\s*force", "remington", "zippo",
+].join("|");
+// digit -> up to 2 filler words -> known brand -> up to 3 filler words -> knife word. The "lot "
+// lookbehind keeps this out of the same auction-lot-numbering trap componentPattern below avoids
+// (e.g. "Lot 45 folding pocket knife" is a lot number, not a count).
+const brandedComponentPattern = new RegExp(`(?<!lot )(?<![A-Za-z]-)\\b(\\d{1,3})\\s+(?:[A-Za-z][\\w.'-]{0,20}\\s+){0,2}?(?:${brandNames})\\b(?:\\s+[A-Za-z][\\w.'-]{0,20}){0,3}?\\s*(?:kn(?:ife|ives|ifes)|fixed\\s+blades?)\\b`, "gi");
+const brandKnifePattern = new RegExp(`\\b(?:${brandNames})\\b(?:\\s+[A-Za-z][\\w.'-]{0,20}){0,4}?\\s*kn(?:ife|ives|ifes)\\b`, "i");
 const selectionPattern = /\b(?:choose|choice|select)\s+(?:one|1|a)\b|\b(?:each|per\s+knife|sold\s+separately)\b/i;
 // Anchored to the title only: a seller stating outright that a "knife" lot holds no knives
 // (empty display boxes, manuals-only estate finds) is a far stronger and safer signal than
@@ -50,12 +67,12 @@ function numericCount(title: string, description: string) {
 
   // The lookbehind excludes hyphenated model codes like "FE-024" or "SL-13", where the digits
   // are part of a product name rather than a quantity.
-  const componentPattern = /(?<![A-Za-z]-)\b(\d{1,3})\s*(?:(?:folding|pocket|kitchen|fixed[ -]blade)\s+)?(?:kn(?:ife|ives)|fixed\s+blades?)\b/gi;
+  const componentPattern = /(?<![A-Za-z]-)\b(\d{1,3})\s*(?:(?:folding|pocket|kitchen|fixed[ -]blade)\s+)?(?:kn(?:ife|ives|ifes)|fixed\s+blades?)\b/gi;
   const matchValues = (text: string) => [...text.matchAll(componentPattern)].map((match) => Number(match[1])).filter((value) => Number.isInteger(value) && value > 0);
   const components = [...new Set([...matchValues(cleanTitle), ...matchValues(cleanDescription)])];
   if (components.length > 1) return components.reduce((sum, value) => sum + value, 0);
 
-  const explicitPattern = /(?<![A-Za-z]-)\b(\d{1,3})\s*(?:pocket\s+|folding\s+)?kn(?:ife|ives)\b/i;
+  const explicitPattern = /(?<![A-Za-z]-)\b(\d{1,3})\s*(?:pocket\s+|folding\s+)?kn(?:ife|ives|ifes)\b/i;
   const explicitValue = Number((cleanTitle.match(explicitPattern) ?? cleanDescription.match(explicitPattern))?.[1]);
   if (Number.isInteger(explicitValue) && explicitValue > 0) return explicitValue;
   if (components.length === 1) return components[0];
@@ -63,7 +80,7 @@ function numericCount(title: string, description: string) {
   // or dimensions like "4 x 90mm" with no reliable anchor, so those are left to Gemini vision.
   const loosePatterns = [
     /\blot\s+of\s+(\d{1,3})\b/i,
-    /\b(\d{1,3})[\s-]*(?:pc|pcs|piece|pieces)\b/i,
+    /\b(\d{1,3})[\s-]*(?:pc|pcs|piece|pieces|pk|pack)\b/i,
   ];
   for (const pattern of loosePatterns) {
     const match = cleanTitle.match(pattern);
@@ -71,18 +88,32 @@ function numericCount(title: string, description: string) {
     if (Number.isInteger(value) && value > 0) return value;
   }
   const words = Object.keys(numberWords).join("|");
-  const wordPattern = new RegExp(`\\b(?:lot\\s+(?:of\\s+)?)?(${words})\\s+(?:pocket\\s+|folding\\s+)?kn(?:ife|ives)\\b`, "i");
+  const wordPattern = new RegExp(`\\b(?:lot\\s+(?:of\\s+)?)?(${words})\\s+(?:pocket\\s+|folding\\s+)?kn(?:ife|ives|ifes)\\b`, "i");
   const wordMatch = cleanTitle.match(wordPattern) ?? cleanDescription.match(wordPattern);
-  return wordMatch ? numberWords[wordMatch[1].toLowerCase()] : null;
+  if (wordMatch) return numberWords[wordMatch[1].toLowerCase()];
+
+  // Last-resort, title-only, single-value-only fallback: a known brand bridges the gap between a
+  // digit and the knife word (e.g. "4 Kershaw Knives"). Reached only when every check above found
+  // nothing at all. Title-only and single-value-only on purpose — descriptions are frequently
+  // generic/reused boilerplate that can state a different number than this specific listing
+  // (confirmed against real listings), and summing multiple branded matches risks double-counting
+  // an aggregate-plus-breakdown title (e.g. "3 Knives: 1 Byrd, 2 Coast" is 3 total, not 5).
+  const brandedValues = [...new Set([...cleanTitle.matchAll(brandedComponentPattern)].map((match) => Number(match[1])).filter((value) => Number.isInteger(value) && value > 0))];
+  return brandedValues.length === 1 ? brandedValues[0] : null;
 }
+
+// A listing signals "this is a folding pocket knife" either by saying so directly (foldingPattern)
+// or by naming one of the mainstream brands whose flagship lines are folding knives — the same
+// weight as an explicit "folding"/"pocket knife" mention, since it's equally reliable.
+function foldingSignal(text: string) { return foldingPattern.test(text) || brandKnifePattern.test(text); }
 
 export function analyzeListingText(title: string, description = ""): TextAnalysis {
   const text = `${title} ${description}`.replace(/\s+/g, " ").trim();
   if (selectionPattern.test(text)) return { kind: "reject", reason: "selection_listing" };
   if (noKnifePattern.test(title.replace(/\s+/g, " ").trim())) return { kind: "reject", reason: "no_knives_included" };
   const count = numericCount(title, description);
-  if (count && count <= FINDER_DEFAULTS.maxPlausibleKnifeCount && foldingPattern.test(text)) return { kind: "resolved", count, containsFoldingKnife: true, confidence: 0.99 };
-  if (!lotPattern.test(text) && foldingPattern.test(text) && knifePattern.test(text)) {
+  if (count && count <= FINDER_DEFAULTS.maxPlausibleKnifeCount && foldingSignal(text)) return { kind: "resolved", count, containsFoldingKnife: true, confidence: 0.99 };
+  if (!lotPattern.test(text) && foldingSignal(text) && knifePattern.test(text)) {
     return { kind: "resolved", count: 1, containsFoldingKnife: true, confidence: 0.95 };
   }
   return { kind: "vision" };
