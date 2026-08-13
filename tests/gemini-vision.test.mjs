@@ -70,6 +70,16 @@ test("throws a generic error on other non-2xx responses", async () => {
   });
 });
 
+test("surfaces Google's actual error body on a non-2xx response, not just the bare status code", async () => {
+  await withEnv(GEMINI_ENV, async () => {
+    await withFakeRpc(true, async () => {
+      await withFetch([imageRoute, { test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => textResponse("Generative Language API has not been used in project 123 before or it is disabled.", { status: 403 }) }], async () => {
+        await assert.rejects(() => countKnivesWithGemini(INPUT), /Gemini analysis failed \(403\): Generative Language API has not been used/);
+      });
+    });
+  });
+});
+
 test("throws when Gemini returns an incomplete shape", async () => {
   await withEnv(GEMINI_ENV, async () => {
     await withFakeRpc(true, async () => {
