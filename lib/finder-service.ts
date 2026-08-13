@@ -77,24 +77,34 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker:
   return results;
 }
 
-// How long a "running" finder_runs row is trusted to genuinely still be in progress before a
-// new startFinderRun call is willing to start its own scan alongside it. This exists to stop
-// two overlapping scans (e.g. a double click on "Run now", or a manual run landing on top of
-// the daily scheduled one) from duplicating eBay calls and interleaving writes to the same
-// pending queue. It intentionally does NOT try to detect or repair a run that got orphaned by a
-// crash/timeout — a run stuck in "running" for longer than this window is simply no longer
-// treated as active, and a fresh run is allowed to start. With the scan and batch phases now
-// running concurrently (see mapWithConcurrency above), a genuine run finishes in well under a
-// minute, so this window has generous headroom without risking a long-dead row blocking things
-// indefinitely.
+// How long a "running" finder_runs row is trusted to genuinely still be in progress before it's
+// treated as orphaned (crashed or hit the route's serverless timeout mid-scan) and reconciled to
+// "failed" by reconcileOrphanedRuns below. With the scan and batch phases now running
+// concurrently (see mapWithConcurrency above), a genuine run finishes in well under a minute, so
+// this window has generous headroom without risking a long-dead row blocking things indefinitely.
 const RUN_LOCK_WINDOW_MS = 15 * 60 * 1000;
 
+// Flips any "running" finder_runs row older than RUN_LOCK_WINDOW_MS to "failed". Without this, a
+// run killed mid-scan by the route's serverless timeout (or a crash) stays "running" forever —
+// completed_at is only ever set by updateRunCounts, which never runs again for a run whose own
+// startFinderRun call never reached it — and the staff dashboard shows that stale row as "still
+// going" indefinitely, with run_key's uniqueness blocking any retry for that day. Cheap to call
+// on every tick: finder_runs has one row per day/manual-click, never enough to matter.
+async function reconcileOrphanedRuns() {
+  const cutoff = new Date(Date.now() - RUN_LOCK_WINDOW_MS).toISOString();
+  const { data: stale, error } = await supabaseAdmin.from("finder_runs").select("id, errors").eq("status", "running").lte("started_at", cutoff);
+  if (error) throw new Error(error.message);
+  for (const row of stale || []) {
+    const errors = [...(row.errors || []), "Abandoned: run stayed \"running\" past the lock window without completing (likely a serverless timeout mid-run)."];
+    const { error: updateError } = await supabaseAdmin.from("finder_runs").update({ status: "failed", completed_at: new Date().toISOString(), errors }).eq("id", row.id);
+    if (updateError) throw new Error(updateError.message);
+  }
+}
+
 async function findActiveRun() {
+  await reconcileOrphanedRuns();
   const { data, error } = await supabaseAdmin.from("finder_runs").select("*").eq("status", "running").order("started_at", { ascending: false }).limit(1).maybeSingle();
   if (error) throw new Error(error.message);
-  if (!data) return null;
-  const startedAt = new Date(data.started_at).getTime();
-  if (!Number.isFinite(startedAt) || Date.now() - startedAt > RUN_LOCK_WINDOW_MS) return null;
   return data;
 }
 
@@ -370,6 +380,10 @@ export async function processPendingFinderItems(limit = config().batchSize) {
 }
 
 export async function finderTick(date = new Date()) {
+  // Runs every minute regardless of the daily hour, so an orphaned run gets flipped to "failed"
+  // (and the dashboard stops showing it as active) within a minute of going stale, rather than
+  // waiting for the next daily scan or a staff member clicking "Run now".
+  await reconcileOrphanedRuns();
   let dailyRun = null;
   if (isDailyFinderHour(date)) dailyRun = await startFinderRun("scheduled", `scheduled:${easternDateKey(date)}`);
   const queue = await processPendingFinderItems();

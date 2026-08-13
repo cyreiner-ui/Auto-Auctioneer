@@ -820,7 +820,7 @@ test("startFinderRun treats a running run older than the lock window as abandone
     await withFakeBackend({
       finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
       finder_runs: [{ id: "stale-run", run_key: "manual:stale", trigger: "manual", status: "running", started_at: new Date(Date.now() - 20 * 60 * 1000).toISOString() }],
-    }, async () => {
+    }, async (fake) => {
       await withFetch([
         tokenRoute,
         { test: (url) => url.startsWith(SEARCH_URL), respond: () => { searchCalls++; return jsonResponse({ itemSummaries: [ebayItem()] }); } },
@@ -830,6 +830,38 @@ test("startFinderRun treats a running run older than the lock window as abandone
         assert.notEqual(run.id, "stale-run");
         assert.equal(searchCalls, 1, "a run stuck 'running' well past the lock window should not block a fresh scan");
       });
+      const stale = fake.tables.finder_runs.find((row) => row.id === "stale-run");
+      assert.equal(stale.status, "failed", "the abandoned row itself should be reconciled, not just ignored");
+      assert.ok(stale.completed_at, "a reconciled run needs completed_at set so it stops reading as still in progress");
+    });
+  });
+});
+
+test("finderTick reconciles a run orphaned past the lock window even on an off-hour tick with no new run to start", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_runs: [{ id: "orphaned-run", run_key: "scheduled:2026-08-12", trigger: "scheduled", status: "running", started_at: new Date(Date.now() - 60 * 60 * 1000).toISOString() }],
+    }, async (fake) => {
+      const result = await finderTick(new Date("2026-08-06T09:59:00Z"));
+      assert.equal(result.dailyRun, null, "an off-hour tick still must not start a new scan");
+      const orphaned = fake.tables.finder_runs.find((row) => row.id === "orphaned-run");
+      assert.equal(orphaned.status, "failed", "a run stuck 'running' for an hour should be reconciled within a single tick, without waiting for the next daily run or a manual click");
+      assert.ok(orphaned.completed_at);
+    });
+  });
+});
+
+test("finderTick does not touch a run that is still genuinely within its lock window", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_runs: [{ id: "fresh-run", run_key: "manual:fresh", trigger: "manual", status: "running", started_at: new Date(Date.now() - 60 * 1000).toISOString() }],
+    }, async (fake) => {
+      await finderTick(new Date("2026-08-06T09:59:00Z"));
+      const fresh = fake.tables.finder_runs.find((row) => row.id === "fresh-run");
+      assert.equal(fresh.status, "running", "a run only a minute old is still plausibly in progress and must not be reconciled away");
+      assert.equal(fresh.completed_at, undefined);
     });
   });
 });
