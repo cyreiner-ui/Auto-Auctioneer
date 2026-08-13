@@ -4,13 +4,33 @@ import { useCallback, useSyncExternalStore } from "react";
 
 const listeners = new Map<string, Set<() => void>>();
 
+// Caches the parsed value per key, alongside the raw string it came from, so
+// getSnapshot returns the SAME object reference when localStorage hasn't
+// actually changed. useSyncExternalStore requires that — returning a freshly
+// parsed array/object on every call (even with identical contents) makes it
+// look like the store changes on every render, which triggers React's
+// tearing-check to re-render in an infinite loop.
+const cache = new Map<string, { raw: string | null; value: unknown }>();
+
 function readValue<T>(key: string, initial: T): T {
+  let raw: string | null;
   try {
-    const raw = window.localStorage.getItem(key);
-    return raw !== null ? (JSON.parse(raw) as T) : initial;
+    raw = window.localStorage.getItem(key);
   } catch {
     return initial;
   }
+  const cached = cache.get(key);
+  if (cached && cached.raw === raw) return cached.value as T;
+  let value = initial;
+  if (raw !== null) { try { value = JSON.parse(raw) as T; } catch { value = initial; } }
+  cache.set(key, { raw, value });
+  return value;
+}
+
+function writeValue<T>(key: string, value: T) {
+  const raw = JSON.stringify(value);
+  window.localStorage.setItem(key, raw);
+  cache.set(key, { raw, value });
 }
 
 function emit(key: string) {
@@ -31,7 +51,7 @@ export function usePersistedState<T>(key: string, initial: T) {
 
   const setValue = useCallback((next: T | ((current: T) => T)) => {
     const resolved = typeof next === "function" ? (next as (current: T) => T)(readValue(key, initial)) : next;
-    window.localStorage.setItem(key, JSON.stringify(resolved));
+    writeValue(key, resolved);
     emit(key);
   }, [key, initial]);
 
