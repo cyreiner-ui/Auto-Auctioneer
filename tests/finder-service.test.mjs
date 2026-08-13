@@ -38,7 +38,10 @@ const tokenRoute = { test: (url) => url.startsWith(TOKEN_URL), respond: () => js
 const itemShippingRoute = (value) => ({ test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ shippingOptions: value == null ? [] : [{ shippingCost: { value: String(value), currency: "USD" } }] }) });
 const gixenOkRoute = { test: (url) => url.includes("gixen.com/api.php"), respond: () => textResponse("OK snipe ADDED") };
 const imageRoute = { test: (url) => url.includes("i.ebayimg.com"), respond: () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/jpeg" } }) };
-const moondreamRoute = (body) => ({ test: (url) => url.includes("api.moondream.ai"), respond: () => jsonResponse({ request_id: "req_1", answer: JSON.stringify(body) }) });
+const moondreamRoutes = ({ knifeCount, containsFoldingKnife, confidence, uncertaintyReason }) => [
+  { test: (url) => url.includes("api.moondream.ai/v1/detect"), respond: () => jsonResponse({ request_id: "req_1", objects: Array.from({ length: knifeCount }, () => ({ x_min: 0, y_min: 0, x_max: 1, y_max: 1 })) }) },
+  { test: (url) => url.includes("api.moondream.ai/v1/query"), respond: () => jsonResponse({ request_id: "req_1", answer: JSON.stringify({ containsFoldingKnife, confidence, uncertaintyReason }) }) },
+];
 
 function ebayItem(overrides = {}) {
   return {
@@ -392,7 +395,7 @@ test("processPendingFinderItems resolves a pending item's ceiling using its matc
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, moondreamRoute({ knifeCount: 10, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), gixenOkRoute], async () => {
+      await withFetch([imageRoute, ...moondreamRoutes({ knifeCount: 10, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), gixenOkRoute], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -415,7 +418,7 @@ test("processPendingFinderItems resolves a pending item through vision and notif
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, moondreamRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), gixenOkRoute], async () => {
+      await withFetch([imageRoute, ...moondreamRoutes({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), gixenOkRoute], async () => {
         const { processed, deferred } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         assert.equal(deferred, 0);
@@ -445,7 +448,7 @@ test("processPendingFinderItems rejects an implausibly large vision-reported kni
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, moondreamRoute({ knifeCount: 500, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" })], async () => {
+      await withFetch([imageRoute, ...moondreamRoutes({ knifeCount: 500, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -644,7 +647,7 @@ test("processPendingFinderItems looks up shipping after vision resolves the coun
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([tokenRoute, imageRoute, moondreamRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), itemShippingRoute(5), gixenOkRoute], async () => {
+      await withFetch([tokenRoute, imageRoute, ...moondreamRoutes({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), itemShippingRoute(5), gixenOkRoute], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -669,7 +672,7 @@ test("processPendingFinderItems skips the shipping lookup and rejects immediatel
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, moondreamRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" })], async () => {
+      await withFetch([imageRoute, ...moondreamRoutes({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;

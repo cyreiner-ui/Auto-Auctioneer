@@ -19,7 +19,8 @@ function withFakeRpc(reserved, fn) {
 }
 
 const imageRoute = { test: (url) => url.includes("i.ebayimg.com"), respond: () => new Response(new Uint8Array([1, 2, 3, 4]), { status: 200, headers: { "content-type": "image/jpeg" } }) };
-const moondreamRoute = (body) => ({ test: (url) => url.includes("api.moondream.ai"), respond: () => jsonResponse({ request_id: "req_1", answer: JSON.stringify(body) }) });
+const detectRoute = (count) => ({ test: (url) => url.includes("api.moondream.ai/v1/detect"), respond: () => jsonResponse({ request_id: "req_1", objects: Array.from({ length: count }, () => ({ x_min: 0, y_min: 0, x_max: 1, y_max: 1 })) }) });
+const judgeRoute = (body) => ({ test: (url) => url.includes("api.moondream.ai/v1/query"), respond: () => jsonResponse({ request_id: "req_1", answer: JSON.stringify(body) }) });
 
 test("throws before any call when MOONDREAM_API_KEY is not configured", async () => {
   await withEnv({ MOONDREAM_API_KEY: "" }, async () => {
@@ -39,10 +40,10 @@ test("throws VisionBudgetError when the monthly reservation is refused", async (
   });
 });
 
-test("returns a parsed knife count on a successful analysis", async () => {
+test("returns a knifeCount from /v1/detect and a judgment from /v1/query on a successful analysis", async () => {
   await withEnv(MOONDREAM_ENV, async () => {
     await withFakeRpc(true, async () => {
-      await withFetch([imageRoute, moondreamRoute({ knifeCount: 10, containsFoldingKnife: true, confidence: 0.97, uncertaintyReason: "" })], async () => {
+      await withFetch([imageRoute, detectRoute(10), judgeRoute({ containsFoldingKnife: true, confidence: 0.97, uncertaintyReason: "" })], async () => {
         const result = await countKnivesWithMoondream(INPUT);
         assert.deepEqual(result, { knifeCount: 10, containsFoldingKnife: true, confidence: 0.97, uncertaintyReason: "" });
       });
@@ -50,11 +51,11 @@ test("returns a parsed knife count on a successful analysis", async () => {
   });
 });
 
-test("parses the answer even when Moondream wraps the JSON in extra prose or markdown fences", async () => {
+test("parses the judgment even when Moondream wraps the JSON in extra prose or markdown fences", async () => {
   await withEnv(MOONDREAM_ENV, async () => {
     await withFakeRpc(true, async () => {
-      const wrapped = `Here you go:\n\`\`\`json\n${JSON.stringify({ knifeCount: 3, containsFoldingKnife: true, confidence: 0.92, uncertaintyReason: "" })}\n\`\`\``;
-      await withFetch([imageRoute, { test: (url) => url.includes("api.moondream.ai"), respond: () => jsonResponse({ request_id: "req_1", answer: wrapped }) }], async () => {
+      const wrapped = `Here you go:\n\`\`\`json\n${JSON.stringify({ containsFoldingKnife: true, confidence: 0.92, uncertaintyReason: "" })}\n\`\`\``;
+      await withFetch([imageRoute, detectRoute(3), { test: (url) => url.includes("api.moondream.ai/v1/query"), respond: () => jsonResponse({ request_id: "req_1", answer: wrapped }) }], async () => {
         const result = await countKnivesWithMoondream(INPUT);
         assert.deepEqual(result, { knifeCount: 3, containsFoldingKnife: true, confidence: 0.92, uncertaintyReason: "" });
       });
@@ -62,10 +63,20 @@ test("parses the answer even when Moondream wraps the JSON in extra prose or mar
   });
 });
 
-test("throws VisionQuotaError on a 429 response", async () => {
+test("throws VisionQuotaError on a 429 response from /v1/detect", async () => {
   await withEnv(MOONDREAM_ENV, async () => {
     await withFakeRpc(true, async () => {
-      await withFetch([imageRoute, { test: (url) => url.includes("api.moondream.ai"), respond: () => textResponse("rate limited", { status: 429 }) }], async () => {
+      await withFetch([imageRoute, { test: (url) => url.includes("api.moondream.ai/v1/detect"), respond: () => textResponse("rate limited", { status: 429 }) }], async () => {
+        await assert.rejects(() => countKnivesWithMoondream(INPUT), VisionQuotaError);
+      });
+    });
+  });
+});
+
+test("throws VisionQuotaError on a 429 response from /v1/query", async () => {
+  await withEnv(MOONDREAM_ENV, async () => {
+    await withFakeRpc(true, async () => {
+      await withFetch([imageRoute, detectRoute(3), { test: (url) => url.includes("api.moondream.ai/v1/query"), respond: () => textResponse("rate limited", { status: 429 }) }], async () => {
         await assert.rejects(() => countKnivesWithMoondream(INPUT), VisionQuotaError);
       });
     });
@@ -75,7 +86,7 @@ test("throws VisionQuotaError on a 429 response", async () => {
 test("throws a generic error on other non-2xx responses", async () => {
   await withEnv(MOONDREAM_ENV, async () => {
     await withFakeRpc(true, async () => {
-      await withFetch([imageRoute, { test: (url) => url.includes("api.moondream.ai"), respond: () => textResponse("server error", { status: 500 }) }], async () => {
+      await withFetch([imageRoute, { test: (url) => url.includes("api.moondream.ai/v1/detect"), respond: () => textResponse("server error", { status: 500 }) }], async () => {
         await assert.rejects(() => countKnivesWithMoondream(INPUT), /Moondream analysis failed \(500\)/);
       });
     });
@@ -85,27 +96,37 @@ test("throws a generic error on other non-2xx responses", async () => {
 test("surfaces Moondream's actual error body on a non-2xx response, not just the bare status code", async () => {
   await withEnv(MOONDREAM_ENV, async () => {
     await withFakeRpc(true, async () => {
-      await withFetch([imageRoute, { test: (url) => url.includes("api.moondream.ai"), respond: () => textResponse("Invalid API key.", { status: 403 }) }], async () => {
+      await withFetch([imageRoute, { test: (url) => url.includes("api.moondream.ai/v1/detect"), respond: () => textResponse("Invalid API key.", { status: 403 }) }], async () => {
         await assert.rejects(() => countKnivesWithMoondream(INPUT), /Moondream analysis failed \(403\): Invalid API key\./);
       });
     });
   });
 });
 
-test("throws when Moondream returns an incomplete shape", async () => {
+test("throws when /v1/detect returns a shape with no objects array", async () => {
   await withEnv(MOONDREAM_ENV, async () => {
     await withFakeRpc(true, async () => {
-      await withFetch([imageRoute, moondreamRoute({ knifeCount: 10 })], async () => {
+      await withFetch([imageRoute, { test: (url) => url.includes("api.moondream.ai/v1/detect"), respond: () => jsonResponse({ request_id: "req_1" }) }], async () => {
         await assert.rejects(() => countKnivesWithMoondream(INPUT), /invalid knife count/);
       });
     });
   });
 });
 
-test("throws when Moondream's answer has no JSON object at all", async () => {
+test("throws when /v1/query returns an incomplete judgment shape", async () => {
   await withEnv(MOONDREAM_ENV, async () => {
     await withFakeRpc(true, async () => {
-      await withFetch([imageRoute, { test: (url) => url.includes("api.moondream.ai"), respond: () => jsonResponse({ request_id: "req_1", answer: "I count ten knives." }) }], async () => {
+      await withFetch([imageRoute, detectRoute(5), judgeRoute({ containsFoldingKnife: true })], async () => {
+        await assert.rejects(() => countKnivesWithMoondream(INPUT), /invalid knife count/);
+      });
+    });
+  });
+});
+
+test("throws when /v1/query's answer has no JSON object at all", async () => {
+  await withEnv(MOONDREAM_ENV, async () => {
+    await withFakeRpc(true, async () => {
+      await withFetch([imageRoute, detectRoute(5), { test: (url) => url.includes("api.moondream.ai/v1/query"), respond: () => jsonResponse({ request_id: "req_1", answer: "Yes, it's a folding knife." }) }], async () => {
         await assert.rejects(() => countKnivesWithMoondream(INPUT), /invalid knife count/);
       });
     });
