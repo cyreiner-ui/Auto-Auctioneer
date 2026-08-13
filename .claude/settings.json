@@ -13,7 +13,8 @@
   },
   "permissions": {
     "allow": [
-      "mcp__github__pull_request_read"
+      "mcp__github__pull_request_read",
+      "mcp__Supabase__execute_sql"
     ]
   }
 }
