@@ -165,6 +165,30 @@ test("getItemShippingCost returns a null value for a listing with no usable ship
   });
 });
 
+test("searchEbayKeyword skips the token request entirely when a pre-fetched token is passed in", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    await withFetch([
+      { test: (url) => url.startsWith(TOKEN_URL), respond: () => { throw new Error("should not fetch a token when one is already provided"); } },
+      { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [item()] }) },
+    ], async () => {
+      const results = await searchEbayKeyword("knife lot", 10, "already-have-a-token");
+      assert.equal(results.length, 1);
+    });
+  });
+});
+
+test("getItemShippingCost skips the token request entirely when a pre-fetched token is passed in", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    await withFetch([
+      { test: (url) => url.startsWith(TOKEN_URL), respond: () => { throw new Error("should not fetch a token when one is already provided"); } },
+      { test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ shippingOptions: [{ shippingCost: { value: "9.99", currency: "USD" } }] }) },
+    ], async () => {
+      const result = await getItemShippingCost("v1|1|0", "already-have-a-token");
+      assert.deepEqual(result, { value: 9.99, currency: "USD" });
+    });
+  });
+});
+
 test("getItemShippingCost throws when the item lookup fails", async () => {
   await withEnv(EBAY_ENV, async () => {
     await withFetch([tokenRoute, { test: (url) => url.startsWith(ITEM_URL), respond: () => textResponse("not found", { status: 404 }) }], async () => {

@@ -15,7 +15,7 @@ export type EbayFinderItem = {
   itemEndDate: string | null;
 };
 
-async function appToken() {
+export async function appToken() {
   const clientId = process.env.EBAY_CLIENT_ID?.trim();
   const clientSecret = process.env.EBAY_CLIENT_SECRET?.trim();
   if (!clientId || !clientSecret) throw new Error("eBay API credentials are not configured.");
@@ -38,12 +38,12 @@ function shippingCost(item: { shippingOptions?: Array<{ shippingCost?: { value?:
   return costs[0] || { value: null, currency: "" };
 }
 
-async function browseHeaders() {
-  const token = await appToken();
+async function browseHeaders(token?: string) {
+  const authToken = token || await appToken();
   const marketplace = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
   const zip = process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip;
   return {
-    Authorization: `Bearer ${token}`,
+    Authorization: `Bearer ${authToken}`,
     "X-EBAY-C-MARKETPLACE-ID": marketplace,
     "X-EBAY-C-ENDUSERCTX": `contextualLocation=country%3DUS%2Czip%3D${encodeURIComponent(zip)}`,
   };
@@ -52,17 +52,23 @@ async function browseHeaders() {
 // eBay's item_summary/search endpoint frequently omits a computed shippingCost for listings
 // using CALCULATED (weight/location-based) shipping, even with a contextualLocation header —
 // the single-item endpoint reliably computes it. Call this only for listings worth the extra
-// request (see isShippingLookupWorthwhile in finder-core.ts).
-export async function getItemShippingCost(itemId: string) {
+// request (see isShippingLookupWorthwhile in finder-core.ts). Pass a pre-fetched `token` when
+// calling this repeatedly (e.g. once per pending-queue batch) to avoid a fresh OAuth round trip
+// per item — each one is a real network call and adds up fast against a serverless timeout.
+export async function getItemShippingCost(itemId: string, token?: string) {
   const url = `${ebayApiBaseUrl()}/buy/browse/v1/item/${encodeURIComponent(itemId)}`;
-  const response = await fetch(url, { headers: await browseHeaders() });
+  const response = await fetch(url, { headers: await browseHeaders(token) });
   if (!response.ok) throw new Error(`eBay item lookup for "${itemId}" failed (${response.status}).`);
   const payload = await response.json() as { shippingOptions?: Array<{ shippingCost?: { value?: string; currency?: string } }> };
   return shippingCost(payload);
 }
 
-export async function searchEbayKeyword(keyword: string, requested: number = FINDER_DEFAULTS.resultsPerKeyword) {
-  const token = await appToken();
+// Pass a pre-fetched `token` when calling this once per keyword in a loop (e.g. startFinderRun's
+// scan across every enabled keyword) so the run doesn't pay for a fresh OAuth round trip per
+// keyword — with 35+ keywords that's dozens of avoidable network calls stacked inside one
+// request's time budget.
+export async function searchEbayKeyword(keyword: string, requested: number = FINDER_DEFAULTS.resultsPerKeyword, token?: string) {
+  const authToken = token || await appToken();
   const marketplace = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
   const zip = process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip;
   const result: EbayFinderItem[] = [];
@@ -75,7 +81,7 @@ export async function searchEbayKeyword(keyword: string, requested: number = FIN
     url.searchParams.set("filter", "deliveryCountry:US");
     const response = await fetch(url, {
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${authToken}`,
         "X-EBAY-C-MARKETPLACE-ID": marketplace,
         "X-EBAY-C-ENDUSERCTX": `contextualLocation=country%3DUS%2Czip%3D${encodeURIComponent(zip)}`,
       },

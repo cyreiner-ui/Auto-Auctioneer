@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { getItemShippingCost, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
+import { appToken, getItemShippingCost, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
 import { analyzeListingText, calculateDeal, FINDER_DEFAULTS, isDailyFinderHour, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
 import { isAuctionFormat } from "./gixen-client";
@@ -178,9 +178,13 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const found = new Map<string, { item: EbayFinderItem; phrases: string[] }>();
     const errors: string[] = [];
     let scanned = 0;
+    // Fetch the eBay app token once and reuse it across every keyword search in this run —
+    // fetching it fresh per keyword adds a whole extra network round trip per keyword, which
+    // stacks up fast against this route's serverless time budget once there are 30+ keywords.
+    const token = keywords?.length ? await appToken() : null;
     for (const keyword of keywords || []) {
       try {
-        for (const item of await searchEbayKeyword(keyword.phrase, config().searchDepth)) {
+        for (const item of await searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined)) {
           const current = found.get(item.itemId);
           if (current) current.phrases.push(keyword.phrase);
           else found.set(item.itemId, { item, phrases: [keyword.phrase] });
@@ -229,6 +233,10 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   let deferred = 0;
   const runIds = new Set<string>();
   const qualifiedIds: string[] = [];
+  // Shared across every shipping lookup in this batch, fetched lazily on first use — avoids a
+  // fresh OAuth round trip per item on top of the per-item Browse API call.
+  let sharedToken: string | undefined;
+  const tokenForLookup = async () => { if (!sharedToken) sharedToken = await appToken(); return sharedToken; };
   for (const row of rows) {
     if (row.run_id) runIds.add(row.run_id);
     const maxCost = resolveMaxCostPerKnife(row.keyword_phrases || [], keywordMaxCost, config().maxCost);
@@ -237,7 +245,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         // The text parser already resolved the count on discovery; this row is only pending
         // because the search result was missing a shipping cost, and initialRow already
         // confirmed the price alone leaves room to qualify — no need to touch Gemini at all.
-        const shipping = await getItemShippingCost(row.ebay_item_id);
+        const shipping = await getItemShippingCost(row.ebay_item_id, await tokenForLookup());
         const shippingValue = shipping.value != null && (shipping.currency === "" || shipping.currency === "USD") ? shipping.value : null;
         const deal = shippingValue != null ? calculateDeal(Number(row.item_price), shippingValue, row.knife_count, maxCost) : null;
         const qualifies = Boolean(deal?.qualifies);
@@ -257,7 +265,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         if (!isShippingLookupWorthwhile(Number(row.item_price), vision.knifeCount, maxCost)) {
           shippingReason = "over_budget";
         } else {
-          const shipping = await getItemShippingCost(row.ebay_item_id);
+          const shipping = await getItemShippingCost(row.ebay_item_id, await tokenForLookup());
           if (shipping.value != null && (shipping.currency === "" || shipping.currency === "USD")) { shippingValue = shipping.value; shippingSource = "lookup"; }
           else shippingReason = "missing_shipping";
         }
