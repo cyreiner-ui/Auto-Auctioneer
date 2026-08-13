@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeListingText, calculateDeal, finderPages, isDailyFinderHour, monthKey } from "../lib/finder-core.ts";
+import { analyzeListingText, calculateDeal, finderPages, isDailyFinderHour, monthKey, resolveMaxCostPerKnife } from "../lib/finder-core.ts";
 
 test("extracts explicit numeric and word lot counts", () => {
   assert.deepEqual(analyzeListingText("Lot of 12 folding pocket knives"), { kind: "resolved", count: 12, containsFoldingKnife: true, confidence: 0.99 });
@@ -103,4 +103,19 @@ test("uses calendar month keys and Eastern daily hour", () => {
 
 test("paginates 500 eBay results as 200, 200, and 100", () => {
   assert.deepEqual(finderPages(500), [{ offset: 0, limit: 200 }, { offset: 200, limit: 200 }, { offset: 400, limit: 100 }]);
+});
+
+test("resolveMaxCostPerKnife falls back to the global default when no matched keyword has an override", () => {
+  assert.equal(resolveMaxCostPerKnife(["knife lot"], new Map([["knife lot", null]]), 3.5), 3.5);
+  assert.equal(resolveMaxCostPerKnife([], new Map(), 3.5), 3.5);
+});
+
+test("resolveMaxCostPerKnife takes the highest override among multiple matched keywords", () => {
+  const overrides = new Map([["spyderco knife lot", 8], ["benchmade knife lot", 6], ["knife lot", null]]);
+  assert.equal(resolveMaxCostPerKnife(["spyderco knife lot", "benchmade knife lot", "knife lot"], overrides, 3.5), 8);
+});
+
+test("resolveMaxCostPerKnife ignores a zero or negative override as invalid", () => {
+  const overrides = new Map([["knife lot", 0], ["bad", -5]]);
+  assert.equal(resolveMaxCostPerKnife(["knife lot", "bad"], overrides, 3.5), 3.5);
 });

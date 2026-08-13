@@ -268,6 +268,81 @@ test("startFinderRun still preserves a vision count when the current text parser
   });
 });
 
+test("startFinderRun applies a keyword's per-knife price override instead of the global default", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "spyderco knife lot", enabled: true, max_cost_per_knife: 8, created_at: "2026-01-01" }] }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem({
+          title: "Lot of 10 Spyderco Pocket Knives",
+          price: { value: "60.00", currency: "USD" },
+          shippingOptions: [{ shippingCost: { value: "5.00", currency: "USD" } }],
+        })] }) },
+        gixenOkRoute,
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-brand-override");
+        assert.equal(run.qualified, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.knife_count, 10);
+        assert.equal(item.cost_per_knife, 6.5);
+        assert.equal(item.status, "qualified", "the $8 spyderco override, not the $3.50 global default, should apply");
+      });
+    });
+  });
+});
+
+test("startFinderRun takes the highest override when an item matches multiple keywords with different ceilings", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [
+        { id: "k1", phrase: "spyderco knife lot", enabled: true, max_cost_per_knife: 8, created_at: "2026-01-01" },
+        { id: "k2", phrase: "knife lot", enabled: true, max_cost_per_knife: null, created_at: "2026-01-02" },
+      ],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem({
+          title: "Lot of 10 Spyderco Pocket Knives",
+          price: { value: "60.00", currency: "USD" },
+          shippingOptions: [{ shippingCost: { value: "5.00", currency: "USD" } }],
+        })] }) },
+        gixenOkRoute,
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-multi-keyword-override");
+        assert.equal(run.qualified, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "qualified", "the higher $8 override should win over the unset generic keyword match");
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems resolves a pending item's ceiling using its matched keyword's override", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "spyderco knife lot", enabled: true, max_cost_per_knife: 8, created_at: "2026-01-01" }],
+      finder_items: [{
+        ebay_item_id: "v1|9|0", run_id: null, title: "Mixed spyderco knife lot", short_description: "",
+        keyword_phrases: ["spyderco knife lot"],
+        image_url: "https://i.ebayimg.com/9.jpg", item_price: 60, shipping_cost: 5, buying_options: ["AUCTION"],
+        status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+      }],
+    }, async (fake) => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 10, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), gixenOkRoute], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "qualified", "the $8 override should apply to a vision-resolved pending item too");
+        assert.equal(item.cost_per_knife, 6.5);
+      });
+    });
+  });
+});
+
 test("processPendingFinderItems resolves a pending item through vision and notifies", async (t) => {
   await withEnv(ENV, async () => {
     const sent = [];

@@ -88,6 +88,16 @@ export function analyzeListingText(title: string, description = ""): TextAnalysi
   return { kind: "vision" };
 }
 
+// A listing's matched keywords may include a brand-specific override alongside a generic,
+// override-less phrase; the generic match carries no signal that should pull the ceiling down,
+// so the highest override among the matched keywords wins.
+export function resolveMaxCostPerKnife(matchedPhrases: string[], keywordOverrides: Map<string, number | null | undefined>, defaultMax: number = FINDER_DEFAULTS.maxCostPerKnife): number {
+  const overrides = matchedPhrases
+    .map((phrase) => keywordOverrides.get(phrase))
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+  return overrides.length ? Math.max(...overrides) : defaultMax;
+}
+
 export function calculateDeal(itemPrice: number, shippingCost: number | null, knifeCount: number, max: number = FINDER_DEFAULTS.maxCostPerKnife) {
   if (!Number.isFinite(itemPrice) || itemPrice < 0) return { qualifies: false, reason: "invalid_price" as const };
   if (shippingCost == null || !Number.isFinite(shippingCost) || shippingCost < 0) return { qualifies: false, reason: "missing_shipping" as const };

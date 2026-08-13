@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
-import { analyzeListingText, calculateDeal, FINDER_DEFAULTS, isDailyFinderHour, monthKey } from "./finder-core";
+import { analyzeListingText, calculateDeal, FINDER_DEFAULTS, isDailyFinderHour, monthKey, resolveMaxCostPerKnife } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
 import { addSnipe, isAuctionFormat } from "./gixen-client";
 import { sendQualifiedItemsEmail } from "./finder-notify";
@@ -44,6 +44,7 @@ async function notifyNewlyQualified(ebayItemIds: string[]) {
 type FinderRow = {
   ebay_item_id: string;
   run_id: string | null;
+  keyword_phrases: string[] | null;
   title: string;
   short_description: string;
   image_url: string | null;
@@ -67,7 +68,7 @@ function easternDateKey(date = new Date()) {
   return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
-function initialRow(item: EbayFinderItem, keywordPhrases: string[], runId: string) {
+function initialRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, maxCost: number) {
   const base = {
     ebay_item_id: item.itemId,
     run_id: runId,
@@ -90,7 +91,7 @@ function initialRow(item: EbayFinderItem, keywordPhrases: string[], runId: strin
   const text = analyzeListingText(item.title, item.shortDescription);
   if (text.kind === "reject") return { ...base, status: "rejected", reason: text.reason, processed_at: new Date().toISOString() };
   if (text.kind === "resolved") {
-    const deal = calculateDeal(item.itemPrice, item.shippingCost, text.count, config().maxCost);
+    const deal = calculateDeal(item.itemPrice, item.shippingCost, text.count, maxCost);
     return { ...base, status: deal.qualifies ? "qualified" : "rejected", reason: deal.reason, knife_count: text.count, contains_folding_knife: true, confidence: text.confidence, detection_source: "text", total_cost: "totalCost" in deal ? deal.totalCost : null, cost_per_knife: "costPerKnife" in deal ? deal.costPerKnife : null, processed_at: new Date().toISOString() };
   }
   if (!item.imageUrl) return { ...base, status: "rejected", reason: "missing_image", processed_at: new Date().toISOString() };
@@ -105,8 +106,8 @@ type ExistingFinderRow = {
   detection_source: string | null;
 };
 
-function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, existing: ExistingFinderRow | undefined) {
-  const fresh = initialRow(item, keywordPhrases, runId);
+function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, existing: ExistingFinderRow | undefined, maxCost: number) {
+  const fresh = initialRow(item, keywordPhrases, runId, maxCost);
   // Only fall back to a stale vision count when the *current* text re-analysis is itself still
   // ambiguous (fresh.status === "pending"). If the (possibly since-fixed) text parser now
   // conclusively resolves or rejects the listing, trust it outright and discard the old
@@ -114,7 +115,7 @@ function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: str
   // more reliable than a single-image vision call, and this is what lets already-fixed parser
   // bugs self-correct for free on the next scan instead of staying wrong forever.
   if (!existing || existing.detection_source !== "vision" || existing.knife_count == null || fresh.status !== "pending") return fresh;
-  const deal = calculateDeal(item.itemPrice, item.shippingCost, existing.knife_count, config().maxCost);
+  const deal = calculateDeal(item.itemPrice, item.shippingCost, existing.knife_count, maxCost);
   return {
     ...fresh,
     status: deal.qualifies ? "qualified" : "rejected",
@@ -153,8 +154,9 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
   }
   const run = inserted[0];
   try {
-    const { data: keywords, error: keywordError } = await supabaseAdmin.from("finder_keywords").select("phrase").eq("enabled", true).order("created_at");
+    const { data: keywords, error: keywordError } = await supabaseAdmin.from("finder_keywords").select("phrase, max_cost_per_knife").eq("enabled", true).order("created_at");
     if (keywordError) throw new Error(keywordError.message);
+    const keywordMaxCost = new Map((keywords || []).map((keyword) => [keyword.phrase, keyword.max_cost_per_knife]));
     const found = new Map<string, { item: EbayFinderItem; phrases: string[] }>();
     const errors: string[] = [];
     let scanned = 0;
@@ -176,7 +178,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
       if (error) throw new Error(error.message);
       for (const row of data || []) existingById.set(row.ebay_item_id, row);
     }
-    const rows = [...found.values()].map(({ item, phrases }) => refreshedRow(item, phrases, run.id, existingById.get(item.itemId)));
+    const rows = [...found.values()].map(({ item, phrases }) => refreshedRow(item, phrases, run.id, existingById.get(item.itemId), resolveMaxCostPerKnife(phrases, keywordMaxCost, config().maxCost)));
     const added = ids.filter((id) => !existingById.has(id)).length;
     for (let index = 0; index < rows.length; index += 200) {
       const { error } = await supabaseAdmin.from("finder_items").upsert(rows.slice(index, index + 200), { onConflict: "ebay_item_id" });
@@ -197,16 +199,25 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   const now = new Date().toISOString();
   const { data, error } = await supabaseAdmin.from("finder_items").select("*").eq("status", "pending").lte("next_attempt_at", now).order("discovered_at").limit(limit);
   if (error) throw new Error(error.message);
+  const rows = (data || []) as FinderRow[];
+  const phraseSet = [...new Set(rows.flatMap((row) => row.keyword_phrases || []))];
+  const keywordMaxCost = new Map<string, number | null>();
+  if (phraseSet.length) {
+    const { data: keywordRows, error: keywordError } = await supabaseAdmin.from("finder_keywords").select("phrase, max_cost_per_knife").in("phrase", phraseSet);
+    if (keywordError) throw new Error(keywordError.message);
+    for (const keywordRow of keywordRows || []) keywordMaxCost.set(keywordRow.phrase, keywordRow.max_cost_per_knife);
+  }
   let processed = 0;
   let deferred = 0;
   const runIds = new Set<string>();
   const qualifiedIds: string[] = [];
-  for (const row of (data || []) as FinderRow[]) {
+  for (const row of rows) {
     if (row.run_id) runIds.add(row.run_id);
+    const maxCost = resolveMaxCostPerKnife(row.keyword_phrases || [], keywordMaxCost, config().maxCost);
     try {
       const vision = await countKnivesWithGemini({ title: row.title, description: row.short_description, imageUrl: row.image_url || "" });
       const confident = vision.confidence >= config().confidence && vision.knifeCount > 0 && vision.knifeCount <= FINDER_DEFAULTS.maxPlausibleKnifeCount && vision.containsFoldingKnife;
-      const deal = confident ? calculateDeal(Number(row.item_price), row.shipping_cost == null ? null : Number(row.shipping_cost), vision.knifeCount, config().maxCost) : null;
+      const deal = confident ? calculateDeal(Number(row.item_price), row.shipping_cost == null ? null : Number(row.shipping_cost), vision.knifeCount, maxCost) : null;
       const qualifies = Boolean(confident && deal?.qualifies);
       const reason = !vision.containsFoldingKnife ? "no_folding_knife" : vision.confidence < config().confidence ? (vision.uncertaintyReason || "low_confidence") : vision.knifeCount < 1 ? "invalid_count" : vision.knifeCount > FINDER_DEFAULTS.maxPlausibleKnifeCount ? "implausible_count" : deal?.reason;
       const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: qualifies ? "qualified" : "rejected", reason, knife_count: vision.knifeCount || null, contains_folding_knife: vision.containsFoldingKnife, confidence: vision.confidence, detection_source: "vision", total_cost: deal && "totalCost" in deal ? deal.totalCost : null, cost_per_knife: deal && "costPerKnife" in deal ? deal.costPerKnife : null, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
