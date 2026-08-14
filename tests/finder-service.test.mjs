@@ -392,7 +392,7 @@ test("processPendingFinderItems resolves a pending item's ceiling using its matc
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ knifeCount: 10, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), gixenOkRoute], async () => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 10, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "", itemCategory: "pocket_knife" }), gixenOkRoute], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -415,7 +415,7 @@ test("processPendingFinderItems resolves a pending item through vision and notif
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), gixenOkRoute], async () => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "", itemCategory: "pocket_knife" }), gixenOkRoute], async () => {
         const { processed, deferred } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         assert.equal(deferred, 0);
@@ -445,13 +445,115 @@ test("processPendingFinderItems rejects an implausibly large vision-reported kni
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ knifeCount: 500, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" })], async () => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 500, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "", itemCategory: "pocket_knife" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
         assert.equal(item.status, "rejected");
         assert.equal(item.reason, "implausible_count");
         assert.equal(item.detection_source, "vision");
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems rejects a vision-classified garbage category regardless of a cheap price", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [{
+        ebay_item_id: "v1|9|0", run_id: null, title: "Folding Box Cutter", short_description: "",
+        image_url: "https://i.ebayimg.com/9.jpg", item_price: 1, shipping_cost: 0, buying_options: ["AUCTION"],
+        status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+      }],
+    }, async (fake) => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 1, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "", itemCategory: "box_cutter" })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected", "a box cutter must never qualify, no matter how cheap");
+        assert.equal(item.reason, "box_cutter");
+        assert.equal(item.item_category, "box_cutter");
+      });
+    });
+  });
+});
+
+test("a vision-classified Swiss Army multi-tool qualifies under the stricter $1/knife cap but not merely under the normal $3.50 cap", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [
+        { ebay_item_id: "v1|cheap|0", run_id: null, title: "Victorinox Swiss Army Knife Lot", short_description: "", image_url: "https://i.ebayimg.com/1.jpg", item_price: 9, shipping_cost: 0, buying_options: ["AUCTION"], status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt },
+        { ebay_item_id: "v1|pricey|0", run_id: null, title: "Victorinox Swiss Army Knife Lot", short_description: "", image_url: "https://i.ebayimg.com/2.jpg", item_price: 15, shipping_cost: 0, buying_options: ["AUCTION"], status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt },
+      ],
+    }, async (fake) => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 10, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "", itemCategory: "swiss_army_multi_tool" })], async () => {
+        await processPendingFinderItems(5);
+        const cheap = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|cheap|0");
+        assert.equal(cheap.status, "qualified");
+        assert.equal(cheap.cost_per_knife, 0.9);
+        const pricey = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|pricey|0");
+        assert.equal(pricey.status, "rejected", "$1.50/knife is well under the normal $3.50 cap but over the $1 Swiss Army cap");
+        assert.equal(pricey.reason, "over_budget");
+        assert.equal(pricey.cost_per_knife, 1.5);
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems applies the stricter Swiss Army cap on the fast shipping-only text path too", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [{
+        ebay_item_id: "v1|9|0", run_id: null, title: "Victorinox Swiss Army Knife Lot", short_description: "",
+        knife_count: 10, detection_source: "text", contains_folding_knife: true, confidence: 0.99,
+        item_category: "swiss_army_multi_tool", item_price: 12, shipping_cost: null, buying_options: ["AUCTION"],
+        status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+      }],
+    }, async (fake) => {
+      await withFetch([tokenRoute, itemShippingRoute(3), gixenOkRoute], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected", "$1.50/knife is under the normal $3.50 cap but over the $1 Swiss Army cap");
+        assert.equal(item.reason, "over_budget");
+        assert.equal(item.cost_per_knife, 1.5);
+      });
+    });
+  });
+});
+
+test("startFinderRun keeps a previously vision-rejected garbage category rejected on refresh, without spending a new Gemini call", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "tsa confiscated knives", enabled: true, created_at: "2026-01-01" }],
+      finder_items: [{
+        ebay_item_id: "v1|1|0", run_id: "old-run", keyword_phrases: ["tsa confiscated knives"],
+        title: "TSA confiscated knives assorted lot", short_description: "",
+        ebay_url: "https://www.ebay.com/itm/1", image_url: "https://i.ebayimg.com/1.jpg",
+        item_price: 20, shipping_cost: 5, currency: "USD", buying_options: ["AUCTION"],
+        status: "rejected", knife_count: 5, contains_folding_knife: true, confidence: 0.95,
+        detection_source: "vision", item_category: "box_cutter", reason: "box_cutter", discovered_at: "2026-01-01",
+      }],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem({
+          title: "TSA confiscated knives assorted lot", shortDescription: "",
+          price: { value: "1.00", currency: "USD" }, shippingOptions: [{ shippingCost: { value: "0.00", currency: "USD" } }],
+        })] }) },
+      ], async () => {
+        await startFinderRun("manual", "run-garbage-stays-rejected");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected", "a garbage-categorized vision item must not re-qualify just because the price looks cheap today");
+        assert.equal(item.reason, "box_cutter");
+        assert.equal(item.item_category, "box_cutter");
       });
     });
   });
@@ -644,7 +746,7 @@ test("processPendingFinderItems looks up shipping after vision resolves the coun
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([tokenRoute, imageRoute, geminiRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" }), itemShippingRoute(5), gixenOkRoute], async () => {
+      await withFetch([tokenRoute, imageRoute, geminiRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "", itemCategory: "pocket_knife" }), itemShippingRoute(5), gixenOkRoute], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -669,7 +771,7 @@ test("processPendingFinderItems skips the shipping lookup and rejects immediatel
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "" })], async () => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 8, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "", itemCategory: "pocket_knife" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;

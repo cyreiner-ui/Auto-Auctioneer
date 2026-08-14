@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeListingText, calculateDeal, finderPages, isDailyFinderHour, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife } from "../lib/finder-core.ts";
+import { analyzeListingText, calculateDeal, effectiveMaxCostPerKnife, finderPages, isDailyFinderHour, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife } from "../lib/finder-core.ts";
 
 test("extracts explicit numeric and word lot counts", () => {
   assert.deepEqual(analyzeListingText("Lot of 12 folding pocket knives"), { kind: "resolved", count: 12, containsFoldingKnife: true, confidence: 0.99 });
@@ -99,7 +99,7 @@ test("does not mistake a 'No. X & Y' catalog reference for a knife count", () =>
 test("does not fuse a trailing title number into a leading description word", () => {
   const title = "Lot of 2 Victorinox Swiss Army knives - Climber - EVO 11";
   const description = "Knives wrapped in bubble wrap. Must be 18+ to Buy.";
-  assert.deepEqual(analyzeListingText(title, description), { kind: "resolved", count: 2, containsFoldingKnife: true, confidence: 0.99 });
+  assert.deepEqual(analyzeListingText(title, description), { kind: "resolved", count: 2, containsFoldingKnife: true, confidence: 0.99, swissArmy: true });
 });
 
 test("rejects an empty-box listing outright, regardless of stated count", () => {
@@ -131,6 +131,26 @@ test("does not reject a real knife lot that merely mentions one empty accessory"
   const description = "Schrade and Wiss sheaths are empty — no knives included with sheaths. Lot of 5 knives, one multi-tool, and 3 sheaths/pouches.";
   const result = analyzeListingText(title, description);
   assert.notEqual(result.kind, "reject");
+});
+
+test("rejects box cutters, credit-card knives, coin knives, and bare replacement blades regardless of folding/brand language", () => {
+  assert.deepEqual(analyzeListingText("Stanley Folding Box Cutter Utility Tool"), { kind: "reject", reason: "box_cutter" });
+  assert.deepEqual(analyzeListingText("Credit Card Folding Knife Wallet Survival Tool"), { kind: "reject", reason: "credit_card_knife" });
+  assert.deepEqual(analyzeListingText("Coin Shape Folding Pocket Knife Keychain"), { kind: "reject", reason: "coin_knife" });
+  assert.deepEqual(analyzeListingText("Buck Knife Replacement Blade"), { kind: "reject", reason: "plain_blade" });
+});
+
+test("rejects a non-Swiss-Army multi-tool but still resolves a genuine Swiss Army multi-tool", () => {
+  assert.deepEqual(analyzeListingText("Camping Folding Knife Corkscrew Bottle Opener Multi-Tool"), { kind: "reject", reason: "multi_tool" });
+  assert.deepEqual(analyzeListingText("Victorinox Swiss Army Knife Corkscrew Multi-Tool"), { kind: "resolved", count: 1, containsFoldingKnife: true, confidence: 0.95, swissArmy: true });
+});
+
+test("effectiveMaxCostPerKnife caps Swiss Army items to the stricter ceiling, and leaves everything else alone", () => {
+  assert.equal(effectiveMaxCostPerKnife("swiss_army_multi_tool", 3.5, 1.0), 1.0);
+  assert.equal(effectiveMaxCostPerKnife("swiss_army_multi_tool", 0.5, 1.0), 0.5, "never raises the cap above the base max");
+  assert.equal(effectiveMaxCostPerKnife("pocket_knife", 3.5, 1.0), 3.5);
+  assert.equal(effectiveMaxCostPerKnife(null, 3.5, 1.0), 3.5);
+  assert.equal(effectiveMaxCostPerKnife(undefined, 3.5, 1.0), 3.5);
 });
 
 test("calculates shipping-inclusive unit cost at the exact threshold", () => {

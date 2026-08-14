@@ -57,9 +57,30 @@ test("distinguishes the daily pacing cap from the monthly cap in the error messa
 test("returns a parsed knife count on a successful analysis", async () => {
   await withEnv(GEMINI_ENV, async () => {
     await withFakeRpc(true, async () => {
-      await withFetch([imageRoute, geminiRoute({ knifeCount: 10, containsFoldingKnife: true, confidence: 0.97, uncertaintyReason: "" })], async () => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 10, containsFoldingKnife: true, confidence: 0.97, uncertaintyReason: "", itemCategory: "pocket_knife" })], async () => {
         const result = await countKnivesWithGemini(INPUT);
-        assert.deepEqual(result, { knifeCount: 10, containsFoldingKnife: true, confidence: 0.97, uncertaintyReason: "" });
+        assert.deepEqual(result, { knifeCount: 10, containsFoldingKnife: true, confidence: 0.97, uncertaintyReason: "", itemCategory: "pocket_knife" });
+      });
+    });
+  });
+});
+
+test("round-trips a garbage item category unchanged", async () => {
+  await withEnv(GEMINI_ENV, async () => {
+    await withFakeRpc(true, async () => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 1, containsFoldingKnife: false, confidence: 0.95, uncertaintyReason: "", itemCategory: "box_cutter" })], async () => {
+        const result = await countKnivesWithGemini(INPUT);
+        assert.equal(result.itemCategory, "box_cutter");
+      });
+    });
+  });
+});
+
+test("throws when Gemini returns an itemCategory outside the allowed set", async () => {
+  await withEnv(GEMINI_ENV, async () => {
+    await withFakeRpc(true, async () => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 10, containsFoldingKnife: true, confidence: 0.97, uncertaintyReason: "", itemCategory: "spoon" })], async () => {
+        await assert.rejects(() => countKnivesWithGemini(INPUT), /invalid knife count/);
       });
     });
   });
