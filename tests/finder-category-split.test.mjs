@@ -127,7 +127,10 @@ test("startFinderRun(category) only scans that category's enabled keywords", asy
         { test: (url) => url.startsWith(SEARCH_URL), respond: (url) => { searchedPhrases.push(new URL(url).searchParams.get("q")); return jsonResponse({ itemSummaries: [] }); } },
       ], async () => {
         await startFinderRun("manual", "run-carving-only", "carving_set");
-        assert.deepEqual(searchedPhrases.sort(), ["german carving set", "sheffield carving set"], "a carving-set-scoped run must never search the pocket-knife keyword");
+        // searchEbayKeyword appends exclusion terms (see FINDER_DEFAULTS.excludeTerms) to every
+        // query, so match on the keyword being searched, not the exact resulting query string.
+        assert.equal(searchedPhrases.length, 2);
+        assert.ok(searchedPhrases.every((phrase) => phrase.startsWith("sheffield carving set") || phrase.startsWith("german carving set")), "a carving-set-scoped run must never search the pocket-knife keyword");
       });
     });
     searchedPhrases.length = 0;
@@ -142,7 +145,8 @@ test("startFinderRun(category) only scans that category's enabled keywords", asy
         { test: (url) => url.startsWith(SEARCH_URL), respond: (url) => { searchedPhrases.push(new URL(url).searchParams.get("q")); return jsonResponse({ itemSummaries: [] }); } },
       ], async () => {
         await startFinderRun("manual", "run-pocket-only", "pocket_knife");
-        assert.deepEqual(searchedPhrases, ["knife lot"], "a pocket-knife-scoped run must never search the carving-set keywords");
+        assert.equal(searchedPhrases.length, 1);
+        assert.ok(searchedPhrases[0].startsWith("knife lot"), "a pocket-knife-scoped run must never search the carving-set keywords");
       });
     });
   });
@@ -187,7 +191,7 @@ test("a single run that qualifies both a pocket-knife and a carving-set item sen
         tokenRoute,
         {
           test: (url) => url.startsWith(SEARCH_URL),
-          respond: (url) => new URL(url).searchParams.get("q") === "sheffield carving set"
+          respond: (url) => new URL(url).searchParams.get("q").startsWith("sheffield carving set")
             ? jsonResponse({ itemSummaries: [{
                 itemId: "v1|carving|0", title: "Antique Sheffield Carving Set, carbon steel blade, with fitted case",
                 shortDescription: "", itemWebUrl: "https://www.ebay.com/itm/carving", image: { imageUrl: "https://i.ebayimg.com/carving.jpg" },
