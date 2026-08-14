@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appToken, getItemShippingCost, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
-import { analyzeListingText, calculateDeal, FINDER_DEFAULTS, isDailyFinderHour, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife } from "./finder-core";
+import { analyzeListingText, calculateDeal, dayKey, FINDER_DEFAULTS, isDailyFinderHour, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
 import { isAuctionFormat } from "./gixen-client";
 import { sendQualifiedItemsEmail } from "./finder-notify";
@@ -50,15 +50,21 @@ type FinderRow = {
   attempts: number;
 };
 
-const config = () => ({
-  maxCost: Number(process.env.EBAY_FINDER_MAX_PER_KNIFE || FINDER_DEFAULTS.maxCostPerKnife),
-  confidence: Number(process.env.GEMINI_CONFIDENCE_THRESHOLD || FINDER_DEFAULTS.confidence),
-  searchDepth: Number(process.env.EBAY_FINDER_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.resultsPerKeyword),
-  batchSize: Number(process.env.GEMINI_BATCH_SIZE || FINDER_DEFAULTS.batchSize),
-  processConcurrency: Number(process.env.FINDER_PROCESS_CONCURRENCY || FINDER_DEFAULTS.processConcurrency),
-  scanConcurrency: Number(process.env.EBAY_FINDER_SCAN_CONCURRENCY || FINDER_DEFAULTS.scanConcurrency),
-  monthlyLimit: Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyPaidAnalysisLimit),
-});
+const config = () => {
+  const monthlyLimit = Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyAnalysisLimit);
+  return {
+    maxCost: Number(process.env.EBAY_FINDER_MAX_PER_KNIFE || FINDER_DEFAULTS.maxCostPerKnife),
+    confidence: Number(process.env.GEMINI_CONFIDENCE_THRESHOLD || FINDER_DEFAULTS.confidence),
+    searchDepth: Number(process.env.EBAY_FINDER_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.resultsPerKeyword),
+    batchSize: Number(process.env.GEMINI_BATCH_SIZE || FINDER_DEFAULTS.batchSize),
+    processConcurrency: Number(process.env.FINDER_PROCESS_CONCURRENCY || FINDER_DEFAULTS.processConcurrency),
+    scanConcurrency: Number(process.env.EBAY_FINDER_SCAN_CONCURRENCY || FINDER_DEFAULTS.scanConcurrency),
+    monthlyLimit,
+    // Mirrors the default in gemini-vision.ts's dailyLimit(): spreads the monthly cap evenly
+    // across a 30-day month unless GEMINI_DAILY_ANALYSIS_LIMIT overrides it directly.
+    dailyLimit: Number(process.env.GEMINI_DAILY_ANALYSIS_LIMIT || Math.ceil(monthlyLimit / 30)),
+  };
+};
 
 // Runs `worker` over `items` with at most `concurrency` in flight at once, preserving each
 // result at its original index. Plain Promise.all(items.map(...)) would fire every item at
@@ -400,7 +406,7 @@ export async function finderTick(date = new Date()) {
 }
 
 export async function finderOverview() {
-  const [keywords, results, runs, pending, rejected, qualified, usage] = await Promise.all([
+  const [keywords, results, runs, pending, rejected, qualified, usage, dailyUsage] = await Promise.all([
     supabaseAdmin.from("finder_keywords").select("*").order("created_at"),
     supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").is("dismissed_at", null).order("discovered_at", { ascending: false }).limit(500),
     supabaseAdmin.from("finder_runs").select("*").order("started_at", { ascending: false }).limit(10),
@@ -408,14 +414,29 @@ export async function finderOverview() {
     supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).in("status", ["rejected", "error"]),
     supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).eq("status", "qualified").is("dismissed_at", null),
     supabaseAdmin.from("finder_vision_usage").select("*").eq("month", monthKey()).maybeSingle(),
+    supabaseAdmin.from("finder_vision_usage_daily").select("*").eq("day", dayKey()).maybeSingle(),
   ]);
-  const firstError = [keywords.error, results.error, runs.error, pending.error, rejected.error, qualified.error, usage.error].find(Boolean);
+  const firstError = [keywords.error, results.error, runs.error, pending.error, rejected.error, qualified.error, usage.error, dailyUsage.error].find(Boolean);
   if (firstError) throw new Error(firstError.message);
+  const free = Number(usage.data?.free_analyses || 0);
   const paid = Number(usage.data?.paid_analyses || 0);
+  const analyses = free + paid;
+  const { monthlyLimit, dailyLimit } = config();
+  const dailyAnalyses = Number(dailyUsage.data?.analyses || 0);
   return {
     keywords: keywords.data || [], results: results.data || [], runs: runs.data || [],
     counts: { pending: pending.count || 0, rejected: rejected.count || 0, qualified: qualified.count || 0 },
-    budget: { mode: process.env.GEMINI_PAID_MODE === "true" ? "paid" : "free", paidAnalyses: paid, monthlyLimit: config().monthlyLimit, remaining: Math.max(0, config().monthlyLimit - paid), projectedMaximum: paid * 0.001 },
+    // The monthly cap (reserve_finder_vision_usage) counts free + paid analyses together and
+    // applies regardless of mode, so the budget the UI shows must match that, not just the
+    // paid-mode count — free-mode analyses aren't actually free once Google's own free-tier
+    // quota runs out; they just aren't tracked separately as spend by this app. The daily figures
+    // reflect the separate pacing cap that spreads the monthly budget evenly across the month
+    // instead of letting a busy week exhaust it up front.
+    budget: {
+      mode: process.env.GEMINI_PAID_MODE === "true" ? "paid" : "free",
+      freeAnalyses: free, paidAnalyses: paid, analyses, monthlyLimit, remaining: Math.max(0, monthlyLimit - analyses), projectedMaximum: analyses * 0.001,
+      dailyAnalyses, dailyLimit, dailyRemaining: Math.max(0, dailyLimit - dailyAnalyses),
+    },
     settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: config().maxCost },
   };
 }
