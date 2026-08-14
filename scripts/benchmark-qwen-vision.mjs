@@ -18,7 +18,9 @@
 import { supabaseAdmin } from "../lib/supabase-admin.ts";
 
 const LIMIT = Number(process.argv[2]) || 30;
-const MODEL = "qwen/qwen2.5-vl-72b-instruct:free";
+// Qwen2.5-VL's free-tier slug was pulled from OpenRouter's roster (it rotates over time) —
+// this is the only currently-free model on OpenRouter explicitly branded as vision-language.
+const MODEL = "nvidia/nemotron-nano-12b-v2-vl:free";
 // Stay comfortably under the 20 requests/minute free-tier cap (one request per ~3.5s is ~17/min).
 const DELAY_MS = 3500;
 
