@@ -54,6 +54,9 @@ async function analyzeWithQwen(key, title, description, imageUrl) {
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    // Free-tier models can be slow or queued under load; a hard ceiling stops one stuck
+    // request from silently stalling the whole run with no visible progress.
+    signal: AbortSignal.timeout(45_000),
     body: JSON.stringify({
       model: MODEL,
       messages: [{
@@ -100,14 +103,29 @@ async function main() {
     return;
   }
 
+  console.log(`\n${"ebay_item_id".padEnd(14)} ${"title".padEnd(40)} gemini(count/fold/conf)   qwen(count/fold/conf)        match   ms`);
   const results = [];
-  for (const row of rows) {
+  for (const [index, row] of rows.entries()) {
     const startedAt = Date.now();
+    const title = (row.title || "").slice(0, 38).padEnd(40);
+    const geminiSummary = `${row.knife_count}/${row.contains_folding_knife}/${row.confidence}`.padEnd(24);
+    const groundTruth = GROUND_TRUTH[row.ebay_item_id];
+    process.stdout.write(`[${index + 1}/${rows.length}] ${row.ebay_item_id} ... `);
     try {
       const fresh = await analyzeWithQwen(key, row.title, row.short_description, row.image_url);
-      results.push({ row, fresh, latencyMs: Date.now() - startedAt, error: null });
+      const latencyMs = Date.now() - startedAt;
+      results.push({ row, fresh, latencyMs, error: null });
+      const countMatch = fresh.knifeCount === row.knife_count;
+      const foldMatch = fresh.containsFoldingKnife === row.contains_folding_knife;
+      const match = countMatch && foldMatch ? "yes" : "NO";
+      console.log(`done (${latencyMs}ms)\n${row.ebay_item_id.padEnd(14)} ${title} ${geminiSummary} ${`${fresh.knifeCount}/${fresh.containsFoldingKnife}/${fresh.confidence}`.padEnd(24)} ${match.padEnd(6)} ${latencyMs}`);
+      if (groundTruth != null) console.log(`  -> GROUND TRUTH for this listing is ${groundTruth} knives (verified against the actual photo). Qwen said ${fresh.knifeCount}.`);
+      else if (!countMatch || !foldMatch) console.log(`  -> disagreement, check the photo: ${row.ebay_url}`);
     } catch (err) {
-      results.push({ row, fresh: null, latencyMs: Date.now() - startedAt, error: err instanceof Error ? err.message : String(err) });
+      const latencyMs = Date.now() - startedAt;
+      const message = err instanceof Error ? err.message : String(err);
+      results.push({ row, fresh: null, latencyMs, error: message });
+      console.log(`FAILED (${latencyMs}ms)\n${row.ebay_item_id.padEnd(14)} ${title} ${geminiSummary} ERROR: ${message}`);
     }
     await sleep(DELAY_MS);
   }
@@ -116,24 +134,6 @@ async function main() {
   const knifeCountMatches = ok.filter((r) => r.fresh.knifeCount === r.row.knife_count);
   const foldingMatches = ok.filter((r) => r.fresh.containsFoldingKnife === r.row.contains_folding_knife);
   const latencies = ok.map((r) => r.latencyMs);
-
-  console.log(`\n${"ebay_item_id".padEnd(14)} ${"title".padEnd(40)} gemini(count/fold/conf)   qwen(count/fold/conf)        match   ms`);
-  for (const { row, fresh, latencyMs, error: err } of results) {
-    const groundTruth = GROUND_TRUTH[row.ebay_item_id];
-    const title = (row.title || "").slice(0, 38).padEnd(40);
-    const geminiSummary = `${row.knife_count}/${row.contains_folding_knife}/${row.confidence}`.padEnd(24);
-    if (err) {
-      console.log(`${row.ebay_item_id.padEnd(14)} ${title} ${geminiSummary} ERROR: ${err}`);
-      continue;
-    }
-    const qwenSummary = `${fresh.knifeCount}/${fresh.containsFoldingKnife}/${fresh.confidence}`.padEnd(24);
-    const countMatch = fresh.knifeCount === row.knife_count;
-    const foldMatch = fresh.containsFoldingKnife === row.contains_folding_knife;
-    const match = countMatch && foldMatch ? "yes" : "NO";
-    console.log(`${row.ebay_item_id.padEnd(14)} ${title} ${geminiSummary} ${qwenSummary} ${match.padEnd(6)} ${latencyMs}`);
-    if (groundTruth != null) console.log(`  -> GROUND TRUTH for this listing is ${groundTruth} knives (verified against the actual photo). Qwen said ${fresh.knifeCount}.`);
-    else if (!countMatch || !foldMatch) console.log(`  -> disagreement, check the photo: ${row.ebay_url}`);
-  }
 
   console.log("\n--- summary ---");
   console.log(`rows compared: ${results.length} (${ok.length} succeeded, ${results.length - ok.length} errored)`);
