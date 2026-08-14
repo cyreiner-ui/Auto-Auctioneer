@@ -81,10 +81,27 @@ const catalogReferencePattern = /\bno\.?\s*\d+(?:\s*(?:&|,|and)\s*\d+)+\b/gi;
 // sets, silverware, butcher/chef knives) — sampled production data shows Gemini vision
 // consistently confirming containsFoldingKnife: false for titles like these, which means the
 // vision call was spent only to reach a conclusion the wording already stated outright. Gated on
-// !foldingSignal so a listing that also mentions "folding"/"pocket knife"/a known brand (e.g. a
-// folding knife bundled with a butter knife) still falls through to the normal resolution path
-// instead of being wrongly rejected.
+// !explicitFoldingSignal (not the broader foldingSignal — see below) so a listing that actually
+// says "folding"/"pocket knife"/Swiss Army (e.g. a folding knife bundled with a butter knife)
+// still falls through to the normal resolution path instead of being wrongly rejected, while a
+// bare shared brand name (several of which — Case, Winchester, Colt, Remington, Camillus, Old
+// Timer, Browning, Imperial — are just as common on vintage kitchen/carving cutlery and flatware
+// as on pocket knives) no longer overrides the rejection on its own.
 const nonFoldingCutleryPattern = /\b(?:kitchen|steak|butter|bread|cheese|carving|chef'?s?|paring|butcher|flatware|silverware|silverplate|letter\s+opener)\b|\bserv(?:e|ing)\b|\bcutlery\s+set\b/i;
+// Weight-priced/randomized "grab bag" style lots (common for TSA-confiscated bulk resellers): the
+// buyer receives a random weight-based selection, not a stated piece count, so any number found
+// elsewhere in the text (an inventory-pool size, a catalog total) — or a photo of the seller's
+// whole pool of stock — does not represent what actually ships. Requires the weight unit to sit
+// near the grab-bag/mystery/sold-by-weight wording (not just appear anywhere in the text) so an
+// otherwise-resolvable lot that merely mentions an unrelated shipping-box weight isn't caught.
+const weightQuantity = "\\d+(?:\\.\\d+)?\\+?\\s*(?:lbs?|pounds?|#|oz|ounces?|kgs?|kilograms?)\\b";
+const grabBagPhrase = "(?:grab\\s*bags?|mystery\\s+(?:lot|box|bags?))";
+const weightBasedLotPattern = new RegExp(
+  `\\b${weightQuantity}(?:\\s+\\w+){0,4}?\\s*${grabBagPhrase}\\b` +
+  `|\\b${grabBagPhrase}\\b(?:\\s+\\w+){0,4}?\\s*${weightQuantity}` +
+  `|\\bsold\\s+by\\s+the\\s+(?:pound|weight)\\b|\\bpriced?\\s+(?:by|per)\\s+the\\s+(?:pound|weight)\\b`,
+  "i",
+);
 
 export type TextAnalysis =
   | { kind: "reject"; reason: string }
@@ -124,6 +141,12 @@ function numericCount(title: string, description: string) {
   const loosePatterns = [
     /\blot\s+of\s+(\d{1,3})\b/i,
     /\b(\d{1,3})[\s-]*(?:pc|pcs|piece|pieces|pk|pack)\b/i,
+    // "Pick Any 5 Knives From This Lot of 184" style variation listings: the seller states the
+    // real per-purchase count directly, distinct from whatever pool/inventory size is mentioned
+    // elsewhere. selectionPattern already hard-rejects the singular "choose one/1/a" phrasing
+    // before numericCount ever runs, so this only ever fires on N >= 2 (or "pick 1", not covered
+    // by selectionPattern's verb list) — no conflict with that existing behavior.
+    /\b(?:choose|pick|select)\s+(?:any\s+)?(\d{1,3})\b/i,
   ];
   for (const pattern of loosePatterns) {
     const match = cleanTitle.match(pattern);
@@ -152,6 +175,13 @@ function numericCount(title: string, description: string) {
 // since they need a much stricter price cap downstream, not because they're a weaker signal here.
 function foldingSignal(text: string) { return foldingPattern.test(text) || brandKnifePattern.test(text) || swissArmyPattern.test(text); }
 
+// Stricter than foldingSignal: only an explicit "folding"/"pocket knife"/Swiss Army mention
+// counts, not a bare shared brand name. Used solely to gate the kitchen-cutlery rejection below —
+// several brand names (Case, Winchester, Colt, Remington, Camillus, Old Timer, Browning, Imperial)
+// are just as common on vintage kitchen/carving cutlery and flatware as on pocket knives, so
+// letting a bare brand match override that rejection let plenty of table cutlery through.
+function explicitFoldingSignal(text: string) { return foldingPattern.test(text) || swissArmyPattern.test(text); }
+
 export function analyzeListingText(title: string, description = ""): TextAnalysis {
   const text = `${title} ${description}`.replace(/\s+/g, " ").trim();
   if (selectionPattern.test(text)) return { kind: "reject", reason: "selection_listing" };
@@ -163,11 +193,15 @@ export function analyzeListingText(title: string, description = ""): TextAnalysi
   if (creditCardKnifePattern.test(text)) return { kind: "reject", reason: "credit_card_knife" };
   if (coinKnifePattern.test(text)) return { kind: "reject", reason: "coin_knife" };
   if (plainBladePattern.test(text)) return { kind: "reject", reason: "plain_blade" };
+  // Weight-priced/randomized grab-bag lots: the buyer receives a random weight-based selection,
+  // so no number in the text (nor a photo of the seller's whole pool of stock) reliably states
+  // what actually ships. Checked unconditionally, like the other exclusions above.
+  if (weightBasedLotPattern.test(text)) return { kind: "reject", reason: "weight_based_lot" };
   const swissArmy = swissArmyPattern.test(text);
   // Non-Swiss-Army multi-tools (corkscrew/bottle-opener combos) are rejected outright; Swiss Army
   // ones are allowed through to resolve normally, but flagged so a stricter price cap applies later.
   if (!swissArmy && multiToolPattern.test(text)) return { kind: "reject", reason: "multi_tool" };
-  if (!foldingSignal(text) && nonFoldingCutleryPattern.test(text)) return { kind: "reject", reason: "non_folding_cutlery" };
+  if (!explicitFoldingSignal(text) && nonFoldingCutleryPattern.test(text)) return { kind: "reject", reason: "non_folding_cutlery" };
   const count = numericCount(title, description);
   if (count && count <= FINDER_DEFAULTS.maxPlausibleKnifeCount && foldingSignal(text)) {
     return { kind: "resolved", count, containsFoldingKnife: true, confidence: 0.99, ...(swissArmy ? { swissArmy: true as const } : {}) };

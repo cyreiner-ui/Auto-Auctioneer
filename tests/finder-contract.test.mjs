@@ -126,6 +126,37 @@ test("does not reject cutlery wording when a folding signal is also present", ()
   assert.notEqual(result.kind, "reject");
 });
 
+test("rejects kitchen/table cutlery wording even when it shares a brand name with pocket knives", () => {
+  assert.deepEqual(analyzeListingText("Grab Bag Lot Vintage Case Cutlery Set"), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText("Winchester Carving Knife Set with Serving Fork"), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText("Vintage Remington Kitchen Butcher Knife Lot"), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText("Camillus Steak Knife Flatware Set"), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText("Old Timer Carving Set Kitchen Cutlery"), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText("Browning Butcher Knife Kitchen Set"), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText("Imperial Kitchen Carving Knife Set"), { kind: "reject", reason: "non_folding_cutlery" });
+});
+
+test("resolves an explicit 'choose/pick/select N' stated count instead of deferring to vision", () => {
+  assert.deepEqual(analyzeListingText("Pick Any 5 Pocket Knives From This Lot of 184"), { kind: "resolved", count: 5, containsFoldingKnife: true, confidence: 0.99 });
+  assert.deepEqual(analyzeListingText("Select 3 Folding Knives From Our Collection"), { kind: "resolved", count: 3, containsFoldingKnife: true, confidence: 0.99 });
+});
+
+test("rejects weight-priced random grab-bag lots outright, before vision", () => {
+  assert.deepEqual(
+    analyzeListingText("5+ Pound Grab Bag Lot TSA Confiscated Kitchen Cutlery & Ceramic Knives 5# 5lb"),
+    { kind: "reject", reason: "weight_based_lot" },
+  );
+  assert.deepEqual(analyzeListingText("2 lb Mystery Box of Random Folding Pocket Knives"), { kind: "reject", reason: "weight_based_lot" });
+  assert.deepEqual(analyzeListingText("Pocket Knife Lot - Sold By The Pound, Random Selection"), { kind: "reject", reason: "weight_based_lot" });
+});
+
+test("does not mistake an unrelated shipping weight for a weight-based grab-bag lot", () => {
+  assert.deepEqual(
+    analyzeListingText("Lot of 12 folding pocket knives, 3 lb flat rate box"),
+    { kind: "resolved", count: 12, containsFoldingKnife: true, confidence: 0.99 },
+  );
+});
+
 test("does not reject a real knife lot that merely mentions one empty accessory", () => {
   const title = "Lot 5 Folding Knives Multi-Tool Schrade Wiss Leather Sheaths Empty EDC Reseller";
   const description = "Schrade and Wiss sheaths are empty — no knives included with sheaths. Lot of 5 knives, one multi-tool, and 3 sheaths/pouches.";
