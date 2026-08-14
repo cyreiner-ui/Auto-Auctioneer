@@ -74,7 +74,11 @@ export async function searchEbayKeyword(keyword: string, requested: number = FIN
   const result: EbayFinderItem[] = [];
   for (const { offset, limit } of finderPages(requested)) {
     const url = new URL(`${ebayApiBaseUrl()}/buy/browse/v1/item_summary/search`);
-    url.searchParams.set("q", keyword);
+    // eBay's Browse API q param supports "-word" exclusion syntax; trims the clearest junk
+    // (throwing knives, keychain knives, multi-tools, Leatherman) before it's even fetched. See
+    // FINDER_DEFAULTS.excludeTerms for why the list stays narrow.
+    const query = FINDER_DEFAULTS.excludeTerms.length ? `${keyword} ${FINDER_DEFAULTS.excludeTerms.map((term) => `-${term}`).join(" ")}` : keyword;
+    url.searchParams.set("q", query);
     url.searchParams.set("limit", String(limit));
     url.searchParams.set("offset", String(offset));
     url.searchParams.set("fieldgroups", "EXTENDED");
