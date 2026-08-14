@@ -113,6 +113,19 @@ test("rejects an empty-box listing outright, regardless of stated count", () => 
   );
 });
 
+test("rejects table/kitchen cutlery wording outright instead of spending a vision call on it", () => {
+  assert.deepEqual(analyzeListingText("Lot Of 7 Kitchen Knives Regent Sherwood/ Sheffield Tramontina Ekco Stainless"), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText(`VTG Regent Sheffield England Serrated Steak Knife LOT OF 3 Bakelite Handle 8"`), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText("Vtg Regent Sheffield 16 Piece Set Lot Knife England 1960s Cheese Bread Serving"), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText("Antique Mixed Silverplate Flatware Lot - Rogers Bros & Sheffield (Early 1900s)"), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText("Vintage Wade & Butcher Sheffield England knife Holsons N.Y (lot#13288)"), { kind: "reject", reason: "non_folding_cutlery" });
+});
+
+test("does not reject cutlery wording when a folding signal is also present", () => {
+  const result = analyzeListingText("Used folding pocket knife but also comes with a butter knife");
+  assert.notEqual(result.kind, "reject");
+});
+
 test("does not reject a real knife lot that merely mentions one empty accessory", () => {
   const title = "Lot 5 Folding Knives Multi-Tool Schrade Wiss Leather Sheaths Empty EDC Reseller";
   const description = "Schrade and Wiss sheaths are empty — no knives included with sheaths. Lot of 5 knives, one multi-tool, and 3 sheaths/pouches.";

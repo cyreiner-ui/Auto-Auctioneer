@@ -3,7 +3,11 @@ export const FINDER_DEFAULTS = {
   maxCostPerKnife: 3.5,
   confidence: 0.9,
   resultsPerKeyword: 500,
-  monthlyPaidAnalysisLimit: 50_000,
+  // Sized so the app's own conservative $0.001/analysis accounting (see finderOverview's
+  // projectedMaximum) lands at a $10/month ceiling. This is a hard backstop, not a pacing
+  // mechanism — see dailyLimit in gemini-vision.ts/finder-service.ts for what actually spreads
+  // usage evenly across the month instead of letting one busy week exhaust it.
+  monthlyAnalysisLimit: 10_000,
   // Items pulled off the pending queue per tick, and how many of them (vision + shipping
   // lookups) run concurrently. At the old batchSize of 5 processed one at a time, a queue of a
   // few thousand items (typical after a daily scan) took most of a day to drain at one tick per
@@ -73,6 +77,14 @@ const selectionPattern = /\b(?:choose|choice|select)\s+(?:one|1|a)\b|\b(?:each|p
 const noKnifePattern = /\bempty\s+(?:\w+\s+){0,2}box(?:es)?\b|\bbox(?:es)?\s+only\b|\bno\s+knives?\b/i;
 // Catalog references like "No. 6 & 8" enumerate model numbers, never a count of items.
 const catalogReferencePattern = /\bno\.?\s*\d+(?:\s*(?:&|,|and)\s*\d+)+\b/gi;
+// Table/kitchen cutlery wording that real listings use to describe non-folding knives (serving
+// sets, silverware, butcher/chef knives) — sampled production data shows Gemini vision
+// consistently confirming containsFoldingKnife: false for titles like these, which means the
+// vision call was spent only to reach a conclusion the wording already stated outright. Gated on
+// !foldingSignal so a listing that also mentions "folding"/"pocket knife"/a known brand (e.g. a
+// folding knife bundled with a butter knife) still falls through to the normal resolution path
+// instead of being wrongly rejected.
+const nonFoldingCutleryPattern = /\b(?:kitchen|steak|butter|bread|cheese|carving|chef'?s?|paring|butcher|flatware|silverware|silverplate|letter\s+opener)\b|\bserv(?:e|ing)\b|\bcutlery\s+set\b/i;
 
 export type TextAnalysis =
   | { kind: "reject"; reason: string }
@@ -155,6 +167,7 @@ export function analyzeListingText(title: string, description = ""): TextAnalysi
   // Non-Swiss-Army multi-tools (corkscrew/bottle-opener combos) are rejected outright; Swiss Army
   // ones are allowed through to resolve normally, but flagged so a stricter price cap applies later.
   if (!swissArmy && multiToolPattern.test(text)) return { kind: "reject", reason: "multi_tool" };
+  if (!foldingSignal(text) && nonFoldingCutleryPattern.test(text)) return { kind: "reject", reason: "non_folding_cutlery" };
   const count = numericCount(title, description);
   if (count && count <= FINDER_DEFAULTS.maxPlausibleKnifeCount && foldingSignal(text)) {
     return { kind: "resolved", count, containsFoldingKnife: true, confidence: 0.99, ...(swissArmy ? { swissArmy: true as const } : {}) };
@@ -199,6 +212,9 @@ export function calculateDeal(itemPrice: number, shippingCost: number | null, kn
 }
 
 export function monthKey(date = new Date()) { return date.toISOString().slice(0, 7); }
+
+// UTC calendar day, used to key the daily vision-analysis pacing cap (see gemini-vision.ts).
+export function dayKey(date = new Date()) { return date.toISOString().slice(0, 10); }
 
 export function isDailyFinderHour(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }).formatToParts(date);
