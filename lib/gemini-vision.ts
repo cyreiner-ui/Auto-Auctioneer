@@ -4,12 +4,34 @@ import { supabaseAdmin } from "./supabase-admin";
 export class VisionQuotaError extends Error {}
 export class VisionBudgetError extends Error {}
 
+export type ItemCategory =
+  | "pocket_knife"
+  | "swiss_army_multi_tool"
+  | "multi_tool"
+  | "plain_blade"
+  | "credit_card_knife"
+  | "coin_knife"
+  | "box_cutter"
+  | "other";
+
 export type VisionCount = {
   knifeCount: number;
   containsFoldingKnife: boolean;
   confidence: number;
   uncertaintyReason: string;
+  itemCategory: ItemCategory;
 };
+
+const ITEM_CATEGORIES: ItemCategory[] = [
+  "pocket_knife",
+  "swiss_army_multi_tool",
+  "multi_tool",
+  "plain_blade",
+  "credit_card_knife",
+  "coin_knife",
+  "box_cutter",
+  "other",
+];
 
 function paidMode() { return process.env.GEMINI_PAID_MODE === "true"; }
 function monthlyLimit() { return Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyPaidAnalysisLimit); }
@@ -38,7 +60,7 @@ export async function countKnivesWithGemini(input: { title: string; description:
   if (!key) throw new Error("GEMINI_API_KEY is not configured.");
   await reserveUsage();
   const model = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
-  const prompt = `Analyze this eBay listing for a folding pocket-knife buyer. Count every physical knife included in one purchase, including fixed-blade or kitchen knives in a mixed lot, but do not count cases, tools, or repeated views of the same knife. Confirm whether at least one included knife is a folding pocket knife. If this is a choose-one/selection listing, the image is unclear, items overlap too much, or the exact included count cannot be established, lower confidence and explain why. Title: ${input.title.slice(0, 300)}. Description: ${input.description.slice(0, 1200)}.`;
+  const prompt = `Analyze this eBay listing for a folding pocket-knife buyer. Count every physical knife included in one purchase, including fixed-blade or kitchen knives in a mixed lot, but do not count cases, tools, or repeated views of the same knife. Confirm whether at least one included knife is a folding pocket knife. If this is a choose-one/selection listing, the image is unclear, items overlap too much, or the exact included count cannot be established, lower confidence and explain why. Then classify the primary item into exactly one category: pocket_knife (a normal folding or fixed-blade knife with a handle), swiss_army_multi_tool (a Victorinox/Wenger-style Swiss Army multi-tool with a small blade plus other tools), multi_tool (any other combo-tool, e.g. a blade combined with a corkscrew or bottle opener, that is not Swiss-Army-style), plain_blade (a bare blade with no handle), credit_card_knife (a thin credit-card- or wallet-shaped folding knife), coin_knife (a coin- or medallion-shaped folding knife), box_cutter (a utility/box-cutter/razor knife), or other. Title: ${input.title.slice(0, 300)}. Description: ${input.description.slice(0, 1200)}.`;
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -46,16 +68,17 @@ export async function countKnivesWithGemini(input: { title: string; description:
       contents: [{ parts: [{ text: prompt }, await imagePart(input.imageUrl)] }],
       generationConfig: {
         temperature: 0,
-        maxOutputTokens: 180,
+        maxOutputTokens: 250,
         responseMimeType: "application/json",
         responseSchema: {
           type: "OBJECT",
-          required: ["knifeCount", "containsFoldingKnife", "confidence", "uncertaintyReason"],
+          required: ["knifeCount", "containsFoldingKnife", "confidence", "uncertaintyReason", "itemCategory"],
           properties: {
             knifeCount: { type: "INTEGER", minimum: 0 },
             containsFoldingKnife: { type: "BOOLEAN" },
             confidence: { type: "NUMBER", minimum: 0, maximum: 1 },
             uncertaintyReason: { type: "STRING" },
+            itemCategory: { type: "STRING", enum: ITEM_CATEGORIES },
           },
         },
       },
@@ -74,6 +97,13 @@ export async function countKnivesWithGemini(input: { title: string; description:
   const payload = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
   const text = payload.candidates?.[0]?.content?.parts?.find((part) => part.text)?.text || "";
   const parsed = JSON.parse(text) as Partial<VisionCount>;
-  if (!Number.isInteger(parsed.knifeCount) || typeof parsed.containsFoldingKnife !== "boolean" || typeof parsed.confidence !== "number" || typeof parsed.uncertaintyReason !== "string") throw new Error("Gemini returned an invalid knife count.");
+  if (
+    !Number.isInteger(parsed.knifeCount) ||
+    typeof parsed.containsFoldingKnife !== "boolean" ||
+    typeof parsed.confidence !== "number" ||
+    typeof parsed.uncertaintyReason !== "string" ||
+    typeof parsed.itemCategory !== "string" ||
+    !ITEM_CATEGORIES.includes(parsed.itemCategory as ItemCategory)
+  ) throw new Error("Gemini returned an invalid knife count.");
   return parsed as VisionCount;
 }
