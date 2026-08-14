@@ -9,12 +9,16 @@ export const FINDER_DEFAULTS = {
   // of 20 requests/minute for gemini-3.1-flash-lite — checking the actual project quota (Google
   // AI Studio > Rate limits) showed the real current free-tier limit is far higher (4,000 RPM /
   // 150,000 RPD), so the old values (batchSize 40, concurrency 8) were leaving most of that
-  // headroom unused and draining the pending queue far slower than necessary. These are sized to
-  // finish a full batch in well under the `/api/finder/tick` route's 60s serverless timeout
-  // (roughly 5 waves of 20 concurrent calls at a few seconds each) while staying nowhere near
-  // the real rate limit — see the "Free-tier rate limits" section of docs/ebay-finder/README.md.
+  // headroom unused and draining the pending queue far slower than necessary. Concurrency is
+  // kept lower than the nominal RPM would allow, though: real production traffic hit
+  // "Gemini free quota is temporarily exhausted" (429) responses well under 4,000 RPM, implying
+  // Google enforces a shorter burst-window limit that a straight per-minute figure doesn't
+  // capture — firing fewer requests at once reduces how often a batch trips it (see
+  // QUOTA_DEFER_MS in finder-service.ts, which also shortens the retry wait for when it does).
+  // batchSize 100 at concurrency 12 still finishes in well under the `/api/finder/tick` route's
+  // 60s serverless timeout — see the "Free-tier rate limits" section of docs/ebay-finder/README.md.
   batchSize: 100,
-  processConcurrency: 20,
+  processConcurrency: 12,
   // Keyword searches in startFinderRun's scan phase run with this much concurrency. Scanning
   // 30+ keywords one at a time risked exceeding the API route's serverless time budget before
   // the scan even finished (see the throttled progress-write comment in finder-service.ts).

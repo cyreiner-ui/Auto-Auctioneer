@@ -476,10 +476,10 @@ test("a VisionBudgetError defers the item without bumping attempts, and short-ci
         const first = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|1|0");
         assert.equal(first.attempts, 0, "attempts must not increment on a budget defer");
         assert.equal(first.status, "pending");
-        assert.ok(new Date(first.next_attempt_at).getTime() > Date.now() + 55 * 60 * 1000);
+        assert.ok(new Date(first.next_attempt_at).getTime() > Date.now() + 4 * 60 * 1000);
         const second = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|2|0");
         assert.equal(second.attempts, 0, "attempts must not increment on the short-circuited defer either");
-        assert.ok(new Date(second.next_attempt_at).getTime() > Date.now() + 55 * 60 * 1000, "the second item should also be deferred an hour, without ever calling Gemini again");
+        assert.ok(new Date(second.next_attempt_at).getTime() > Date.now() + 4 * 60 * 1000, "the second item should also be deferred, without ever calling Gemini again");
       });
     } finally {
       supabaseAdmin.from = restoreFrom;

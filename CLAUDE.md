@@ -44,7 +44,7 @@ Entry point: `lib/finder-service.ts`, UI at `/staff/finder` (`app/staff/finder/`
 4. Newly qualified auction-format items trigger one summary email (`lib/finder-notify.ts`, plain SMTP/nodemailer) — fixed-price listings never need one, since only auctions need a Gixen bid.
 5. Gixen sniping is never automatic: a staff member must type a real max bid and press "Set & Send" on `/staff/finder` before `lib/gixen-client.ts` does anything. Gixen's HTTP API is dead for this account, so `gixen-client.ts` drives Gixen's own website with a headless browser (`playwright-core` + `@sparticuz/chromium`) when `GIXEN_AUTOMATION_MODE=browser`; leaving it unset/`api` is an inert rollback switch.
 
-Gemini vision has a hard monthly spend guardrail (`GEMINI_MONTHLY_ANALYSIS_LIMIT`, tracked in `finder_vision_usage`) enforced via `VisionBudgetError`/`VisionQuotaError` in `lib/finder-service.ts` — items are deferred an hour rather than the run failing when a rate/spend cap is hit.
+Gemini vision has a hard monthly spend guardrail (`GEMINI_MONTHLY_ANALYSIS_LIMIT`, tracked in `finder_vision_usage`) enforced via `VisionBudgetError`/`VisionQuotaError` in `lib/finder-service.ts` — items are deferred (`QUOTA_DEFER_MS`, currently 5 minutes) rather than the run failing when a rate/spend cap is hit.
 
 ## Bidding feature (present but hidden)
 

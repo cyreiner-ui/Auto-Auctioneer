@@ -83,10 +83,18 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker:
 // mapWithConcurrency above) — a genuine scan finishes in well under a minute — because
 // updateRunCounts now finalizes a run as "completed" as soon as its scan is written, rather than
 // waiting for every item it discovered to clear the (separately tracked) vision/shipping pending
-// queue. That queue can legitimately take much longer than this window to drain — a single
-// Gemini rate-limit hit defers a whole batch by an hour (see VisionQuotaError handling) — so it
+// queue. That queue can legitimately take much longer than this window to drain — a Gemini
+// rate-limit hit defers a whole batch by QUOTA_DEFER_MS (see VisionQuotaError handling) — so it
 // must never be what this window is measuring, or a perfectly healthy run gets flagged abandoned.
 const RUN_LOCK_WINDOW_MS = 15 * 60 * 1000;
+
+// How long a batch's remaining vision-needing rows wait before retrying after a Gemini 429. A
+// short window rather than a long one: real usage showed the free tier's 4,000 req/min limit is
+// rarely actually exhausted for a sustained period — a 429 here looks like a brief burst-rate
+// blip that clears within minutes, not a real "quota gone for the day" event (see
+// docs/ebay-finder/README.md's rate-limits section). The next scheduler tick fires in 60s
+// regardless, so this mostly just avoids hammering Gemini again during the same blip.
+const QUOTA_DEFER_MS = 5 * 60 * 1000;
 
 // Flips any "running" finder_runs row older than RUN_LOCK_WINDOW_MS to "failed". Without this, a
 // run killed mid-scan by the route's serverless timeout (or a crash) stays "running" forever —
@@ -341,7 +349,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         return;
       }
       if (visionExhaustedMessage) {
-        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: visionExhaustedMessage }).eq("ebay_item_id", row.ebay_item_id);
+        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + QUOTA_DEFER_MS).toISOString(), reason: visionExhaustedMessage }).eq("ebay_item_id", row.ebay_item_id);
         deferred++;
         return;
       }
@@ -368,7 +376,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       processed++;
     } catch (itemError) {
       if (itemError instanceof VisionQuotaError || itemError instanceof VisionBudgetError) {
-        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: itemError.message }).eq("ebay_item_id", row.ebay_item_id);
+        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + QUOTA_DEFER_MS).toISOString(), reason: itemError.message }).eq("ebay_item_id", row.ebay_item_id);
         deferred++;
         visionExhaustedMessage = itemError.message;
         return;
