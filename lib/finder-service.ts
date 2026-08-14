@@ -2,6 +2,14 @@ import { randomUUID } from "node:crypto";
 import { appToken, getItemShippingCost, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
 import { analyzeListingText, calculateDeal, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isDailyFinderHour, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
+import {
+  analyzeCarvingSetWithGemini,
+  carvingSetCeiling,
+  carvingSetGroupForPhrases,
+  evaluateCarvingSetVision,
+  refreshedCarvingSetRow,
+  type CarvingSetExistingRow,
+} from "./carving-set-finder";
 import { isAuctionFormat } from "./gixen-client";
 import { sendQualifiedItemsEmail, sendRunSummaryEmail } from "./finder-notify";
 import { supabaseAdmin } from "./supabase-admin";
@@ -79,6 +87,9 @@ type FinderRow = {
   item_category: string | null;
   status: string;
   attempts: number;
+  carving_piece_count: number | null;
+  carving_has_case: boolean | null;
+  carving_carbon_steel: boolean | null;
 };
 
 // Categories that never qualify, at any price, regardless of which stage (text or vision)
@@ -211,6 +222,9 @@ type ExistingFinderRow = {
   item_category: string | null;
   shipping_cost: number | string | null;
   shipping_source: string | null;
+  carving_piece_count: number | null;
+  carving_has_case: boolean | null;
+  carving_carbon_steel: boolean | null;
 };
 
 function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, existing: ExistingFinderRow | undefined, maxCost: number, swissArmyMax: number) {
@@ -325,11 +339,15 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const ids = [...found.keys()];
     const existingById = new Map<string, ExistingFinderRow>();
     for (let index = 0; index < ids.length; index += 200) {
-      const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id, knife_count, contains_folding_knife, confidence, detection_source, item_category, shipping_cost, shipping_source").in("ebay_item_id", ids.slice(index, index + 200));
+      const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id, knife_count, contains_folding_knife, confidence, detection_source, item_category, shipping_cost, shipping_source, carving_piece_count, carving_has_case, carving_carbon_steel").in("ebay_item_id", ids.slice(index, index + 200));
       if (error) throw new Error(error.message);
       for (const row of data || []) existingById.set(row.ebay_item_id, row);
     }
-    const rows = [...found.values()].map(({ item, phrases }) => refreshedRow(item, phrases, run.id, existingById.get(item.itemId), resolveMaxCostPerKnife(phrases, keywordMaxCost, config().maxCost), config().swissArmyMaxCost));
+    const rows = [...found.values()].map(({ item, phrases }) => {
+      const carvingGroup = carvingSetGroupForPhrases(phrases);
+      if (carvingGroup) return refreshedCarvingSetRow(item, phrases, run.id, existingById.get(item.itemId) as CarvingSetExistingRow | undefined, carvingGroup);
+      return refreshedRow(item, phrases, run.id, existingById.get(item.itemId), resolveMaxCostPerKnife(phrases, keywordMaxCost, config().maxCost), config().swissArmyMaxCost);
+    });
     const added = ids.filter((id) => !existingById.has(id)).length;
     for (let index = 0; index < rows.length; index += 200) {
       const { error } = await supabaseAdmin.from("finder_items").upsert(rows.slice(index, index + 200), { onConflict: "ebay_item_id" });
@@ -375,7 +393,75 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   // enforced atomically server-side via the reserve_finder_vision_usage RPC) — that's fine, this
   // flag only short-circuits rows that haven't started yet by the time it's set.
   let visionExhaustedMessage: string | null = null;
+  // Carving-set rows never touch resolveMaxCostPerKnife/effectiveMaxCostPerKnife/calculateDeal or
+  // countKnivesWithGemini — a wholly separate algorithm (lib/carving-set-finder.ts) decides their
+  // ceiling and vision classification. They share only the generic batch-level plumbing below:
+  // the shipping-lookup token cache and the cross-algorithm Gemini budget-exhaustion flag.
+  async function processCarvingSetRow(row: FinderRow, group: "sheffield" | "german") {
+    if (row.run_id) runIds.add(row.run_id);
+    try {
+      if (row.knife_count != null) {
+        // Text already confirmed case/material/a usable ceiling on discovery; this row is only
+        // pending because eBay's search result was missing a shipping cost.
+        const ceiling = carvingSetCeiling(group, row.carving_piece_count);
+        const shipping = await getItemShippingCost(row.ebay_item_id, await tokenForLookup());
+        const shippingValue = shipping.value != null && (shipping.currency === "" || shipping.currency === "USD") ? shipping.value : null;
+        const totalCost = shippingValue != null && ceiling != null ? Math.round((Number(row.item_price) + shippingValue) * 100) / 100 : null;
+        const qualifies = totalCost != null && totalCost <= ceiling!;
+        const reason = shippingValue == null ? "missing_shipping" : (qualifies ? null : "over_budget");
+        const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: qualifies ? "qualified" : "rejected", reason, shipping_cost: shippingValue, shipping_source: shippingValue != null ? "lookup" : null, total_cost: totalCost, cost_per_knife: totalCost, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
+        if (saveError) throw new Error(saveError.message);
+        if (qualifies) qualifiedIds.push(row.ebay_item_id);
+        processed++;
+        return;
+      }
+      if (visionExhaustedMessage) {
+        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: visionExhaustedMessage }).eq("ebay_item_id", row.ebay_item_id);
+        deferred++;
+        return;
+      }
+      const vision = await analyzeCarvingSetWithGemini({ title: row.title, description: row.short_description, imageUrl: row.image_url || "" });
+      const decision = evaluateCarvingSetVision(group, vision, config().confidence);
+      let shippingValue = row.shipping_cost == null ? null : Number(row.shipping_cost);
+      let shippingSource = row.shipping_source;
+      let shippingReason: string | null = null;
+      if (!decision.reason && shippingValue == null) {
+        if (Number(row.item_price) > decision.ceiling!) {
+          shippingReason = "over_budget";
+        } else {
+          const shipping = await getItemShippingCost(row.ebay_item_id, await tokenForLookup());
+          if (shipping.value != null && (shipping.currency === "" || shipping.currency === "USD")) { shippingValue = shipping.value; shippingSource = "lookup"; }
+          else shippingReason = "missing_shipping";
+        }
+      }
+      const totalCost = !decision.reason && shippingValue != null ? Math.round((Number(row.item_price) + shippingValue) * 100) / 100 : null;
+      const qualifies = Boolean(!decision.reason && totalCost != null && totalCost <= decision.ceiling!);
+      const reason = decision.reason || shippingReason || (qualifies ? null : "over_budget");
+      const { error: saveError } = await supabaseAdmin.from("finder_items").update({
+        status: qualifies ? "qualified" : "rejected", reason,
+        knife_count: 1, contains_folding_knife: false, confidence: vision.confidence, detection_source: "vision", item_category: "carving_set",
+        carving_piece_count: vision.pieceCount || null, carving_has_case: vision.hasCase, carving_carbon_steel: vision.carbonSteel,
+        shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null,
+        total_cost: totalCost, cost_per_knife: totalCost,
+        attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),
+      }).eq("ebay_item_id", row.ebay_item_id);
+      if (saveError) throw new Error(saveError.message);
+      if (qualifies) qualifiedIds.push(row.ebay_item_id);
+      processed++;
+    } catch (itemError) {
+      if (itemError instanceof VisionQuotaError || itemError instanceof VisionBudgetError) {
+        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: itemError.message }).eq("ebay_item_id", row.ebay_item_id);
+        deferred++;
+        visionExhaustedMessage = itemError.message;
+        return;
+      }
+      const attempts = row.attempts + 1;
+      await supabaseAdmin.from("finder_items").update({ status: attempts >= 3 ? "error" : "pending", reason: itemError instanceof Error ? itemError.message : "Vision analysis failed.", attempts, next_attempt_at: attempts >= 3 ? null : new Date(Date.now() + 15 * 60 * 1000).toISOString(), processed_at: attempts >= 3 ? new Date().toISOString() : null }).eq("ebay_item_id", row.ebay_item_id);
+    }
+  }
   async function processRow(row: FinderRow) {
+    const carvingGroup = carvingSetGroupForPhrases(row.keyword_phrases || []);
+    if (carvingGroup) return processCarvingSetRow(row, carvingGroup);
     if (row.run_id) runIds.add(row.run_id);
     const maxCost = resolveMaxCostPerKnife(row.keyword_phrases || [], keywordMaxCost, config().maxCost);
     try {

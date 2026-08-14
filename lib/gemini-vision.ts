@@ -40,7 +40,9 @@ function monthlyLimit() { return Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMI
 // Override directly with GEMINI_DAILY_ANALYSIS_LIMIT for a different pace.
 function dailyLimit() { return Number(process.env.GEMINI_DAILY_ANALYSIS_LIMIT || Math.ceil(monthlyLimit() / 30)); }
 
-async function reserveUsage() {
+// Exported so lib/carving-set-finder.ts's separate vision algorithm can share the same budget
+// pool and image-fetch plumbing without sharing any pocket-knife-specific decision logic.
+export async function reserveUsage() {
   const { data, error } = await supabaseAdmin.rpc("reserve_finder_vision_usage", {
     p_month: monthKey(), p_day: dayKey(), p_paid_mode: paidMode(), p_monthly_limit: monthlyLimit(), p_daily_limit: dailyLimit(),
   }).single();
@@ -52,7 +54,7 @@ async function reserveUsage() {
 
 function compactEbayImage(url: string) { return url.replace(/s-l\d+/i, "s-l640"); }
 
-async function imagePart(url: string) {
+export async function imagePart(url: string) {
   const response = await fetch(compactEbayImage(url));
   if (!response.ok) throw new Error(`Could not download listing image (${response.status}).`);
   const contentType = response.headers.get("content-type") || "image/jpeg";
