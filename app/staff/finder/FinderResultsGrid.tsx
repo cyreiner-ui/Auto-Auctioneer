@@ -3,7 +3,11 @@
 import { useMemo, useState } from "react";
 import { usePersistedState } from "../../../lib/use-persisted-state";
 
-export type FinderResult = { ebay_item_id: string; title: string; ebay_url: string; image_url: string | null; item_price: number; shipping_cost: number; total_cost: number; cost_per_knife: number; knife_count: number; detection_source: string; discovered_at: string; gixen_status?: string | null; gixen_message?: string | null; buying_options: string[]; max_bid: number | null };
+export type FinderResult = {
+  ebay_item_id: string; title: string; ebay_url: string; image_url: string | null; item_price: number; shipping_cost: number; total_cost: number; cost_per_knife: number; knife_count: number; detection_source: string; discovered_at: string; gixen_status?: string | null; gixen_message?: string | null; buying_options: string[]; max_bid: number | null;
+  carving_piece_count?: number | null; carving_has_case?: boolean | null; carving_carbon_steel?: boolean | null;
+};
+export type FinderResultsVariant = "pocket_knife" | "carving_set";
 
 type ResultAction = { label: string; className?: string; visible?: (result: FinderResult) => boolean; onClick: (result: FinderResult) => void };
 type BulkAction = { label: string; className?: string; onClick: (ids: string[]) => void };
@@ -22,7 +26,7 @@ const usd = (value: number) => Number(value || 0).toLocaleString("en-US", { styl
 const isAuctionFormat = (buyingOptions: string[]) => Array.isArray(buyingOptions) && buyingOptions.includes("AUCTION");
 const hasBuyingOption = (buyingOptions: string[], type: TypeFilter) => Array.isArray(buyingOptions) && buyingOptions.includes(type);
 
-export default function FinderResultsGrid({ results, busy, emptyMessage, actions, bulkActions, bidAction }: { results: FinderResult[]; busy: boolean; emptyMessage: string; actions: ResultAction[]; bulkActions: BulkAction[]; bidAction?: BidSubmit }) {
+export default function FinderResultsGrid({ results, busy, emptyMessage, actions, bulkActions, bidAction, variant = "pocket_knife" }: { results: FinderResult[]; busy: boolean; emptyMessage: string; actions: ResultAction[]; bulkActions: BulkAction[]; bidAction?: BidSubmit; variant?: FinderResultsVariant }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bidDrafts, setBidDrafts] = useState<Record<string, string>>({});
   const [panelOpen, setPanelOpen] = useState(false);
@@ -62,8 +66,8 @@ export default function FinderResultsGrid({ results, busy, emptyMessage, actions
                 <option value="discovered_desc">Newest first</option>
                 <option value="price_asc">Price: low to high</option>
                 <option value="price_desc">Price: high to low</option>
-                <option value="cpk_asc">Cost per knife: low to high</option>
-                <option value="cpk_desc">Cost per knife: high to low</option>
+                {variant === "pocket_knife" && <option value="cpk_asc">Cost per knife: low to high</option>}
+                {variant === "pocket_knife" && <option value="cpk_desc">Cost per knife: high to low</option>}
               </select>
             </div>
             <div className="finder-filter-group">
@@ -80,10 +84,19 @@ export default function FinderResultsGrid({ results, busy, emptyMessage, actions
         <label className="finder-card-select"><input type="checkbox" checked={selected.has(result.ebay_item_id)} onChange={() => toggle(result.ebay_item_id)} aria-label={`Select ${result.title}`} /></label>
         {result.image_url ? <img src={result.image_url} alt={result.title} /> : <div className="finder-no-image">No image</div>}
         <div className="finder-card-body">
-          <div className="finder-badges"><span>{result.knife_count} knives</span>{result.gixen_status && <span className={result.gixen_status === "failed" ? "gixen-failed" : undefined} title={result.gixen_message || undefined}>{GIXEN_BADGE[result.gixen_status] || result.gixen_status}</span>}</div>
+          <div className="finder-badges">
+            {variant === "carving_set"
+              ? <>
+                  <span>{result.carving_piece_count ?? 1} piece{(result.carving_piece_count ?? 1) === 1 ? "" : "s"}</span>
+                  {result.carving_has_case && <span>Cased</span>}
+                  {result.carving_carbon_steel && <span>Carbon steel</span>}
+                </>
+              : <span>{result.knife_count} knives</span>}
+            {result.gixen_status && <span className={result.gixen_status === "failed" ? "gixen-failed" : undefined} title={result.gixen_message || undefined}>{GIXEN_BADGE[result.gixen_status] || result.gixen_status}</span>}
+          </div>
           <h3>{result.title}</h3>
           <p className="finder-price-line">{usd(result.item_price)} + {usd(result.shipping_cost)} shipping = {usd(result.total_cost)} total</p>
-          <strong className="finder-unit-price">{usd(result.cost_per_knife)} / knife</strong>
+          {variant === "pocket_knife" && <strong className="finder-unit-price">{usd(result.cost_per_knife)} / knife</strong>}
           <p className="finder-snapshot">Price captured {new Date(result.discovered_at).toLocaleString()}. Verify the current price on eBay.</p>
           {bidAction && isAuctionFormat(result.buying_options) && result.gixen_status !== "sent" && result.gixen_status !== "not_auction" &&
             <div className="finder-bid-row">

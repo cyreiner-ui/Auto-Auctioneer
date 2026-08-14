@@ -21,6 +21,11 @@ export function carvingSetGroupForPhrases(phrases: string[]): CarvingSetGroup | 
   return null;
 }
 
+// Flat list of the two phrases above — used by lib/finder-service.ts to scope a manual run, the
+// results/counts/archived queries, and qualification emails to just this category (via a
+// keyword_phrases array-overlap check), without adding a category column to finder_keywords.
+export const CARVING_SET_PHRASES: string[] = Object.values(CARVING_SET_KEYWORDS);
+
 const carvingSetPattern = /\bcarving\s+(?:set|knife\s*(?:and|&)\s*fork(?:\s+set)?)\b/i;
 // Explicit case/box wording only — never a bare /case/i. W.R. Case & Sons is a real, common knife
 // brand, so "Case Carving Set" (the brand) must not be misread as "a carving set with a case."

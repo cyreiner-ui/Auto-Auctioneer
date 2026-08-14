@@ -2,22 +2,21 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import FinderResultsGrid, { type FinderResult } from "./FinderResultsGrid";
+import FinderResultsGrid, { type FinderResult } from "../FinderResultsGrid";
 
 type Run = { id: string; trigger: string; status: string; keywords_scanned: number; current_keyword: string | null; items_seen: number; items_added: number; qualified: number; rejected: number; errors: string[]; started_at: string };
-type Overview = { results: FinderResult[]; runs: Run[]; keywords: { id: string; phrase: string; enabled: boolean }[]; counts: { pending: number; rejected: number; qualified: number }; settings: { zip: string; maxCostPerKnife: number } };
+type Overview = { results: FinderResult[]; runs: Run[]; keywords: { id: string; phrase: string; enabled: boolean }[]; counts: { pending: number; rejected: number; qualified: number } };
 
-const usd = (value: number) => Number(value || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 const RUN_STATUS_LABEL: Record<string, string> = { running: "Working…", completed: "Done", failed: "Had a problem" };
 
-export default function FinderDashboard() {
+export default function CarvingSetDashboard() {
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    const response = await fetch("/api/finder?category=pocket_knife", { cache: "no-store" });
+    const response = await fetch("/api/finder?category=carving_set", { cache: "no-store" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Could not load finder.");
     setData(payload); setError("");
@@ -67,7 +66,7 @@ export default function FinderDashboard() {
   };
 
   return <main className="finder-page">
-    <header className="finder-header"><div><Link className="back" href="/">← Back to staff panel</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Pocket-knife deal finder</h1><p className="muted">Daily snapshots delivered to {data?.settings.zip ?? "—"} · maximum {usd(data?.settings.maxCostPerKnife ?? 0)} per knife including shipping</p><div className="finder-header-links"><Link className="back finder-settings-link" href="/staff/finder/settings">Search settings</Link><Link className="back finder-settings-link" href="/staff/finder/archived">Archived items</Link><Link className="back finder-settings-link" href="/staff/finder/carving-sets">Carving sets →</Link></div></div><button className="primary" disabled={busy} onClick={() => void request("/api/finder/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: "pocket_knife" }) })}>{busy ? "Working…" : "Run now"}</button></header>
+    <header className="finder-header"><div><Link className="back" href="/">← Back to staff panel</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Carving-set deal finder</h1><p className="muted">Sheffield/English sets: $200 flat, carbon steel only. German sets: $10 × piece count + $15. A case is required for both.</p><div className="finder-header-links"><Link className="back finder-settings-link" href="/staff/finder/carving-sets/settings">Search settings</Link><Link className="back finder-settings-link" href="/staff/finder/carving-sets/archived">Archived items</Link><Link className="back finder-settings-link" href="/staff/finder">← Pocket knives</Link></div></div><button className="primary" disabled={busy} onClick={() => void request("/api/finder/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: "carving_set" }) })}>{busy ? "Working…" : "Run now"}</button></header>
     {error && <div className="notice finder-error" role="status" aria-live="polite" aria-atomic="true">{friendlyError(error)}</div>}
     {notice && <div className="notice" role="status" aria-live="polite" aria-atomic="true">{notice}</div>}
     {!data && !error && <p className="muted" role="status" aria-live="polite">Loading…</p>}
@@ -78,9 +77,10 @@ export default function FinderDashboard() {
       <section className="finder-runs"><div className="section-title"><div><p className="eyebrow">LATEST SEARCH</p><h2>{latest ? new Date(latest.started_at).toLocaleString() : "Not run yet"}</h2></div>{latest && <span className={`run-status ${latest.status}`}>{RUN_STATUS_LABEL[latest.status] || latest.status}</span>}</div>
         {latest?.status === "running" && <div className="finder-progress"><div className="budget-meter" role="progressbar" aria-valuenow={progressPercent} aria-valuemin={0} aria-valuemax={100} aria-label="Search progress"><span style={{ width: `${progressPercent}%` }} /></div><p className="muted">Searching {latest.keywords_scanned}/{totalKeywords || "…"}{latest.current_keyword ? `: “${latest.current_keyword}”` : ""}</p></div>}
         {latest && latest.status !== "running" && <p className="muted">Found {latest.qualified} good deal{latest.qualified === 1 ? "" : "s"} from {latest.items_added} new listing{latest.items_added === 1 ? "" : "s"}.</p>}{latest?.errors?.map((message) => <p className="finder-run-error" key={message}>{message}</p>)}</section>
-      <section className="finder-results"><div className="section-title"><div><p className="eyebrow">QUALIFYING SNAPSHOTS</p><h2>Deals at or below $3.50 per knife</h2></div></div>
+      <section className="finder-results"><div className="section-title"><div><p className="eyebrow">QUALIFYING SNAPSHOTS</p><h2>Cased carving sets within budget</h2></div></div>
         <FinderResultsGrid
           results={data.results}
+          variant="carving_set"
           busy={busy}
           emptyMessage="No qualifying snapshots yet. Run the finder or wait for the daily 6:00 AM search."
           actions={[

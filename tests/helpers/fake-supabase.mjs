@@ -21,8 +21,11 @@ function matchesFilters(row, filters) {
     if (filter.type === "in") return filter.val.includes(value);
     if (filter.type === "is") return (value ?? null) === filter.val;
     if (filter.type === "not" && filter.op === "is") return !((value ?? null) === filter.val);
+    if (filter.type === "not" && filter.op === "ov") return !(Array.isArray(value) && value.some((v) => filter.val.includes(v)));
     if (filter.type === "lte") return value != null && value <= filter.val;
     if (filter.type === "gte") return value != null && value >= filter.val;
+    if (filter.type === "overlaps") return Array.isArray(value) && value.some((v) => filter.val.includes(v));
+    if (filter.type === "or") return filter.clauses.some((clause) => matchesFilters(row, [clause]));
     return true;
   });
 }
@@ -52,6 +55,19 @@ class Builder {
   not(col, op, val) { this.filters.push({ type: "not", col, op, val }); return this; }
   lte(col, val) { this.filters.push({ type: "lte", col, val }); return this; }
   gte(col, val) { this.filters.push({ type: "gte", col, val }); return this; }
+  overlaps(col, val) { this.filters.push({ type: "overlaps", col, val }); return this; }
+  // Minimal PostgREST-style `.or("col.is.null,col.eq.value")` parser — only supports the
+  // `is.null` / `eq.<value>` clause shapes this test suite's callers actually use.
+  or(expression) {
+    const clauses = expression.split(",").map((clause) => {
+      const [col, op, rawVal] = clause.split(".");
+      if (op === "is") return { type: "is", col, val: rawVal === "null" ? null : rawVal };
+      if (op === "eq") return { type: "eq", col, val: rawVal };
+      throw new Error(`Unsupported .or() clause in fake-supabase: "${clause}"`);
+    });
+    this.filters.push({ type: "or", clauses });
+    return this;
+  }
   order(col, opts) { this._order = { col, ascending: opts?.ascending !== false }; return this; }
   limit(n) { this._limit = n; return this; }
   single() { this._single = "single"; return this; }

@@ -6,6 +6,7 @@ import {
   analyzeCarvingSetWithGemini,
   carvingSetCeiling,
   carvingSetGroupForPhrases,
+  CARVING_SET_PHRASES,
   evaluateCarvingSetVision,
   refreshedCarvingSetRow,
   type CarvingSetExistingRow,
@@ -13,6 +14,19 @@ import {
 import { isAuctionFormat } from "./gixen-client";
 import { sendQualifiedItemsEmail, sendRunSummaryEmail } from "./finder-notify";
 import { supabaseAdmin } from "./supabase-admin";
+
+// The two independent operational tracks staff run/review separately (see lib/carving-set-finder.ts
+// for how a keyword phrase resolves to "carving_set" — anything else is "pocket_knife"). Threaded
+// through startFinderRun/finderOverview/archivedFinderItems/notifyNewlyQualified so a manual run,
+// a results/settings page, or a qualification email for one track never touches the other's data.
+export type FinderCategory = "pocket_knife" | "carving_set";
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function scopeToCategory<Q extends { overlaps: (col: string, val: string[]) => any; not: (col: string, op: string, val: string[]) => any }>(query: Q, category?: FinderCategory) {
+  if (!category) return query;
+  if (category === "carving_set") return query.overlaps("keyword_phrases", CARVING_SET_PHRASES);
+  return query.not("keyword_phrases", "ov", CARVING_SET_PHRASES);
+}
 
 type FinderNotifyMode = "auctions_only" | "all_qualified";
 
@@ -29,36 +43,54 @@ async function getNotifySettings(): Promise<{ mode: FinderNotifyMode; recipients
   return { mode, recipients };
 }
 
+type NotifyRow = {
+  ebay_item_id: string; title: string; ebay_url: string; image_url: string | null; item_price: number; shipping_cost: number | null;
+  total_cost: number | null; cost_per_knife: number | null; knife_count: number | null; notified_at: string | null; gixen_status: string | null;
+  buying_options: string[]; keyword_phrases: string[] | null; carving_piece_count: number | null; carving_has_case: boolean | null; carving_carbon_steel: boolean | null;
+};
+
+// Sends the qualified-item alert email for one category's bucket of rows, using the shared
+// (not category-scoped) notify mode/recipients — staff chose to keep those settings global while
+// still requiring the emails themselves to never mix pocket-knife and carving-set items.
+async function notifyBucket(rows: NotifyRow[], mode: FinderNotifyMode, recipients: string[], kind: FinderCategory) {
+  const unnotified = rows.filter((row) => !row.notified_at);
+  if (!unnotified.length) return;
+  if (mode === "all_qualified") {
+    const auctionCount = unnotified.filter((row) => isAuctionFormat(row.buying_options)).length;
+    const emailResult = await sendRunSummaryEmail(
+      { total: unnotified.length, auctionCount, fixedPriceCount: unnotified.length - auctionCount },
+      recipients,
+      kind,
+    );
+    if (emailResult.ok) {
+      await supabaseAdmin.from("finder_items").update({ notified_at: new Date().toISOString() }).in("ebay_item_id", unnotified.map((row) => row.ebay_item_id));
+    }
+    return;
+  }
+  const unnotifiedAuctions = unnotified.filter((row) => isAuctionFormat(row.buying_options));
+  if (!unnotifiedAuctions.length) return;
+  const emailResult = await sendQualifiedItemsEmail(unnotifiedAuctions, recipients, kind);
+  if (emailResult.ok) {
+    await supabaseAdmin.from("finder_items").update({ notified_at: new Date().toISOString() }).in("ebay_item_id", unnotifiedAuctions.map((row) => row.ebay_item_id));
+  }
+}
+
 async function notifyNewlyQualified(ebayItemIds: string[]) {
   if (!ebayItemIds.length) return;
   const { data, error } = await supabaseAdmin
     .from("finder_items")
-    .select("ebay_item_id, title, ebay_url, image_url, item_price, shipping_cost, total_cost, cost_per_knife, knife_count, notified_at, gixen_status, buying_options")
+    .select("ebay_item_id, title, ebay_url, image_url, item_price, shipping_cost, total_cost, cost_per_knife, knife_count, notified_at, gixen_status, buying_options, keyword_phrases, carving_piece_count, carving_has_case, carving_carbon_steel")
     .eq("status", "qualified")
     .in("ebay_item_id", ebayItemIds);
   if (error || !data?.length) return;
   const { mode, recipients } = await getNotifySettings();
-  const unnotified = data.filter((row) => !row.notified_at);
-  if (mode === "all_qualified") {
-    if (unnotified.length) {
-      const auctionCount = unnotified.filter((row) => isAuctionFormat(row.buying_options)).length;
-      const emailResult = await sendRunSummaryEmail(
-        { total: unnotified.length, auctionCount, fixedPriceCount: unnotified.length - auctionCount },
-        recipients,
-      );
-      if (emailResult.ok) {
-        await supabaseAdmin.from("finder_items").update({ notified_at: new Date().toISOString() }).in("ebay_item_id", unnotified.map((row) => row.ebay_item_id));
-      }
-    }
-  } else {
-    const unnotifiedAuctions = unnotified.filter((row) => isAuctionFormat(row.buying_options));
-    if (unnotifiedAuctions.length) {
-      const emailResult = await sendQualifiedItemsEmail(unnotifiedAuctions, recipients);
-      if (emailResult.ok) {
-        await supabaseAdmin.from("finder_items").update({ notified_at: new Date().toISOString() }).in("ebay_item_id", unnotifiedAuctions.map((row) => row.ebay_item_id));
-      }
-    }
-  }
+  // Split by category before sending — a single run/batch that qualifies both a pocket-knife and
+  // a carving-set item must never combine them into one email, even though the notify mode and
+  // recipient list are the same shared settings for both.
+  const carvingRows = data.filter((row) => carvingSetGroupForPhrases(row.keyword_phrases || []));
+  const pocketRows = data.filter((row) => !carvingSetGroupForPhrases(row.keyword_phrases || []));
+  await notifyBucket(pocketRows, mode, recipients, "pocket_knife");
+  await notifyBucket(carvingRows, mode, recipients, "carving_set");
   const notAuction = data.filter((row) => !row.gixen_status && !isAuctionFormat(row.buying_options));
   if (notAuction.length) {
     await supabaseAdmin.from("finder_items").update({
@@ -159,9 +191,15 @@ async function reconcileOrphanedRuns() {
   }
 }
 
-async function findActiveRun() {
+// A scoped (category-specific) run must never block, or be blocked by, a run of the OTHER
+// category — but an unscoped run (category is null; today only the automated daily scan) touches
+// every keyword, so it must still serialize against both. Passing no `category` here (the
+// automated path) preserves today's behavior exactly: any running row blocks a new unscoped run.
+async function findActiveRun(category?: FinderCategory) {
   await reconcileOrphanedRuns();
-  const { data, error } = await supabaseAdmin.from("finder_runs").select("*").eq("status", "running").order("started_at", { ascending: false }).limit(1).maybeSingle();
+  let query = supabaseAdmin.from("finder_runs").select("*").eq("status", "running").order("started_at", { ascending: false }).limit(1);
+  if (category) query = query.or(`category.is.null,category.eq.${category}`);
+  const { data, error } = await query.maybeSingle();
   if (error) throw new Error(error.message);
   return data;
 }
@@ -288,11 +326,11 @@ async function updateRunCounts(runId: string) {
   if (saveError) throw new Error(saveError.message);
 }
 
-export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: string) {
-  const active = await findActiveRun();
+export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: string, category?: FinderCategory) {
+  const active = await findActiveRun(category);
   if (active) return { run: active, created: false };
   const key = runKey || `${trigger}:${trigger === "scheduled" ? easternDateKey() : randomUUID()}`;
-  const { data: inserted, error: insertError } = await supabaseAdmin.from("finder_runs").upsert({ run_key: key, trigger }, { onConflict: "run_key", ignoreDuplicates: true }).select("*");
+  const { data: inserted, error: insertError } = await supabaseAdmin.from("finder_runs").upsert({ run_key: key, trigger, category: category ?? null }, { onConflict: "run_key", ignoreDuplicates: true }).select("*");
   if (insertError) throw new Error(insertError.message);
   if (!inserted?.length) {
     const { data: existing, error: existingError } = await supabaseAdmin.from("finder_runs").select("*").eq("run_key", key).single();
@@ -301,8 +339,13 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
   }
   const run = inserted[0];
   try {
-    const { data: keywords, error: keywordError } = await supabaseAdmin.from("finder_keywords").select("phrase, max_cost_per_knife").eq("enabled", true).order("created_at");
+    const { data: allKeywords, error: keywordError } = await supabaseAdmin.from("finder_keywords").select("phrase, max_cost_per_knife").eq("enabled", true).order("created_at");
     if (keywordError) throw new Error(keywordError.message);
+    // No category column on finder_keywords — a scoped run filters in JS by whether each phrase
+    // resolves to the carving-set algorithm, the same test the per-item dispatch already uses.
+    const keywords = category
+      ? (allKeywords || []).filter((keyword) => Boolean(carvingSetGroupForPhrases([keyword.phrase])) === (category === "carving_set"))
+      : (allKeywords || []);
     const keywordMaxCost = new Map((keywords || []).map((keyword) => [keyword.phrase, keyword.max_cost_per_knife]));
     const found = new Map<string, { item: EbayFinderItem; phrases: string[] }>();
     const errors: string[] = [];
@@ -544,21 +587,26 @@ export async function finderTick(date = new Date()) {
   return { dailyRun, queue };
 }
 
-export async function finderOverview() {
-  const [keywords, results, runs, pending, rejected, qualified, usage, dailyUsage, notifySettingsRow, notifyRecipientRows] = await Promise.all([
+export async function finderOverview(category?: FinderCategory) {
+  const [allKeywords, results, runs, pending, rejected, qualified, usage, dailyUsage, notifySettingsRow, notifyRecipientRows] = await Promise.all([
     supabaseAdmin.from("finder_keywords").select("*").order("created_at"),
-    supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").is("dismissed_at", null).order("discovered_at", { ascending: false }).limit(500),
-    supabaseAdmin.from("finder_runs").select("*").order("started_at", { ascending: false }).limit(10),
-    supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).eq("status", "pending"),
-    supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).in("status", ["rejected", "error"]),
-    supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).eq("status", "qualified").is("dismissed_at", null),
+    scopeToCategory(supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").is("dismissed_at", null).order("discovered_at", { ascending: false }).limit(500), category),
+    category ? supabaseAdmin.from("finder_runs").select("*").or(`category.is.null,category.eq.${category}`).order("started_at", { ascending: false }).limit(10) : supabaseAdmin.from("finder_runs").select("*").order("started_at", { ascending: false }).limit(10),
+    scopeToCategory(supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).eq("status", "pending"), category),
+    scopeToCategory(supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).in("status", ["rejected", "error"]), category),
+    scopeToCategory(supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).eq("status", "qualified").is("dismissed_at", null), category),
     supabaseAdmin.from("finder_vision_usage").select("*").eq("month", monthKey()).maybeSingle(),
     supabaseAdmin.from("finder_vision_usage_daily").select("*").eq("day", dayKey()).maybeSingle(),
     supabaseAdmin.from("finder_notify_settings").select("notify_mode").eq("id", true).maybeSingle(),
     supabaseAdmin.from("finder_notify_recipients").select("*").order("created_at"),
   ]);
-  const firstError = [keywords.error, results.error, runs.error, pending.error, rejected.error, qualified.error, usage.error, dailyUsage.error, notifySettingsRow.error, notifyRecipientRows.error].find(Boolean);
+  const firstError = [allKeywords.error, results.error, runs.error, pending.error, rejected.error, qualified.error, usage.error, dailyUsage.error, notifySettingsRow.error, notifyRecipientRows.error].find(Boolean);
   if (firstError) throw new Error(firstError.message);
+  // No category column on finder_keywords — filter in JS with the same phrase test the run-scan
+  // and per-item dispatch both use, so each settings page only ever sees its own keyword rows.
+  const keywords = category
+    ? (allKeywords.data || []).filter((keyword) => Boolean(carvingSetGroupForPhrases([keyword.phrase])) === (category === "carving_set"))
+    : (allKeywords.data || []);
   const free = Number(usage.data?.free_analyses || 0);
   const paid = Number(usage.data?.paid_analyses || 0);
   const analyses = free + paid;
@@ -566,7 +614,7 @@ export async function finderOverview() {
   const dailyAnalyses = Number(dailyUsage.data?.analyses || 0);
   const notifyRecipients = notifyRecipientRows.data || [];
   return {
-    keywords: keywords.data || [], results: results.data || [], runs: runs.data || [],
+    keywords, results: results.data || [], runs: runs.data || [],
     counts: { pending: pending.count || 0, rejected: rejected.count || 0, qualified: qualified.count || 0 },
     notify: {
       mode: notifySettingsRow.data?.notify_mode === "all_qualified" ? "all_qualified" : "auctions_only",
@@ -588,8 +636,8 @@ export async function finderOverview() {
   };
 }
 
-export async function archivedFinderItems() {
-  const { data, error } = await supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").not("dismissed_at", "is", null).order("dismissed_at", { ascending: false }).limit(500);
+export async function archivedFinderItems(category?: FinderCategory) {
+  const { data, error } = await scopeToCategory(supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").not("dismissed_at", "is", null).order("dismissed_at", { ascending: false }).limit(500), category);
   if (error) throw new Error(error.message);
   return { results: data || [] };
 }

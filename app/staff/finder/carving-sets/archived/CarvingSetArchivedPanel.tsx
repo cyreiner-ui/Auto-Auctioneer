@@ -2,17 +2,17 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import FinderResultsGrid, { type FinderResult } from "../FinderResultsGrid";
+import FinderResultsGrid, { type FinderResult } from "../../FinderResultsGrid";
 
 type Overview = { results: FinderResult[] };
 
-export default function ArchivedItemsPanel() {
+export default function CarvingSetArchivedPanel() {
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    const response = await fetch("/api/finder/archived?category=pocket_knife", { cache: "no-store" });
+    const response = await fetch("/api/finder/archived?category=carving_set", { cache: "no-store" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Could not load archived items.");
     setData(payload); setError("");
@@ -34,12 +34,13 @@ export default function ArchivedItemsPanel() {
   const deleteIds = (ids: string[]) => request("/api/finder/items", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) });
 
   return <main className="finder-page">
-    <header className="finder-header"><div><Link className="back" href="/staff/finder">← Back to deal finder</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Archived items</h1><p className="muted">Deals you&rsquo;ve already handled. Restore one to see it again, or delete it for good.</p></div></header>
+    <header className="finder-header"><div><Link className="back" href="/staff/finder/carving-sets">← Back to carving-set finder</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Archived carving sets</h1><p className="muted">Deals you&rsquo;ve already handled. Restore one to see it again, or delete it for good.</p></div></header>
     {error && <div className="notice finder-error" role="status" aria-live="polite" aria-atomic="true">{error}</div>}
     {!data && !error && <p className="muted" role="status" aria-live="polite">Loading…</p>}
     {data && <section className="finder-results">
       <FinderResultsGrid
         results={data.results}
+        variant="carving_set"
         busy={busy}
         emptyMessage="No archived items yet."
         actions={[

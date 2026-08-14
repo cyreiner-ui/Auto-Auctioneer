@@ -143,3 +143,50 @@ test("sendRunSummaryEmail reports a send failure without throwing", async (t) =>
     assert.equal(result.message, "SMTP connection refused");
   });
 });
+
+const CARVING_ITEM = {
+  ebay_item_id: "v1|carving|0",
+  title: "Antique Sheffield Carving Set",
+  ebay_url: "https://www.ebay.com/itm/carving",
+  image_url: "https://i.ebayimg.com/carving.jpg",
+  item_price: 180,
+  shipping_cost: 0,
+  total_cost: 180,
+  cost_per_knife: 180,
+  knife_count: 1,
+  carving_piece_count: 2,
+  carving_has_case: true,
+  carving_carbon_steel: true,
+};
+
+test("sendQualifiedItemsEmail uses a carving-set subject and detail line for kind: \"carving_set\"", async (t) => {
+  await withEnv(SMTP_ENV, async () => {
+    const calls = [];
+    t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async (message) => { calls.push(message); } }));
+    await sendQualifiedItemsEmail([CARVING_ITEM], RECIPIENTS, "carving_set");
+    assert.equal(calls[0].subject, "1 new carving set deal found");
+    assert.match(calls[0].html, /2 pieces/);
+    assert.match(calls[0].html, /cased/);
+    assert.match(calls[0].html, /carbon steel/);
+    assert.doesNotMatch(calls[0].html, /\/knife/, "the per-knife unit label doesn't apply to carving sets");
+  });
+});
+
+test("sendQualifiedItemsEmail defaults to the pocket-knife subject/detail line when kind is omitted", async (t) => {
+  await withEnv(SMTP_ENV, async () => {
+    const calls = [];
+    t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async (message) => { calls.push(message); } }));
+    await sendQualifiedItemsEmail([ITEM], RECIPIENTS);
+    assert.equal(calls[0].subject, "1 new pocket knife deal found");
+    assert.match(calls[0].html, /\/knife/);
+  });
+});
+
+test("sendRunSummaryEmail uses a carving-set subject for kind: \"carving_set\"", async (t) => {
+  await withEnv(SMTP_ENV, async () => {
+    const calls = [];
+    t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async (message) => { calls.push(message); } }));
+    await sendRunSummaryEmail({ total: 2, auctionCount: 1, fixedPriceCount: 1 }, RECIPIENTS, "carving_set");
+    assert.equal(calls[0].subject, "2 new carving set deals found");
+  });
+});
