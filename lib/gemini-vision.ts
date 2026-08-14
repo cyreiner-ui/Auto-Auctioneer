@@ -1,4 +1,4 @@
-import { FINDER_DEFAULTS, monthKey } from "./finder-core";
+import { dayKey, FINDER_DEFAULTS, monthKey } from "./finder-core";
 import { supabaseAdmin } from "./supabase-admin";
 
 export class VisionQuotaError extends Error {}
@@ -13,12 +13,19 @@ export type VisionCount = {
 
 function paidMode() { return process.env.GEMINI_PAID_MODE === "true"; }
 function monthlyLimit() { return Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyAnalysisLimit); }
+// Defaults to spreading the monthly cap evenly across a 30-day month, so a single busy week can't
+// exhaust the whole month's budget and leave the rest of it with no vision analysis at all.
+// Override directly with GEMINI_DAILY_ANALYSIS_LIMIT for a different pace.
+function dailyLimit() { return Number(process.env.GEMINI_DAILY_ANALYSIS_LIMIT || Math.ceil(monthlyLimit() / 30)); }
 
 async function reserveUsage() {
-  const month = monthKey();
-  const { data, error } = await supabaseAdmin.rpc("reserve_finder_vision_usage", { p_month: month, p_paid_mode: paidMode(), p_monthly_limit: monthlyLimit() }).single();
+  const { data, error } = await supabaseAdmin.rpc("reserve_finder_vision_usage", {
+    p_month: monthKey(), p_day: dayKey(), p_paid_mode: paidMode(), p_monthly_limit: monthlyLimit(), p_daily_limit: dailyLimit(),
+  }).single();
   if (error) throw new Error(error.message);
-  if (!data?.reserved) throw new VisionBudgetError("Monthly Gemini analysis limit reached.");
+  if (!data?.reserved) {
+    throw new VisionBudgetError(data?.limit_reason === "daily" ? "Daily Gemini analysis pacing cap reached; resumes tomorrow." : "Monthly Gemini analysis limit reached.");
+  }
 }
 
 function compactEbayImage(url: string) { return url.replace(/s-l\d+/i, "s-l640"); }

@@ -8,9 +8,9 @@ import { jsonResponse, textResponse, withEnv, withFetch } from "./helpers/fake-f
 const GEMINI_ENV = { GEMINI_API_KEY: "test-key", GEMINI_MODEL: "gemini-3.1-flash-lite" };
 const INPUT = { title: "Lot of 10 pocket knives", description: "A lot of 10 used pocket knives.", imageUrl: "https://i.ebayimg.com/s-l500/1.jpg" };
 
-function withFakeRpc(reserved, fn) {
+function withFakeRpc(reserved, fn, limitReason = null) {
   const fake = createFakeSupabase();
-  fake.setRpc("reserve_finder_vision_usage", () => ({ data: { reserved }, error: null }));
+  fake.setRpc("reserve_finder_vision_usage", () => ({ data: { reserved, limit_reason: limitReason }, error: null }));
   return (async () => {
     const restore = supabaseAdmin.rpc;
     supabaseAdmin.rpc = fake.rpc.bind(fake);
@@ -35,7 +35,22 @@ test("throws VisionBudgetError when the monthly reservation is refused", async (
       await withFetch([], async () => {
         await assert.rejects(() => countKnivesWithGemini(INPUT), VisionBudgetError);
       });
-    });
+    }, "monthly");
+  });
+});
+
+test("distinguishes the daily pacing cap from the monthly cap in the error message", async () => {
+  await withEnv(GEMINI_ENV, async () => {
+    await withFakeRpc(false, async () => {
+      await withFetch([], async () => {
+        await assert.rejects(() => countKnivesWithGemini(INPUT), /Daily Gemini analysis pacing cap reached; resumes tomorrow/);
+      });
+    }, "daily");
+    await withFakeRpc(false, async () => {
+      await withFetch([], async () => {
+        await assert.rejects(() => countKnivesWithGemini(INPUT), /Monthly Gemini analysis limit reached/);
+      });
+    }, "monthly");
   });
 });
 

@@ -3,7 +3,11 @@ export const FINDER_DEFAULTS = {
   maxCostPerKnife: 3.5,
   confidence: 0.9,
   resultsPerKeyword: 500,
-  monthlyAnalysisLimit: 50_000,
+  // Sized so the app's own conservative $0.001/analysis accounting (see finderOverview's
+  // projectedMaximum) lands at a $10/month ceiling. This is a hard backstop, not a pacing
+  // mechanism — see dailyLimit in gemini-vision.ts/finder-service.ts for what actually spreads
+  // usage evenly across the month instead of letting one busy week exhaust it.
+  monthlyAnalysisLimit: 10_000,
   // Items pulled off the pending queue per tick, and how many of them (vision + shipping
   // lookups) run concurrently. At the old batchSize of 5 processed one at a time, a queue of a
   // few thousand items (typical after a daily scan) took most of a day to drain at one tick per
@@ -166,6 +170,9 @@ export function calculateDeal(itemPrice: number, shippingCost: number | null, kn
 }
 
 export function monthKey(date = new Date()) { return date.toISOString().slice(0, 7); }
+
+// UTC calendar day, used to key the daily vision-analysis pacing cap (see gemini-vision.ts).
+export function dayKey(date = new Date()) { return date.toISOString().slice(0, 10); }
 
 export function isDailyFinderHour(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }).formatToParts(date);

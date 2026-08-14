@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import nodemailer from "nodemailer";
-import { monthKey } from "../lib/finder-core.ts";
+import { dayKey, monthKey } from "../lib/finder-core.ts";
 import { __resetGixenDriver, __setGixenDriver } from "../lib/gixen-client.ts";
 import {
   archivedFinderItems,
@@ -726,12 +726,14 @@ test("finderTick only starts a search on the daily hour, but always drains the p
   });
 });
 
-const FINDER_MONTHLY_LIMIT = 50_000;
+const FINDER_MONTHLY_LIMIT = 10_000;
+const FINDER_DAILY_LIMIT = Math.ceil(FINDER_MONTHLY_LIMIT / 30);
 
 test("finderOverview reports counts, results, and the vision budget", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
     const month = monthKey();
+    const day = dayKey();
     await withFakeBackend({
       finder_keywords: [{ id: "k1", phrase: "a", enabled: true, created_at: "2026-01-01" }, { id: "k2", phrase: "b", enabled: true, created_at: "2026-01-02" }],
       finder_items: [
@@ -745,6 +747,7 @@ test("finderOverview reports counts, results, and the vision budget", async (t) 
       ],
       finder_runs: [{ id: "r1", started_at: "2026-01-01" }],
       finder_vision_usage: [{ month, free_analyses: 30, paid_analyses: 100 }],
+      finder_vision_usage_daily: [{ day, analyses: 12 }],
     }, async () => {
       const overview = await finderOverview();
       assert.equal(overview.keywords.length, 2);
@@ -756,6 +759,9 @@ test("finderOverview reports counts, results, and the vision budget", async (t) 
       assert.equal(overview.budget.paidAnalyses, 100);
       assert.equal(overview.budget.analyses, 130, "the shared monthly cap counts free + paid analyses together");
       assert.equal(overview.budget.remaining, FINDER_MONTHLY_LIMIT - 130);
+      assert.equal(overview.budget.dailyAnalyses, 12);
+      assert.equal(overview.budget.dailyLimit, FINDER_DAILY_LIMIT, "defaults to the monthly limit spread evenly across 30 days");
+      assert.equal(overview.budget.dailyRemaining, FINDER_DAILY_LIMIT - 12);
       assert.equal(overview.settings.maxCostPerKnife, 3.5);
     });
   });
