@@ -84,7 +84,7 @@ type FinderRow = {
 // Categories that never qualify, at any price, regardless of which stage (text or vision)
 // classified them. swiss_army_multi_tool is deliberately absent — it's allowed through at the
 // stricter cap enforced by effectiveMaxCostPerKnife instead of being rejected outright.
-const GARBAGE_CATEGORIES = new Set(["multi_tool", "plain_blade", "credit_card_knife", "coin_knife", "box_cutter"]);
+const GARBAGE_CATEGORIES = new Set(["multi_tool", "plain_blade", "credit_card_knife", "coin_knife", "box_cutter", "throwing_knife", "keychain_knife"]);
 
 const config = () => {
   const monthlyLimit = Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyAnalysisLimit);

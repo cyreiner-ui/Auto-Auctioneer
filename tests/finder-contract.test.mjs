@@ -176,6 +176,22 @@ test("rejects a non-Swiss-Army multi-tool but still resolves a genuine Swiss Arm
   assert.deepEqual(analyzeListingText("Victorinox Swiss Army Knife Corkscrew Multi-Tool"), { kind: "resolved", count: 1, containsFoldingKnife: true, confidence: 0.95, swissArmy: true });
 });
 
+test("rejects pliers-based multi-tools and bare Leatherman listings, without letting the Leatherman brand name confirm a folding signal", () => {
+  assert.deepEqual(analyzeListingText("Multi-Tool With Pliers Screwdriver Knife Blade"), { kind: "reject", reason: "multi_tool" });
+  assert.deepEqual(analyzeListingText("Leatherman Wave Multi-Tool Lot of 3"), { kind: "reject", reason: "multi_tool" });
+  assert.deepEqual(analyzeListingText("Genuine Leatherman Pliers Tool"), { kind: "reject", reason: "multi_tool" });
+});
+
+test("rejects throwing knives regardless of stated count", () => {
+  assert.deepEqual(analyzeListingText("Set of 6 Throwing Knives"), { kind: "reject", reason: "throwing_knife" });
+  assert.deepEqual(analyzeListingText("Lot of 3 Knife Throwing Set with Target"), { kind: "reject", reason: "throwing_knife" });
+});
+
+test("rejects keychain/keyring knives, without needing an unrelated coin/credit-card word to catch them", () => {
+  assert.deepEqual(analyzeListingText("Mini Folding Keychain Knife Lot of 10"), { kind: "reject", reason: "keychain_knife" });
+  assert.deepEqual(analyzeListingText("Folding Pocket Knife Key Ring"), { kind: "reject", reason: "keychain_knife" });
+});
+
 test("effectiveMaxCostPerKnife caps Swiss Army items to the stricter ceiling, and leaves everything else alone", () => {
   assert.equal(effectiveMaxCostPerKnife("swiss_army_multi_tool", 3.5, 1.0), 1.0);
   assert.equal(effectiveMaxCostPerKnife("swiss_army_multi_tool", 0.5, 1.0), 0.5, "never raises the cap above the base max");

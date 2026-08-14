@@ -125,7 +125,7 @@ test("startFinderRun only emails auction-format items in a mixed qualifying batc
         tokenRoute,
         {
           test: (url) => url.startsWith(SEARCH_URL),
-          respond: (url) => new URL(url).searchParams.get("q") === "fixed lot"
+          respond: (url) => new URL(url).searchParams.get("q").startsWith("fixed lot")
             ? jsonResponse({ itemSummaries: [ebayItem({ itemId: "v1|2|0", itemWebUrl: "https://www.ebay.com/itm/2", title: "Lot of 10 Fixed Price Pocket Knives", buyingOptions: ["FIXED_PRICE"] })] })
             : jsonResponse({ itemSummaries: [ebayItem()] }),
         },
@@ -158,7 +158,7 @@ test("startFinderRun sends a summary email covering auctions and fixed-price ite
         tokenRoute,
         {
           test: (url) => url.startsWith(SEARCH_URL),
-          respond: (url) => new URL(url).searchParams.get("q") === "fixed lot"
+          respond: (url) => new URL(url).searchParams.get("q").startsWith("fixed lot")
             ? jsonResponse({ itemSummaries: [ebayItem({ itemId: "v1|2|0", itemWebUrl: "https://www.ebay.com/itm/2", title: "Lot of 10 Fixed Price Pocket Knives", buyingOptions: ["FIXED_PRICE"] })] })
             : jsonResponse({ itemSummaries: [ebayItem()] }),
         },
@@ -322,7 +322,7 @@ test("a failing keyword search is captured in the run's errors without aborting 
         tokenRoute,
         {
           test: (url) => url.startsWith(SEARCH_URL),
-          respond: (url) => new URL(url).searchParams.get("q") === "bad keyword" ? textResponse("server error", { status: 500 }) : jsonResponse({ itemSummaries: [ebayItem()] }),
+          respond: (url) => new URL(url).searchParams.get("q").startsWith("bad keyword") ? textResponse("server error", { status: 500 }) : jsonResponse({ itemSummaries: [ebayItem()] }),
         },
         gixenOkRoute,
       ], async () => {
@@ -547,6 +547,52 @@ test("processPendingFinderItems rejects a vision-classified garbage category reg
         assert.equal(item.status, "rejected", "a box cutter must never qualify, no matter how cheap");
         assert.equal(item.reason, "box_cutter");
         assert.equal(item.item_category, "box_cutter");
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems rejects a vision-classified throwing knife regardless of a cheap price", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [{
+        ebay_item_id: "v1|9|0", run_id: null, title: "Balanced Knife Set", short_description: "",
+        image_url: "https://i.ebayimg.com/9.jpg", item_price: 1, shipping_cost: 0, buying_options: ["AUCTION"],
+        status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+      }],
+    }, async (fake) => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 1, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "", itemCategory: "throwing_knife" })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected", "a throwing knife must never qualify, no matter how cheap");
+        assert.equal(item.reason, "throwing_knife");
+        assert.equal(item.item_category, "throwing_knife");
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems rejects a vision-classified keychain knife regardless of a cheap price", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [{
+        ebay_item_id: "v1|9|0", run_id: null, title: "Small Novelty Knife", short_description: "",
+        image_url: "https://i.ebayimg.com/9.jpg", item_price: 1, shipping_cost: 0, buying_options: ["AUCTION"],
+        status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+      }],
+    }, async (fake) => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 1, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "", itemCategory: "keychain_knife" })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected", "a keychain knife must never qualify, no matter how cheap");
+        assert.equal(item.reason, "keychain_knife");
+        assert.equal(item.item_category, "keychain_knife");
       });
     });
   });

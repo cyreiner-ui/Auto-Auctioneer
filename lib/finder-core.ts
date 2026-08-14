@@ -24,6 +24,12 @@ export const FINDER_DEFAULTS = {
   // Swiss Army multi-tools (a small blade plus other tools) are the one multi-tool style worth
   // buying at all, and only far below the normal per-knife ceiling.
   swissArmyMaxCostPerKnife: 1.0,
+  // Single, unambiguous junk words appended to every eBay search as `-word` exclusions (eBay's
+  // Browse API q param supports this). Kept deliberately narrow — not "multi" alone, which would
+  // also exclude legitimate "multi-blade" pocket knife listings — so this only ever trims the
+  // clearest junk before it's even fetched; the regex/vision classifiers below remain the real
+  // defense against spaced/hyphenated variants like "multi-tool" or "multi tool".
+  excludeTerms: ["throwing", "keychain", "multitool", "leatherman"],
 } as const;
 
 const numberWords: Record<string, number> = {
@@ -47,18 +53,27 @@ const boxCutterPattern = /\bbox[\s-]*cutters?\b/i;
 const creditCardKnifePattern = /\bcredit[\s-]*cards?\b(?:\s+\w+){0,4}\s*kn(?:ife|ives|ifes)\b|\bcard\s*kn(?:ife|ives|ifes)\b|\bwallet\s*kn(?:ife|ives|ifes)\b/i;
 const coinKnifePattern = /\bcoin\b(?:\s+\w+){0,4}\s*kn(?:ife|ives|ifes)\b/i;
 const plainBladePattern = /\breplacement\s+blades?\b|\bblade\s+(?:only|blanks?)\b|\bbare\s+blades?\b/i;
-// Anchored to the concrete extra-tool words the buyer actually described (a knife combined with a
-// corkscrew/bottle-opener), not the bare phrase "multi-tool" — that phrase alone already appears in
-// two real, wanted listings in the test corpus (a lot of knives that happens to include one bonus
-// multi-tool; a "Knifes And Multitools" mixed lot).
-const multiToolPattern = /\bcorkscrew\b|\bbottle[\s-]*opener\b/i;
+// Knives designed/sold for throwing, not folding/pocket carry — usually sold in matching sets.
+const throwingKnifePattern = /\bthrow(?:ing|er)?s?\s*kn(?:ife|ives|ifes)\b|\bkn(?:ife|ives|ifes)\s+throw(?:ing|ers?)?\b/i;
+// Anchored to knife/keychain proximity (like coinKnifePattern below), not the bare word "keychain"
+// alone, so a real knife lot that merely mentions an unrelated bonus keychain isn't caught.
+const keychainKnifePattern = /\bkey[\s-]*(?:chain|ring)\b(?:\s+\w+){0,4}\s*kn(?:ife|ives|ifes)\b|\bkn(?:ife|ives|ifes)\b(?:\s+\w+){0,4}\s*\bkey[\s-]*(?:chain|ring)\b/i;
+// Anchored to the concrete extra-tool words/brand that make a listing a multi-tool (a knife blade
+// combined with pliers, a corkscrew, or a bottle-opener, or a Leatherman — whose flagship products
+// are multi-tools, not pocket knives), not the bare phrase "multi-tool" — that phrase alone already
+// appears in two real, wanted listings in the test corpus (a lot of knives that happens to include
+// one bonus multi-tool; a "Knifes And Multitools" mixed lot).
+const multiToolPattern = /\bcorkscrew\b|\bbottle[\s-]*opener\b|\bpliers\b|\bleatherman\b/i;
 // Mainstream brands whose flagship consumer lines are folding pocket knives — well known to this
 // business already (the same names are seeded as finder_keywords). A count anchored to one of
 // these is trusted the same way an explicit "folding"/"pocket knife" mention is, and title-only
 // numeric extraction (see numericCount) is allowed to bridge the brand/model name that otherwise
 // sits between the digit and the knife word (e.g. "4 Kershaw Knives", "10 Gerber Paraframe Knives").
+// "leatherman" is deliberately excluded — unlike the other brands here, Leatherman's flagship
+// products are multi-tools, not pocket knives, so the name alone shouldn't confirm a folding-knife
+// signal (see multiToolPattern above, which rejects on the bare brand name instead).
 const brandNames = [
-  "buck", "gerber", "kershaw", "leatherman", "schrade", "case", "spyderco", "benchmade", "victorinox",
+  "buck", "gerber", "kershaw", "schrade", "case", "spyderco", "benchmade", "victorinox",
   "old\\s*timer", "camillus", "boker", "imperial", "winchester", "browning",
   "smith\\s*(?:and|&)\\s*wesson", "s&w", "crkt", "sog", "civivi", "cold\\s*steel",
   "frost(?:\\s+cutlery)?", "m-tech", "ozark\\s*trail", "rough\\s*ry?der", "byrd", "coast",
@@ -193,6 +208,8 @@ export function analyzeListingText(title: string, description = ""): TextAnalysi
   if (creditCardKnifePattern.test(text)) return { kind: "reject", reason: "credit_card_knife" };
   if (coinKnifePattern.test(text)) return { kind: "reject", reason: "coin_knife" };
   if (plainBladePattern.test(text)) return { kind: "reject", reason: "plain_blade" };
+  if (throwingKnifePattern.test(text)) return { kind: "reject", reason: "throwing_knife" };
+  if (keychainKnifePattern.test(text)) return { kind: "reject", reason: "keychain_knife" };
   // Weight-priced/randomized grab-bag lots: the buyer receives a random weight-based selection,
   // so no number in the text (nor a photo of the seller's whole pool of stock) reliably states
   // what actually ships. Checked unconditionally, like the other exclusions above.
