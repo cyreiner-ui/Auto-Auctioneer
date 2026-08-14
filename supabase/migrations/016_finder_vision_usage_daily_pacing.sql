@@ -49,14 +49,19 @@ begin
     v_reserved := false;
     v_limit_reason := 'monthly';
   else
+    -- Every column reference here is qualified with its table alias. RETURNS TABLE implicitly
+    -- declares free_analyses/paid_analyses as PL/pgSQL variables in this function's scope, so an
+    -- unqualified "free_analyses" in the SET/RETURNING clauses below is ambiguous between that
+    -- variable and the table column of the same name — confirmed live via direct RPC testing
+    -- ("column reference \"free_analyses\" is ambiguous") before this was qualified.
     if p_paid_mode then
-      update public.finder_vision_usage set paid_analyses = paid_analyses + 1, updated_at = now()
-        where month = p_month returning free_analyses, paid_analyses into v_free, v_paid;
+      update public.finder_vision_usage as fvu set paid_analyses = fvu.paid_analyses + 1, updated_at = now()
+        where fvu.month = p_month returning fvu.free_analyses, fvu.paid_analyses into v_free, v_paid;
     else
-      update public.finder_vision_usage set free_analyses = free_analyses + 1, updated_at = now()
-        where month = p_month returning free_analyses, paid_analyses into v_free, v_paid;
+      update public.finder_vision_usage as fvu set free_analyses = fvu.free_analyses + 1, updated_at = now()
+        where fvu.month = p_month returning fvu.free_analyses, fvu.paid_analyses into v_free, v_paid;
     end if;
-    update public.finder_vision_usage_daily set analyses = analyses + 1, updated_at = now() where day = p_day;
+    update public.finder_vision_usage_daily as fvd set analyses = fvd.analyses + 1, updated_at = now() where fvd.day = p_day;
     v_reserved := true;
     v_limit_reason := null;
   end if;
