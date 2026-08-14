@@ -5,13 +5,16 @@ export const FINDER_DEFAULTS = {
   resultsPerKeyword: 500,
   monthlyPaidAnalysisLimit: 50_000,
   // Items pulled off the pending queue per tick, and how many of them (vision + shipping
-  // lookups) run concurrently. At the old batchSize of 5 processed one at a time, a queue of a
-  // few thousand items (typical after a daily scan) took most of a day to drain at one tick per
-  // minute. Concurrency is kept modest to stay well clear of Gemini's per-minute rate limit —
-  // hitting it just defers items an hour anyway (see VisionQuotaError handling), so being too
-  // aggressive is self-defeating, not merely wasteful.
-  batchSize: 40,
-  processConcurrency: 8,
+  // lookups) run concurrently. These were originally tuned against an assumed free-tier limit
+  // of 20 requests/minute for gemini-3.1-flash-lite — checking the actual project quota (Google
+  // AI Studio > Rate limits) showed the real current free-tier limit is far higher (4,000 RPM /
+  // 150,000 RPD), so the old values (batchSize 40, concurrency 8) were leaving most of that
+  // headroom unused and draining the pending queue far slower than necessary. These are sized to
+  // finish a full batch in well under the `/api/finder/tick` route's 60s serverless timeout
+  // (roughly 5 waves of 20 concurrent calls at a few seconds each) while staying nowhere near
+  // the real rate limit — see the "Free-tier rate limits" section of docs/ebay-finder/README.md.
+  batchSize: 100,
+  processConcurrency: 20,
   // Keyword searches in startFinderRun's scan phase run with this much concurrency. Scanning
   // 30+ keywords one at a time risked exceeding the API route's serverless time budget before
   // the scan even finished (see the throttled progress-write comment in finder-service.ts).
