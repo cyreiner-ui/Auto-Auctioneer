@@ -4,7 +4,9 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 
 type Keyword = { id: string; phrase: string; enabled: boolean; max_cost_per_knife: number | null };
-type Overview = { keywords: Keyword[]; budget: { mode: string; freeAnalyses: number; paidAnalyses: number; analyses: number; monthlyLimit: number; remaining: number; projectedMaximum: number; dailyAnalyses: number; dailyLimit: number; dailyRemaining: number } };
+type NotifyRecipient = { id: string; email: string; created_at: string };
+type NotifySettings = { mode: "auctions_only" | "all_qualified"; recipients: NotifyRecipient[]; usingEnvFallback: boolean };
+type Overview = { keywords: Keyword[]; notify: NotifySettings; budget: { mode: string; freeAnalyses: number; paidAnalyses: number; analyses: number; monthlyLimit: number; remaining: number; projectedMaximum: number; dailyAnalyses: number; dailyLimit: number; dailyRemaining: number } };
 
 const usd = (value: number) => Number(value || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 
@@ -13,6 +15,7 @@ export default function FinderSettingsPanel() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [newPhrase, setNewPhrase] = useState("");
+  const [newRecipientEmail, setNewRecipientEmail] = useState("");
 
   const load = useCallback(async () => {
     const response = await fetch("/api/finder", { cache: "no-store" });
@@ -34,6 +37,7 @@ export default function FinderSettingsPanel() {
   };
 
   const saveKeyword = (keyword: Keyword) => request("/api/finder/keywords", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(keyword) });
+  const saveMode = (mode: string) => request("/api/finder/notify-settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) });
   const budgetPercent = data ? Math.min(100, Math.round((data.budget.analyses / data.budget.monthlyLimit) * 100)) : 0;
   const dailyPercent = data ? Math.min(100, Math.round((data.budget.dailyAnalyses / data.budget.dailyLimit) * 100)) : 0;
 
@@ -49,6 +53,17 @@ export default function FinderSettingsPanel() {
       <aside className="panel finder-budget"><p className="eyebrow">MONTHLY GUARDRAIL ({data.budget.mode === "paid" ? "paid" : "free"} mode)</p><h2>{data.budget.analyses.toLocaleString()} analyses</h2><p className="muted">{data.budget.remaining.toLocaleString()} remain before the {data.budget.monthlyLimit.toLocaleString()}-analysis stop this month.</p><div className="budget-meter" role="progressbar" aria-valuenow={budgetPercent} aria-valuemin={0} aria-valuemax={100} aria-label="Monthly Gemini analysis budget used"><span style={{ width: `${budgetPercent}%` }} /></div><small>Conservative maximum used: {usd(data.budget.projectedMaximum)} / {usd(data.budget.monthlyLimit * 0.001)}</small>
         <div className="finder-daily-pacing"><p className="eyebrow">DAILY PACING</p><p className="muted">{data.budget.dailyAnalyses.toLocaleString()} / {data.budget.dailyLimit.toLocaleString()} analyses used today — spreads the monthly budget evenly so one busy day can&apos;t exhaust the whole month.</p><div className="budget-meter" role="progressbar" aria-valuenow={dailyPercent} aria-valuemin={0} aria-valuemax={100} aria-label="Today's Gemini analysis pacing cap used"><span style={{ width: `${dailyPercent}%` }} /></div></div>
       </aside>
+      <div className="panel finder-notify">
+        <div className="panel-heading"><div><p className="eyebrow">EMAIL ALERTS</p><h2>Notification settings</h2></div></div>
+        <fieldset className="notify-mode">
+          <legend className="visually-hidden">When to send alert emails</legend>
+          <label><input type="radio" name="notify-mode" checked={data.notify.mode === "auctions_only"} disabled={busy} onChange={() => void saveMode("auctions_only")} /> Detailed email for new auctions only (default)</label>
+          <label><input type="radio" name="notify-mode" checked={data.notify.mode === "all_qualified"} disabled={busy} onChange={() => void saveMode("all_qualified")} /> Summary email whenever any new result is found (auctions + fixed-price)</label>
+        </fieldset>
+        {data.notify.usingEnvFallback && <p className="muted">No recipients saved yet — falling back to FINDER_ALERT_EMAILS.</p>}
+        <div className="keyword-list notify-recipient-list">{data.notify.recipients.map((recipient) => <div className="keyword-row notify-recipient-row" key={recipient.id}><span>{recipient.email}</span><button className="danger" aria-label={`Remove ${recipient.email}`} disabled={busy} onClick={() => { if (window.confirm(`Remove ${recipient.email}?`)) void request(`/api/finder/notify-settings?id=${encodeURIComponent(recipient.id)}`, { method: "DELETE" }); }}>Remove</button></div>)}</div>
+        <form className="keyword-add notify-recipient-add" onSubmit={(event) => { event.preventDefault(); if (!newRecipientEmail.trim()) return; void request("/api/finder/notify-settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: newRecipientEmail }) }).then(() => setNewRecipientEmail("")); }}><input aria-label="Add a recipient email" type="email" placeholder="Add a recipient email" value={newRecipientEmail} onChange={(event) => setNewRecipientEmail(event.target.value)} /><button className="primary" disabled={busy}>Add recipient</button></form>
+      </div>
     </section>}
   </main>;
 }

@@ -3,8 +3,23 @@ import { appToken, getItemShippingCost, searchEbayKeyword, type EbayFinderItem }
 import { analyzeListingText, calculateDeal, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isDailyFinderHour, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
 import { isAuctionFormat } from "./gixen-client";
-import { sendQualifiedItemsEmail } from "./finder-notify";
+import { sendQualifiedItemsEmail, sendRunSummaryEmail } from "./finder-notify";
 import { supabaseAdmin } from "./supabase-admin";
+
+type FinderNotifyMode = "auctions_only" | "all_qualified";
+
+async function getNotifySettings(): Promise<{ mode: FinderNotifyMode; recipients: string[] }> {
+  const [settingsResult, recipientsResult] = await Promise.all([
+    supabaseAdmin.from("finder_notify_settings").select("notify_mode").eq("id", true).maybeSingle(),
+    supabaseAdmin.from("finder_notify_recipients").select("email").order("created_at"),
+  ]);
+  const mode: FinderNotifyMode = settingsResult.data?.notify_mode === "all_qualified" ? "all_qualified" : "auctions_only";
+  const dbRecipients = (recipientsResult.data || []).map((row) => row.email as string);
+  const recipients = dbRecipients.length
+    ? dbRecipients
+    : (process.env.FINDER_ALERT_EMAILS || "").split(",").map((address) => address.trim()).filter(Boolean);
+  return { mode, recipients };
+}
 
 async function notifyNewlyQualified(ebayItemIds: string[]) {
   if (!ebayItemIds.length) return;
@@ -14,11 +29,26 @@ async function notifyNewlyQualified(ebayItemIds: string[]) {
     .eq("status", "qualified")
     .in("ebay_item_id", ebayItemIds);
   if (error || !data?.length) return;
-  const unnotified = data.filter((row) => !row.notified_at && isAuctionFormat(row.buying_options));
-  if (unnotified.length) {
-    const emailResult = await sendQualifiedItemsEmail(unnotified);
-    if (emailResult.ok) {
-      await supabaseAdmin.from("finder_items").update({ notified_at: new Date().toISOString() }).in("ebay_item_id", unnotified.map((row) => row.ebay_item_id));
+  const { mode, recipients } = await getNotifySettings();
+  const unnotified = data.filter((row) => !row.notified_at);
+  if (mode === "all_qualified") {
+    if (unnotified.length) {
+      const auctionCount = unnotified.filter((row) => isAuctionFormat(row.buying_options)).length;
+      const emailResult = await sendRunSummaryEmail(
+        { total: unnotified.length, auctionCount, fixedPriceCount: unnotified.length - auctionCount },
+        recipients,
+      );
+      if (emailResult.ok) {
+        await supabaseAdmin.from("finder_items").update({ notified_at: new Date().toISOString() }).in("ebay_item_id", unnotified.map((row) => row.ebay_item_id));
+      }
+    }
+  } else {
+    const unnotifiedAuctions = unnotified.filter((row) => isAuctionFormat(row.buying_options));
+    if (unnotifiedAuctions.length) {
+      const emailResult = await sendQualifiedItemsEmail(unnotifiedAuctions, recipients);
+      if (emailResult.ok) {
+        await supabaseAdmin.from("finder_items").update({ notified_at: new Date().toISOString() }).in("ebay_item_id", unnotifiedAuctions.map((row) => row.ebay_item_id));
+      }
     }
   }
   const notAuction = data.filter((row) => !row.gixen_status && !isAuctionFormat(row.buying_options));
@@ -429,7 +459,7 @@ export async function finderTick(date = new Date()) {
 }
 
 export async function finderOverview() {
-  const [keywords, results, runs, pending, rejected, qualified, usage, dailyUsage] = await Promise.all([
+  const [keywords, results, runs, pending, rejected, qualified, usage, dailyUsage, notifySettingsRow, notifyRecipientRows] = await Promise.all([
     supabaseAdmin.from("finder_keywords").select("*").order("created_at"),
     supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").is("dismissed_at", null).order("discovered_at", { ascending: false }).limit(500),
     supabaseAdmin.from("finder_runs").select("*").order("started_at", { ascending: false }).limit(10),
@@ -438,17 +468,25 @@ export async function finderOverview() {
     supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).eq("status", "qualified").is("dismissed_at", null),
     supabaseAdmin.from("finder_vision_usage").select("*").eq("month", monthKey()).maybeSingle(),
     supabaseAdmin.from("finder_vision_usage_daily").select("*").eq("day", dayKey()).maybeSingle(),
+    supabaseAdmin.from("finder_notify_settings").select("notify_mode").eq("id", true).maybeSingle(),
+    supabaseAdmin.from("finder_notify_recipients").select("*").order("created_at"),
   ]);
-  const firstError = [keywords.error, results.error, runs.error, pending.error, rejected.error, qualified.error, usage.error, dailyUsage.error].find(Boolean);
+  const firstError = [keywords.error, results.error, runs.error, pending.error, rejected.error, qualified.error, usage.error, dailyUsage.error, notifySettingsRow.error, notifyRecipientRows.error].find(Boolean);
   if (firstError) throw new Error(firstError.message);
   const free = Number(usage.data?.free_analyses || 0);
   const paid = Number(usage.data?.paid_analyses || 0);
   const analyses = free + paid;
   const { monthlyLimit, dailyLimit } = config();
   const dailyAnalyses = Number(dailyUsage.data?.analyses || 0);
+  const notifyRecipients = notifyRecipientRows.data || [];
   return {
     keywords: keywords.data || [], results: results.data || [], runs: runs.data || [],
     counts: { pending: pending.count || 0, rejected: rejected.count || 0, qualified: qualified.count || 0 },
+    notify: {
+      mode: notifySettingsRow.data?.notify_mode === "all_qualified" ? "all_qualified" : "auctions_only",
+      recipients: notifyRecipients,
+      usingEnvFallback: !notifyRecipients.length,
+    },
     // The monthly cap (reserve_finder_vision_usage) counts free + paid analyses together and
     // applies regardless of mode, so the budget the UI shows must match that, not just the
     // paid-mode count — free-mode analyses aren't actually free once Google's own free-tier

@@ -3,6 +3,7 @@ import test from "node:test";
 import { DELETE as itemsDelete, PATCH as itemsPatch } from "../app/api/finder/items/route.ts";
 import { POST as gixenRetry } from "../app/api/finder/items/gixen/route.ts";
 import { POST as keywordsPost, PATCH as keywordsPatch, DELETE as keywordsDelete } from "../app/api/finder/keywords/route.ts";
+import { POST as notifySettingsPost, PATCH as notifySettingsPatch, DELETE as notifySettingsDelete } from "../app/api/finder/notify-settings/route.ts";
 import { GET as overviewGet } from "../app/api/finder/route.ts";
 import { POST as runPost } from "../app/api/finder/run/route.ts";
 import { POST as tickPost } from "../app/api/finder/tick/route.ts";
@@ -49,6 +50,9 @@ test("every staff route rejects a request without valid staff auth", async () =>
         () => keywordsPost(unauthed("https://x.test/api/finder/keywords", jsonBody({ phrase: "x" }))),
         () => keywordsPatch(unauthed("https://x.test/api/finder/keywords", jsonBody({ id: "1", enabled: false }))),
         () => keywordsDelete(unauthed("https://x.test/api/finder/keywords?id=1", { method: "DELETE" })),
+        () => notifySettingsPatch(unauthed("https://x.test/api/finder/notify-settings", jsonBody({ mode: "auctions_only" }))),
+        () => notifySettingsPost(unauthed("https://x.test/api/finder/notify-settings", jsonBody({ email: "a@example.test" }))),
+        () => notifySettingsDelete(unauthed("https://x.test/api/finder/notify-settings?id=1", { method: "DELETE" })),
       ];
       for (const call of cases) {
         const response = await call();
@@ -67,6 +71,7 @@ test("GET /api/finder returns the overview for staff", async () => {
       const body = await response.json();
       assert.deepEqual(body.counts, { pending: 0, rejected: 0, qualified: 0 });
       assert.ok(body.settings);
+      assert.deepEqual(body.notify, { mode: "auctions_only", recipients: [], usingEnvFallback: true });
     });
   });
 });
@@ -257,6 +262,48 @@ test("keyword CRUD: add, edit, toggle, and delete", async () => {
       const deleted = await keywordsDelete(asStaff(`https://x.test/api/finder/keywords?id=${createdBody.id}`, { method: "DELETE" }));
       assert.equal(deleted.status, 200);
       assert.equal(fake.tables.finder_keywords.length, 0);
+    });
+  });
+});
+
+test("PATCH /api/finder/notify-settings updates the notify mode", async () => {
+  await withEnv(BASE_ENV, async () => {
+    await withRoutesBackend({ finder_notify_settings: [] }, async (fake) => {
+      const invalid = await notifySettingsPatch(asStaff("https://x.test/api/finder/notify-settings", jsonBody({ mode: "not-a-mode" })));
+      assert.equal(invalid.status, 400);
+
+      const updated = await notifySettingsPatch(asStaff("https://x.test/api/finder/notify-settings", jsonBody({ mode: "all_qualified" })));
+      assert.equal(updated.status, 200);
+      const body = await updated.json();
+      assert.equal(body.notify_mode, "all_qualified");
+      assert.equal(fake.tables.finder_notify_settings.length, 1);
+
+      const changedBack = await notifySettingsPatch(asStaff("https://x.test/api/finder/notify-settings", jsonBody({ mode: "auctions_only" })));
+      assert.equal(changedBack.status, 200);
+      assert.equal(fake.tables.finder_notify_settings.length, 1, "the singleton row is updated in place, not duplicated");
+      assert.equal(fake.tables.finder_notify_settings[0].notify_mode, "auctions_only");
+    });
+  });
+});
+
+test("recipient CRUD: add and remove", async () => {
+  await withEnv(BASE_ENV, async () => {
+    await withRoutesBackend({ finder_notify_recipients: [] }, async (fake) => {
+      const invalid = await notifySettingsPost(asStaff("https://x.test/api/finder/notify-settings", jsonBody({ email: "not-an-email" })));
+      assert.equal(invalid.status, 400);
+
+      const created = await notifySettingsPost(asStaff("https://x.test/api/finder/notify-settings", jsonBody({ email: "  Staff@Example.test  " })));
+      assert.equal(created.status, 200);
+      const createdBody = await created.json();
+      assert.equal(createdBody.email, "staff@example.test");
+      assert.equal(fake.tables.finder_notify_recipients.length, 1);
+
+      const missingId = await notifySettingsDelete(asStaff("https://x.test/api/finder/notify-settings", { method: "DELETE" }));
+      assert.equal(missingId.status, 400);
+
+      const deleted = await notifySettingsDelete(asStaff(`https://x.test/api/finder/notify-settings?id=${createdBody.id}`, { method: "DELETE" }));
+      assert.equal(deleted.status, 200);
+      assert.equal(fake.tables.finder_notify_recipients.length, 0);
     });
   });
 });

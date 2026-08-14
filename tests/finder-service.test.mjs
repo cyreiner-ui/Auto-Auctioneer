@@ -143,6 +143,78 @@ test("startFinderRun only emails auction-format items in a mixed qualifying batc
   });
 });
 
+test("startFinderRun sends a summary email covering auctions and fixed-price items in all_qualified mode", async (t) => {
+  await withEnv(ENV, async () => {
+    const sent = [];
+    mockMailer(t, sent);
+    await withFakeBackend({
+      finder_keywords: [
+        { id: "k1", phrase: "auction lot", enabled: true, created_at: "2026-01-01" },
+        { id: "k2", phrase: "fixed lot", enabled: true, created_at: "2026-01-02" },
+      ],
+      finder_notify_settings: [{ id: true, notify_mode: "all_qualified" }],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: (url) => new URL(url).searchParams.get("q") === "fixed lot"
+            ? jsonResponse({ itemSummaries: [ebayItem({ itemId: "v1|2|0", itemWebUrl: "https://www.ebay.com/itm/2", title: "Lot of 10 Fixed Price Pocket Knives", buyingOptions: ["FIXED_PRICE"] })] })
+            : jsonResponse({ itemSummaries: [ebayItem()] }),
+        },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-mixed-summary");
+        assert.equal(run.qualified, 2);
+        assert.equal(sent.length, 1, "a single summary email covers both items, not one per item");
+        assert.match(sent[0].html, /1 auction/);
+        assert.match(sent[0].html, /1 fixed-price/);
+        assert.doesNotMatch(sent[0].html, /Fixed Price/, "the summary email lists no item details");
+        const auctionItem = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|1|0");
+        const fixedItem = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|2|0");
+        assert.ok(auctionItem.notified_at);
+        assert.ok(fixedItem.notified_at, "fixed-price items are stamped notified too, so they aren't recounted next run");
+        assert.equal(fixedItem.gixen_status, "not_auction", "Gixen eligibility bookkeeping is unaffected by notify mode");
+      });
+    });
+  });
+});
+
+test("startFinderRun prefers DB-configured recipients over FINDER_ALERT_EMAILS", async (t) => {
+  await withEnv(ENV, async () => {
+    const sent = [];
+    mockMailer(t, sent);
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
+      finder_notify_recipients: [{ id: "r1", email: "custom@example.test", created_at: "2026-01-01" }],
+    }, async () => {
+      await withFetch([tokenRoute, { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem()] }) }], async () => {
+        await startFinderRun("manual", "run-db-recipients");
+        assert.equal(sent.length, 1);
+        assert.deepEqual(sent[0].to, ["custom@example.test"], "DB recipients take priority over FINDER_ALERT_EMAILS once any row exists");
+      });
+    });
+  });
+});
+
+test("a subsequent run does not re-send a summary for already-notified items", async (t) => {
+  await withEnv(ENV, async () => {
+    const sent = [];
+    mockMailer(t, sent);
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
+      finder_notify_settings: [{ id: true, notify_mode: "all_qualified" }],
+    }, async () => {
+      await withFetch([tokenRoute, { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem()] }) }, gixenOkRoute], async () => {
+        await startFinderRun("manual", "run-summary-first");
+        assert.equal(sent.length, 1);
+        const second = await startFinderRun("manual", "run-summary-second");
+        assert.equal(second.run.qualified, 1, "the item is still qualified on the second scan");
+        assert.equal(sent.length, 1, "no additional summary email for an item that was already notified");
+      });
+    });
+  });
+});
+
 test("startFinderRun never sends a fixed-price (non-auction) qualifying item to Gixen", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
@@ -865,6 +937,7 @@ test("finderOverview reports counts, results, and the vision budget", async (t) 
       assert.equal(overview.budget.dailyLimit, FINDER_DAILY_LIMIT, "defaults to the monthly limit spread evenly across 30 days");
       assert.equal(overview.budget.dailyRemaining, FINDER_DAILY_LIMIT - 12);
       assert.equal(overview.settings.maxCostPerKnife, 3.5);
+      assert.deepEqual(overview.notify, { mode: "auctions_only", recipients: [], usingEnvFallback: true });
     });
   });
 });
