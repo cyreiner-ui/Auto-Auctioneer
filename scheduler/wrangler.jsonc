@@ -9,5 +9,20 @@
   "vars": {
     "BID_RUN_URL": "https://auto-auctioneer-cyreiner.vercel.app/api/bids/run",
     "FINDER_TICK_URL": "https://auto-auctioneer-cyreiner.vercel.app/api/finder/tick"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "persist": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": true,
+      "persist": true,
+      "head_sampling_rate": 1
+    }
   }
 }
