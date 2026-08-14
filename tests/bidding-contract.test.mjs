@@ -124,3 +124,40 @@ test("Cloudflare scheduler ticks the finder with the same protected secret", asy
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Cloudflare scheduler adds the Vercel protection bypass header when configured", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    globalThis.fetch = async (url, init) => { calls.push({ url, init }); return new Response("{}", { status: 200 }); };
+    await scheduler.scheduled(
+      { cron: "* * * * *", scheduledTime: Date.now() },
+      {
+        BID_RUN_URL: "https://example.test/api/bids/run",
+        FINDER_TICK_URL: "https://example.test/api/finder/tick",
+        BID_SCHEDULER_SECRET: "worker-secret",
+        VERCEL_PROTECTION_BYPASS_SECRET: "bypass-secret",
+      },
+    );
+    assert.equal(calls.length, 2);
+    for (const call of calls) {
+      assert.equal(call.init.headers["x-bid-scheduler-secret"], "worker-secret");
+      assert.equal(call.init.headers["x-vercel-protection-bypass"], "bypass-secret");
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Cloudflare scheduler omits the Vercel protection bypass header when not configured", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    globalThis.fetch = async (url, init) => { calls.push({ url, init }); return new Response("{}", { status: 200 }); };
+    await scheduler.scheduled({ cron: "* * * * *", scheduledTime: Date.now() }, { BID_RUN_URL: "https://example.test/api/bids/run", BID_SCHEDULER_SECRET: "worker-secret" });
+    assert.equal(calls.length, 1);
+    assert.equal("x-vercel-protection-bypass" in calls[0].init.headers, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
