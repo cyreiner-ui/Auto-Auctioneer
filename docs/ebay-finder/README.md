@@ -4,7 +4,7 @@ The staff finder lives at `/staff/finder`. It searches the first 500 eBay Best M
 
 ## Setup
 
-1. Apply `supabase/migrations/006_ebay_finder.sql`, `010_finder_brand_keywords.sql`, and `013_finder_items_max_bid.sql` to the existing Supabase project.
+1. Apply `supabase/migrations/006_ebay_finder.sql`, `010_finder_brand_keywords.sql`, `013_finder_items_max_bid.sql`, and `019_finder_notify_settings.sql` to the existing Supabase project.
 2. Set `GEMINI_API_KEY` to a key from a dedicated Google AI Studio project.
 3. Keep `GEMINI_PAID_MODE=false` while using the free tier. If billing is later enabled, set it to `true`. Either way, the app stops issuing new vision analyses once `GEMINI_MONTHLY_ANALYSIS_LIMIT` is reached in a UTC calendar month — free and paid analyses count against the same shared limit, since Google can (and does) bill for calls beyond its actual free-tier quota regardless of what this flag says.
 4. Set the deployed scheduler's `FINDER_TICK_URL` to the app's `/api/finder/tick` URL and deploy the scheduler with the same `BID_SCHEDULER_SECRET` used by the app.
@@ -49,15 +49,25 @@ an existing mailbox — no separate email-provider account needed. Set:
   For Gmail: turn on 2-Step Verification, then create one at
   https://myaccount.google.com/apppasswords.
 - `FINDER_ALERT_EMAIL_FROM` — defaults to `SMTP_USER` if unset.
-- `FINDER_ALERT_EMAILS` — comma-separated recipient addresses (both staff).
+- `FINDER_ALERT_EMAILS` — legacy comma-separated recipient fallback, used
+  only while no recipient rows exist in the database (see below).
 
-When a finder run or vision pass qualifies new items, one email listing all
-of them is sent to the configured recipients. If `SMTP_HOST`/`SMTP_USER`/
-`SMTP_PASSWORD`/`FINDER_ALERT_EMAILS` aren't all set, email sending is
+The notification mode and recipient list are configured by staff at
+`/staff/finder/settings` (backed by the `finder_notify_settings` and
+`finder_notify_recipients` tables, via `app/api/finder/notify-settings/route.ts`)
+rather than through env vars or a redeploy:
+
+- **Auctions only (default)** — a detailed email listing every newly
+  qualified auction-format item, with a link to each listing. Fixed-price
+  (Buy It Now) listings never need a Gixen bid, so they don't trigger this
+  email; its purpose is specifically to prompt you to open `/staff/finder`
+  and enter a real max bid before the auction closes (see
+  `docs/gixen-integration/README.md`).
+- **Any new result found** — a count-only summary email (no item links or
+  details) sent whenever at least one item newly qualifies, whether it's an
+  auction or fixed-price, e.g. "3 new pocket knife deals found: 2 auctions,
+  1 fixed-price." This replaces the detailed email while active.
+
+If `SMTP_HOST`/`SMTP_USER`/`SMTP_PASSWORD` aren't all set, or there are no
+recipients (neither DB rows nor `FINDER_ALERT_EMAILS`), email sending is
 skipped silently (useful for local development).
-
-Only auction-format qualifying items trigger this email — fixed-price (Buy
-It Now) listings never need a Gixen bid, so they don't need this alert. The
-email's purpose is specifically to prompt you to open `/staff/finder` and
-enter a real max bid on the new auction item(s) before they close (see
-`docs/gixen-integration/README.md`).

@@ -94,6 +94,8 @@ class Builder {
           results.push(created);
         }
       }
+      if (this._single === "single") return results.length ? { data: results[0], error: null } : { data: null, error: { message: `No rows found in "${this.table}".` } };
+      if (this._single === "maybeSingle") return { data: results[0] ?? null, error: null };
       return { data: results, error: null };
     }
 

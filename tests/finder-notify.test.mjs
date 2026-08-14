@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mock } from "node:test";
 import test from "node:test";
 import nodemailer from "nodemailer";
-import { sendQualifiedItemsEmail } from "../lib/finder-notify.ts";
+import { sendQualifiedItemsEmail, sendRunSummaryEmail } from "../lib/finder-notify.ts";
 import { withEnv } from "./helpers/fake-fetch.mjs";
 
 const ITEM = {
@@ -23,17 +23,27 @@ const SMTP_ENV = {
   SMTP_USER: "alerts@example.test",
   SMTP_PASSWORD: "app-password",
   FINDER_ALERT_EMAIL_FROM: "alerts@example.test",
-  FINDER_ALERT_EMAILS: "owner@example.test,partner@example.test",
 };
 
+const RECIPIENTS = ["owner@example.test", "partner@example.test"];
+
 test("skips silently when there are no items", async () => {
-  const result = await sendQualifiedItemsEmail([]);
+  const result = await sendQualifiedItemsEmail([], RECIPIENTS);
   assert.deepEqual(result, { ok: true, skipped: true });
 });
 
 test("skips (without throwing) when SMTP is not configured", async () => {
-  await withEnv({ SMTP_HOST: "", SMTP_USER: "", SMTP_PASSWORD: "", FINDER_ALERT_EMAILS: "" }, async () => {
-    const result = await sendQualifiedItemsEmail([ITEM]);
+  await withEnv({ SMTP_HOST: "", SMTP_USER: "", SMTP_PASSWORD: "" }, async () => {
+    const result = await sendQualifiedItemsEmail([ITEM], RECIPIENTS);
+    assert.equal(result.ok, false);
+    assert.equal(result.skipped, true);
+    assert.match(result.message, /not configured/);
+  });
+});
+
+test("skips (without throwing) when there are no recipients", async () => {
+  await withEnv(SMTP_ENV, async () => {
+    const result = await sendQualifiedItemsEmail([ITEM], []);
     assert.equal(result.ok, false);
     assert.equal(result.skipped, true);
     assert.match(result.message, /not configured/);
@@ -46,7 +56,7 @@ test("sends one email covering every qualifying item", async (t) => {
     t.mock.method(nodemailer, "createTransport", () => ({
       sendMail: async (message) => { calls.push(message); return { messageId: "abc" }; },
     }));
-    const result = await sendQualifiedItemsEmail([ITEM, { ...ITEM, ebay_item_id: "v1|2|0", title: "Lot of 8 Gerber Knives" }]);
+    const result = await sendQualifiedItemsEmail([ITEM, { ...ITEM, ebay_item_id: "v1|2|0", title: "Lot of 8 Gerber Knives" }], RECIPIENTS);
     assert.deepEqual(result, { ok: true });
     assert.equal(calls.length, 1);
     assert.equal(calls[0].from, "alerts@example.test");
@@ -61,7 +71,7 @@ test("uses singular phrasing for exactly one item", async (t) => {
   await withEnv(SMTP_ENV, async () => {
     const calls = [];
     t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async (message) => { calls.push(message); } }));
-    await sendQualifiedItemsEmail([ITEM]);
+    await sendQualifiedItemsEmail([ITEM], RECIPIENTS);
     assert.equal(calls[0].subject, "1 new pocket knife deal found");
   });
 });
@@ -70,7 +80,7 @@ test("escapes HTML in the item title", async (t) => {
   await withEnv(SMTP_ENV, async () => {
     const calls = [];
     t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async (message) => { calls.push(message); } }));
-    await sendQualifiedItemsEmail([{ ...ITEM, title: "<script>alert(1)</script> Lot of 5" }]);
+    await sendQualifiedItemsEmail([{ ...ITEM, title: "<script>alert(1)</script> Lot of 5" }], RECIPIENTS);
     assert.doesNotMatch(calls[0].html, /<script>/);
     assert.match(calls[0].html, /&lt;script&gt;/);
   });
@@ -79,7 +89,56 @@ test("escapes HTML in the item title", async (t) => {
 test("reports a send failure without throwing", async (t) => {
   await withEnv(SMTP_ENV, async () => {
     t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async () => { throw new Error("SMTP connection refused"); } }));
-    const result = await sendQualifiedItemsEmail([ITEM]);
+    const result = await sendQualifiedItemsEmail([ITEM], RECIPIENTS);
+    assert.equal(result.ok, false);
+    assert.equal(result.message, "SMTP connection refused");
+  });
+});
+
+test("sendRunSummaryEmail skips silently when the count is zero", async () => {
+  const result = await sendRunSummaryEmail({ total: 0, auctionCount: 0, fixedPriceCount: 0 }, RECIPIENTS);
+  assert.deepEqual(result, { ok: true, skipped: true });
+});
+
+test("sendRunSummaryEmail skips (without throwing) when SMTP is not configured", async () => {
+  await withEnv({ SMTP_HOST: "", SMTP_USER: "", SMTP_PASSWORD: "" }, async () => {
+    const result = await sendRunSummaryEmail({ total: 3, auctionCount: 2, fixedPriceCount: 1 }, RECIPIENTS);
+    assert.equal(result.ok, false);
+    assert.equal(result.skipped, true);
+    assert.match(result.message, /not configured/);
+  });
+});
+
+test("sendRunSummaryEmail sends a count-only summary, no item details", async (t) => {
+  await withEnv(SMTP_ENV, async () => {
+    const calls = [];
+    t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async (message) => { calls.push(message); } }));
+    const result = await sendRunSummaryEmail({ total: 3, auctionCount: 2, fixedPriceCount: 1 }, RECIPIENTS);
+    assert.deepEqual(result, { ok: true });
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].to, RECIPIENTS);
+    assert.equal(calls[0].subject, "3 new pocket knife deals found");
+    assert.match(calls[0].html, /2 auctions/);
+    assert.match(calls[0].html, /1 fixed-price/);
+    assert.doesNotMatch(calls[0].html, /ebay\.com/);
+  });
+});
+
+test("sendRunSummaryEmail uses singular phrasing for a single result", async (t) => {
+  await withEnv(SMTP_ENV, async () => {
+    const calls = [];
+    t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async (message) => { calls.push(message); } }));
+    await sendRunSummaryEmail({ total: 1, auctionCount: 0, fixedPriceCount: 1 }, RECIPIENTS);
+    assert.equal(calls[0].subject, "1 new pocket knife deal found");
+    assert.match(calls[0].html, /0 auctions/);
+    assert.match(calls[0].html, /1 fixed-price/);
+  });
+});
+
+test("sendRunSummaryEmail reports a send failure without throwing", async (t) => {
+  await withEnv(SMTP_ENV, async () => {
+    t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async () => { throw new Error("SMTP connection refused"); } }));
+    const result = await sendRunSummaryEmail({ total: 2, auctionCount: 1, fixedPriceCount: 1 }, RECIPIENTS);
     assert.equal(result.ok, false);
     assert.equal(result.message, "SMTP connection refused");
   });
