@@ -12,7 +12,7 @@ export type VisionCount = {
 };
 
 function paidMode() { return process.env.GEMINI_PAID_MODE === "true"; }
-function monthlyLimit() { return Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyPaidAnalysisLimit); }
+function monthlyLimit() { return Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyAnalysisLimit); }
 
 async function reserveUsage() {
   const month = monthKey();

@@ -57,7 +57,7 @@ const config = () => ({
   batchSize: Number(process.env.GEMINI_BATCH_SIZE || FINDER_DEFAULTS.batchSize),
   processConcurrency: Number(process.env.FINDER_PROCESS_CONCURRENCY || FINDER_DEFAULTS.processConcurrency),
   scanConcurrency: Number(process.env.EBAY_FINDER_SCAN_CONCURRENCY || FINDER_DEFAULTS.scanConcurrency),
-  monthlyLimit: Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyPaidAnalysisLimit),
+  monthlyLimit: Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyAnalysisLimit),
 });
 
 // Runs `worker` over `items` with at most `concurrency` in flight at once, preserving each
@@ -411,11 +411,18 @@ export async function finderOverview() {
   ]);
   const firstError = [keywords.error, results.error, runs.error, pending.error, rejected.error, qualified.error, usage.error].find(Boolean);
   if (firstError) throw new Error(firstError.message);
+  const free = Number(usage.data?.free_analyses || 0);
   const paid = Number(usage.data?.paid_analyses || 0);
+  const analyses = free + paid;
+  const monthlyLimit = config().monthlyLimit;
   return {
     keywords: keywords.data || [], results: results.data || [], runs: runs.data || [],
     counts: { pending: pending.count || 0, rejected: rejected.count || 0, qualified: qualified.count || 0 },
-    budget: { mode: process.env.GEMINI_PAID_MODE === "true" ? "paid" : "free", paidAnalyses: paid, monthlyLimit: config().monthlyLimit, remaining: Math.max(0, config().monthlyLimit - paid), projectedMaximum: paid * 0.001 },
+    // The monthly cap (reserve_finder_vision_usage) counts free + paid analyses together and
+    // applies regardless of mode, so the budget the UI shows must match that, not just the
+    // paid-mode count — free-mode analyses aren't actually free once Google's own free-tier
+    // quota runs out; they just aren't tracked separately as spend by this app.
+    budget: { mode: process.env.GEMINI_PAID_MODE === "true" ? "paid" : "free", freeAnalyses: free, paidAnalyses: paid, analyses, monthlyLimit, remaining: Math.max(0, monthlyLimit - analyses), projectedMaximum: analyses * 0.001 },
     settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: config().maxCost },
   };
 }
