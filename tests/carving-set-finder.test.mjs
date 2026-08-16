@@ -227,10 +227,10 @@ test("startFinderRun rejects a Sheffield carving set from a known-stainless-only
   });
 });
 
-test("negative-keyword brands (Crown Crest, Lewis Rose & Co, Landers Frary & Clark, Sherwood, Tramontina, Ekco, Rogers Bros) all reject a Sheffield carving set", async (t) => {
+test("negative-keyword brands (Crown Crest, Lewis Rose & Co, Landers Frary & Clark, Sherwood, Tramontina, Ekco, Rogers Bros, Lamson) all reject a Sheffield carving set", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
-    const brands = ["Crown Crest", "Crowncrest", "Lewis Rose & Co", "Lewis Rose and Co.", "Landers, Frary & Clark", "Landers Frary", "Sherwood", "Tramontina", "Ekco", "Rogers Bros", "Wm Rogers"];
+    const brands = ["Crown Crest", "Crowncrest", "Lewis Rose & Co", "Lewis Rose and Co.", "Landers, Frary & Clark", "Landers Frary", "Sherwood", "Tramontina", "Ekco", "Rogers Bros", "Wm Rogers", "Lamson", "Lamson & Goodnow"];
     for (const brand of brands) {
       await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
         await withFetch([

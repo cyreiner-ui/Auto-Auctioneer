@@ -39,8 +39,9 @@ const pieceCountPattern = /\b(\d{1,2})[\s-]*(?:pcs?|pieces?)\b/i;
 // ahead of (and regardless of) any other material wording the listing happens to use. Several of
 // these are already treated as stainless/kitchen-cutlery brands in this codebase's pocket-knife
 // test fixtures (tests/finder-contract.test.mjs: "Regent Sherwood", "Tramontina Ekco Stainless",
-// "Rogers Bros").
-const knownStainlessSheffieldBrandsPattern = /\b(?:regent|crown\s*crest|lewis\s*rose(?:\s*(?:&|and)\s*co\.?)?|landers[\s,]*frary(?:\s*(?:&|and)\s*clark)?|sherwood|tramontina|ekco|rogers\s*bros|wm\.?\s*rogers)\b/i;
+// "Rogers Bros"). Regent, Crown Crest, Lewis Rose & Co, Landers Frary & Clark, Sherwood,
+// Tramontina, Ekco, Rogers Bros/Wm Rogers, Lamson (& Goodnow).
+const knownStainlessSheffieldBrandsPattern = /\b(?:regent|crown\s*crest|lewis\s*rose(?:\s*(?:&|and)\s*co\.?)?|landers[\s,]*frary(?:\s*(?:&|and)\s*clark)?|sherwood|tramontina|ekco|rogers\s*bros|wm\.?\s*rogers|lamson(?:\s*(?:&|and)\s*goodnow)?)\b/i;
 
 export type CarvingSetTextSignals = {
   isCarvingSet: boolean;
