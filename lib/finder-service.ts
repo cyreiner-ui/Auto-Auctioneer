@@ -21,11 +21,22 @@ import { supabaseAdmin } from "./supabase-admin";
 // a results/settings page, or a qualification email for one track never touches the other's data.
 export type FinderCategory = "pocket_knife" | "carving_set";
 
+// Postgres array-literal elements containing whitespace (both our carving-set phrases do) must be
+// double-quoted, or the server rejects the value outright ("malformed array literal"). supabase-js's
+// own `.overlaps(col, array)` skips this quoting (`ov.{${array.join(",")}}`), and its generic
+// `.not(col, op, array)` escape hatch does no array formatting at all — just String(array), which
+// drops the required `{}` wrapper entirely. Build the literal ourselves and pass it as a string to
+// sidestep both.
+function pgTextArrayLiteral(values: string[]) {
+  return `{${values.map((value) => `"${value.replace(/(["\\])/g, "\\$1")}"`).join(",")}}`;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function scopeToCategory<Q extends { overlaps: (col: string, val: string[]) => any; not: (col: string, op: string, val: string[]) => any }>(query: Q, category?: FinderCategory) {
+function scopeToCategory<Q extends { overlaps: (col: string, val: string) => any; not: (col: string, op: string, val: string) => any }>(query: Q, category?: FinderCategory) {
   if (!category) return query;
-  if (category === "carving_set") return query.overlaps("keyword_phrases", CARVING_SET_PHRASES);
-  return query.not("keyword_phrases", "ov", CARVING_SET_PHRASES);
+  const literal = pgTextArrayLiteral(CARVING_SET_PHRASES);
+  if (category === "carving_set") return query.overlaps("keyword_phrases", literal);
+  return query.not("keyword_phrases", "ov", literal);
 }
 
 type FinderNotifyMode = "auctions_only" | "all_qualified";
