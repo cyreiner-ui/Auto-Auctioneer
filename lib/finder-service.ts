@@ -483,7 +483,9 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       const { error: saveError } = await supabaseAdmin.from("finder_items").update({
         status: qualifies ? "qualified" : "rejected", reason,
         knife_count: 1, contains_folding_knife: false, confidence: vision.confidence, detection_source: "vision", item_category: "carving_set",
-        carving_piece_count: vision.pieceCount || null, carving_has_case: vision.hasCase, carving_carbon_steel: vision.carbonSteel,
+        // Material was already fully resolved from text at discovery (never from vision) — carry
+        // the value already stored on this row forward rather than asking vision about it.
+        carving_piece_count: vision.pieceCount || null, carving_has_case: vision.hasCase, carving_carbon_steel: row.carving_carbon_steel,
         shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null,
         total_cost: totalCost, cost_per_knife: totalCost,
         attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),
