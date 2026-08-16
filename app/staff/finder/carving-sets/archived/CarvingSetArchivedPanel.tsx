@@ -34,7 +34,7 @@ export default function CarvingSetArchivedPanel() {
   const deleteIds = (ids: string[]) => request("/api/finder/items", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) });
 
   return <main className="finder-page">
-    <header className="finder-header"><div><Link className="back" href="/staff/finder/carving-sets">← Back to carving-set finder</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Archived carving sets</h1><p className="muted">Deals you&rsquo;ve already handled. Restore one to see it again, or delete it for good.</p></div></header>
+    <header className="finder-header"><div><Link className="back" href="/staff/finder">← Back to finder</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Archived carving sets</h1><p className="muted">Deals you&rsquo;ve already handled. Restore one to see it again, or delete it for good.</p></div></header>
     {error && <div className="notice finder-error" role="status" aria-live="polite" aria-atomic="true">{error}</div>}
     {!data && !error && <p className="muted" role="status" aria-live="polite">Loading…</p>}
     {data && <section className="finder-results">
