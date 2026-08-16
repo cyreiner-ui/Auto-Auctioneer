@@ -40,8 +40,23 @@ const pieceCountPattern = /\b(\d{1,2})[\s-]*(?:pcs?|pieces?)\b/i;
 // these are already treated as stainless/kitchen-cutlery brands in this codebase's pocket-knife
 // test fixtures (tests/finder-contract.test.mjs: "Regent Sherwood", "Tramontina Ekco Stainless",
 // "Rogers Bros"). Regent, Crown Crest, Lewis Rose & Co, Landers Frary & Clark, Sherwood,
-// Tramontina, Ekco, Rogers Bros/Wm Rogers, Lamson (& Goodnow).
-const knownStainlessSheffieldBrandsPattern = /\b(?:regent|crown\s*crest|lewis\s*rose(?:\s*(?:&|and)\s*co\.?)?|landers[\s,]*frary(?:\s*(?:&|and)\s*clark)?|sherwood|tramontina|ekco|rogers\s*bros|wm\.?\s*rogers|lamson(?:\s*(?:&|and)\s*goodnow)?)\b/i;
+// Tramontina, Ekco, Rogers Bros/Wm Rogers, Lamson (& Goodnow), Cheltenham, Trustwell Bros,
+// Westall Richardson, Hallmark Blades, John McClory (& Sons)/Scotia. Every multi-word entry uses
+// `[\s,]*` (not just `\s*`) between name parts so a listing punctuated as "Lewis, Rose & Co." still
+// matches — a real miss found in production ("Lewis, Rose & Co. Ltd." slipped through qualified
+// with the old whitespace-only separator).
+const knownStainlessSheffieldBrandsPattern = /\b(?:regent|crown\s*crest|lewis[\s,]*rose(?:[\s,]*(?:&|and)\s*co\.?)?|landers[\s,]*frary(?:[\s,]*(?:&|and)\s*clark)?|sherwood|tramontina|ekco|rogers\s*bros|wm\.?\s*rogers|lamson(?:[\s,]*(?:&|and)\s*goodnow)?|cheltenham|trustwell\s*bro(?:thers|s)\.?|westall[\s,]*richardson|hallmark\s*blades|mc\s*clory|scotia)\b/i;
+
+// Sheffield-only negative keyword, weaker/broader than the brand list above: era and style wording
+// that correlates with the post-war shift to stainless flatware in this dataset (e.g. "SHEFFIELD
+// ENGLAND MODE DANISH WHEAT ... MCM", "Sheffield England Mid Century Modern") — genuine antique
+// carbon-steel sets in this dataset don't use this wording. Checked regardless of brand/explicit
+// material wording, same as the brand list.
+const stainlessEraPattern = /\b(?:mcm|mid[\s-]?century(?:\s+modern)?|danish)\b/i;
+
+// Sheffield-only negative keyword: "faux" (imitation) stag horn/antler/pearl handles correlate with
+// later, mass-produced (stainless) sets in this dataset, as opposed to "real"/"genuine" stag horn.
+const fauxHandlePattern = /\bfaux\b/i;
 
 export type CarvingSetTextSignals = {
   isCarvingSet: boolean;
@@ -224,12 +239,21 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
   // mention in the title or description (an unconditional negative keyword, same as the known-
   // stainless-only makers below — even a listing that also says "carbon steel" is rejected rather
   // than trusted, since a listing claiming both is more likely wrong/misleading than genuinely
-  // carbon steel), or a known-stainless-only maker (these brands never produced carbon steel
-  // carving sets, regardless of what an individual listing claims).
+  // carbon steel), a known-stainless-only maker (these brands never produced carbon steel carving
+  // sets, regardless of what an individual listing claims), post-war era/style wording, or "faux"
+  // handle material — the latter two are weaker, dataset-derived correlations rather than
+  // production-history facts, so they get their own reason strings (not "stainless_steel") to stay
+  // diagnostic if they ever need to be dialed back.
   if (group === "sheffield") {
     const fullText = `${item.title} ${item.shortDescription}`;
     if (knownStainlessSheffieldBrandsPattern.test(fullText) || text.stainless) {
       return { ...base, ...categoryFields, status: "rejected", reason: "stainless_steel", processed_at: new Date().toISOString() };
+    }
+    if (stainlessEraPattern.test(fullText)) {
+      return { ...base, ...categoryFields, status: "rejected", reason: "stainless_era_wording", processed_at: new Date().toISOString() };
+    }
+    if (fauxHandlePattern.test(fullText)) {
+      return { ...base, ...categoryFields, status: "rejected", reason: "faux_handle", processed_at: new Date().toISOString() };
     }
   }
 

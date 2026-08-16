@@ -227,10 +227,17 @@ test("startFinderRun rejects a Sheffield carving set from a known-stainless-only
   });
 });
 
-test("negative-keyword brands (Crown Crest, Lewis Rose & Co, Landers Frary & Clark, Sherwood, Tramontina, Ekco, Rogers Bros, Lamson) all reject a Sheffield carving set", async (t) => {
+test("negative-keyword brands (Crown Crest, Lewis Rose & Co, Landers Frary & Clark, Sherwood, Tramontina, Ekco, Rogers Bros, Lamson, Cheltenham, Trustwell Bros, Westall Richardson, Hallmark Blades, McClory/Scotia) all reject a Sheffield carving set", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
-    const brands = ["Crown Crest", "Crowncrest", "Lewis Rose & Co", "Lewis Rose and Co.", "Landers, Frary & Clark", "Landers Frary", "Sherwood", "Tramontina", "Ekco", "Rogers Bros", "Wm Rogers", "Lamson", "Lamson & Goodnow"];
+    const brands = [
+      "Crown Crest", "Crowncrest", "Lewis Rose & Co", "Lewis Rose and Co.",
+      // The comma-punctuated form is the exact miss found in production ("Lewis, Rose & Co. Ltd."
+      // slipped through qualified before the separator was widened from `\s*` to `[\s,]*`).
+      "Lewis, Rose & Co. Ltd.",
+      "Landers, Frary & Clark", "Landers Frary", "Sherwood", "Tramontina", "Ekco", "Rogers Bros", "Wm Rogers", "Lamson", "Lamson & Goodnow",
+      "Cheltenham", "Trustwell Brothers", "Trustwell Bros.", "Westall Richardson", "Hallmark Blades", "John McClory & Sons", "Scotia",
+    ];
     for (const brand of brands) {
       await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
         await withFetch([
@@ -248,6 +255,99 @@ test("negative-keyword brands (Crown Crest, Lewis Rose & Co, Landers Frary & Cla
         });
       });
     }
+  });
+});
+
+test("era/style wording (MCM, Mid Century Modern, Midcentury, Danish) rejects a Sheffield carving set as stainless_era_wording, even with no brand match", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const titles = [
+      "Sheffield England MCM Carving Set, with fitted case",
+      "Sheffield England Mid Century Modern Carving Set, with fitted case",
+      "Sheffield England Midcentury Carving Set, with fitted case",
+      "Sheffield England Danish Wheat Carving Set, with fitted case",
+    ];
+    for (const title of titles) {
+      await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+        await withFetch([
+          tokenRoute,
+          { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+            itemId: `v1|${title}|0`, itemWebUrl: `https://www.ebay.com/itm/${encodeURIComponent(title)}`,
+            title, price: { value: "50.00", currency: "USD" },
+          })] }) },
+        ], async () => {
+          await startFinderRun("manual", `run-carving-era-${title}`);
+          const [item] = fake.tables.finder_items;
+          assert.equal(item.status, "rejected", `"${title}" should reject`);
+          assert.equal(item.reason, "stainless_era_wording", `"${title}" should reject as stainless_era_wording`);
+        });
+      });
+    }
+  });
+});
+
+test("\"faux\" handle material rejects a Sheffield carving set as faux_handle, even with no brand or era match", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+          title: "Sheffield Carving Set, Faux Stag Horn Handle, with fitted case",
+          price: { value: "50.00", currency: "USD" },
+        })] }) },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-carving-faux-handle");
+        assert.equal(run.qualified, 0);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected");
+        assert.equal(item.reason, "faux_handle");
+      });
+    });
+  });
+});
+
+test("a genuine antique Sheffield carving set (real stag horn, sterling silver, no brand/era/faux wording) still qualifies", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+          title: "Antique Walker and Hall Sheffield Stag Horn & Sterling Silver Carving Set W/Case",
+          shortDescription: "Beautiful original condition, real stag horn handle, with its original case.",
+          price: { value: "77.50", currency: "USD" },
+        })] }) },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-carving-genuine-control");
+        assert.equal(run.qualified, 1, "the one confirmed-good result from this batch must not be over-rejected by the new patterns");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "qualified");
+        assert.equal(item.carving_carbon_steel, true);
+      });
+    });
+  });
+});
+
+test("era/style and faux-handle wording never reject a German carving set (no material restriction for that group)", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "german carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+          itemId: "v1|german-mcm-faux|0", itemWebUrl: "https://www.ebay.com/itm/german-mcm-faux",
+          title: "Solingen MCM Danish 3 piece Carving Set, Faux Stag Horn Handle, cased",
+          price: { value: "40.00", currency: "USD" },
+        })] }) },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-carving-german-mcm-faux");
+        assert.equal(run.qualified, 1, "German carving sets have no material restriction, so era/faux wording must not reject them");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "qualified");
+        assert.equal(item.carving_carbon_steel, null);
+      });
+    });
   });
 });
 
