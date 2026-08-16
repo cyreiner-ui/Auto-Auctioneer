@@ -164,6 +164,93 @@ test("startFinderRun rejects a Sheffield carving set explicitly described as sta
   });
 });
 
+test("startFinderRun rejects a Sheffield carving set that mentions \"stainless\" even alongside \"carbon steel\" in the same listing", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+          title: "Antique Sheffield Carving Set, carbon steel blade, stainless bolsters, with fitted case",
+          price: { value: "50.00", currency: "USD" },
+        })] }) },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-carving-stainless-and-carbon");
+        assert.equal(run.qualified, 0);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected");
+        assert.equal(item.reason, "stainless_steel", "\"stainless\" is an unconditional negative keyword now, even when \"carbon steel\" is also mentioned");
+      });
+    });
+  });
+});
+
+test("startFinderRun qualifies a Sheffield carving set that mentions neither carbon steel nor stainless at all", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+          title: "Antique Sheffield Carving Set, with fitted case",
+          price: { value: "180.00", currency: "USD" },
+        })] }) },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-carving-no-material-word");
+        assert.equal(run.qualified, 1, "most real listings say neither word, so this must default to qualifying, not require an explicit \"carbon steel\" match");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "qualified");
+        assert.equal(item.carving_carbon_steel, true);
+      });
+    });
+  });
+});
+
+test("startFinderRun rejects a Sheffield carving set from a known-stainless-only maker, even with no material wording at all", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+          title: "Regent Sheffield Carving Set, with fitted case",
+          price: { value: "50.00", currency: "USD" },
+        })] }) },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-carving-negative-brand");
+        assert.equal(run.qualified, 0);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected");
+        assert.equal(item.reason, "stainless_steel", "Regent is a known-stainless-only maker, regardless of the (absent) material wording");
+      });
+    });
+  });
+});
+
+test("negative-keyword brands (Crown Crest, Lewis Rose & Co, Landers Frary & Clark, Sherwood, Tramontina, Ekco, Rogers Bros, Lamson) all reject a Sheffield carving set", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const brands = ["Crown Crest", "Crowncrest", "Lewis Rose & Co", "Lewis Rose and Co.", "Landers, Frary & Clark", "Landers Frary", "Sherwood", "Tramontina", "Ekco", "Rogers Bros", "Wm Rogers", "Lamson", "Lamson & Goodnow"];
+    for (const brand of brands) {
+      await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+        await withFetch([
+          tokenRoute,
+          { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+            itemId: `v1|${brand}|0`, itemWebUrl: `https://www.ebay.com/itm/${encodeURIComponent(brand)}`,
+            title: `${brand} Sheffield Carving Set, with fitted case`,
+            price: { value: "50.00", currency: "USD" },
+          })] }) },
+        ], async () => {
+          await startFinderRun("manual", `run-carving-brand-${brand}`);
+          const [item] = fake.tables.finder_items;
+          assert.equal(item.status, "rejected", `"${brand}" should reject`);
+          assert.equal(item.reason, "stainless_steel", `"${brand}" should reject as stainless_steel`);
+        });
+      });
+    }
+  });
+});
+
 test("startFinderRun qualifies a German carving set under the tiered $10/piece + $15 ceiling", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
@@ -217,12 +304,15 @@ test("processPendingFinderItems falls back to vision when the case isn't mention
     await withFakeBackend({
       finder_items: [{
         ebay_item_id: "v1|no-case|0", run_id: null, keyword_phrases: ["sheffield carving set"],
-        title: "Antique Sheffield Carving Set, carbon steel blade", short_description: "",
+        title: "Antique Sheffield Carving Set", short_description: "",
+        // Material is always resolved at discovery, before an item can ever reach "pending" —
+        // this row simulates that prior resolution (default-accepted, no negative brand/wording).
+        carving_carbon_steel: true,
         image_url: "https://i.ebayimg.com/nocase.jpg", item_price: 50, shipping_cost: 0, buying_options: ["FIXED_PRICE"],
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ hasCase: false, pieceCount: 2, carbonSteel: true, confidence: 0.95, uncertaintyReason: "" })], async () => {
+      await withFetch([imageRoute, geminiRoute({ hasCase: false, pieceCount: 2, confidence: 0.95, uncertaintyReason: "" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -236,7 +326,7 @@ test("processPendingFinderItems falls back to vision when the case isn't mention
   });
 });
 
-test("processPendingFinderItems qualifies a Sheffield set via vision once case and carbon steel are both confirmed", async (t) => {
+test("processPendingFinderItems qualifies a Sheffield set via vision once case is confirmed, carrying forward the material already resolved from text", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
     const pastAttempt = new Date(Date.now() - 60_000).toISOString();
@@ -244,18 +334,19 @@ test("processPendingFinderItems qualifies a Sheffield set via vision once case a
       finder_items: [{
         ebay_item_id: "v1|vision-ok|0", run_id: null, keyword_phrases: ["sheffield carving set"],
         title: "Antique Sheffield Carving Set", short_description: "",
+        carving_carbon_steel: true,
         image_url: "https://i.ebayimg.com/visionok.jpg", item_price: 150, shipping_cost: 10, buying_options: ["FIXED_PRICE"],
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ hasCase: true, pieceCount: 2, carbonSteel: true, confidence: 0.95, uncertaintyReason: "" })], async () => {
+      await withFetch([imageRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
         assert.equal(item.status, "qualified");
         assert.equal(item.total_cost, 160);
         assert.equal(item.carving_has_case, true);
-        assert.equal(item.carving_carbon_steel, true);
+        assert.equal(item.carving_carbon_steel, true, "carried forward from the row's already-resolved material, not asked of vision");
       });
     });
   });
