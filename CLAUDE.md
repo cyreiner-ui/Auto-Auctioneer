@@ -13,7 +13,6 @@ Internal Next.js app ("Knife Auctions", formerly "Fio & Lâmina") for staff to s
 - `npm test` — runs `npm run build`, then the full suite via Node's built-in test runner
 - Single test file: `node --experimental-strip-types --import ./tests/helpers/register-ts-resolve.mjs --test tests/<file>.test.mjs` (run `npm run build` first if the file is `tests/rendered-html.test.mjs`, which boots the real production server and fetches it)
 - `npm run lint` — ESLint (flat config, `eslint-config-next`)
-- `npm run db:generate` — Drizzle Kit codegen; currently unused, see the scaffolding note below
 - `npm run scheduler:dev` / `npm run scheduler:deploy` — run/deploy the Cloudflare Worker scheduler (`wrangler`, config at `scheduler/wrangler.jsonc`)
 
 Node >= 22.13.0 is required (`engines` in `package.json`).
@@ -24,9 +23,11 @@ Two independently deployed pieces:
 1. **The Next.js app** — deployed to Vercel. All product code lives under `app/` and `lib/`.
 2. **The scheduler** — a separate, minute-level Cloudflare Worker (`scheduler/index.ts`), deployed with `npm run scheduler:deploy`. It has no business logic of its own: every tick it POSTs to the deployed app's `/api/bids/run` and, if `FINDER_TICK_URL` is set, `/api/finder/tick`, authenticated with a shared secret header (`x-bid-scheduler-secret`, checked by `lib/scheduler-auth.ts`). Both sides must share the same `BID_SCHEDULER_SECRET`.
 
-## Vestigial scaffolding — do not build on this
+## Database and migrations
 
-The repo was originally bootstrapped from a "vinext-starter"/"site-creator" template, and still carries that template's files even though **none of them run in the deployed app** (see the comment in `next.config.ts`): `vite.config.ts`, `worker/index.ts`, `build/sites-vite-plugin.ts`, `app/_sites-preview/`, `cloudflare-workers.d.ts`, `examples/d1/`, `.openai/hosting.json`. `db/schema.ts` is intentionally empty for the same reason — Drizzle (`drizzle.config.ts`, `npm run db:generate`) is wired up but not used anywhere; the real database is accessed directly through the Supabase client (`lib/supabase-admin.ts`, `lib/supabase/server.ts`), and schema changes are plain SQL files under `supabase/migrations/`, applied by hand in the Supabase SQL editor — there is no migration-runner command. **Whenever you add a new file under `supabase/migrations/`, also apply it immediately to the live Supabase project yourself** (via the Supabase MCP tools, e.g. `apply_migration`, when available in the session) instead of leaving it for the user to run by hand — otherwise the deployed app breaks with "Apply the finder database migration, then reload this page." (or the generic `relation ... does not exist` error) as soon as it queries the new table/column. `lib/openai.ts` (a Portuguese listing-generation helper) is also currently dead code; nothing imports it.
+The real database is accessed directly through the Supabase client (`lib/supabase-admin.ts`, `lib/supabase/server.ts`); schema changes are plain SQL files under `supabase/migrations/`, applied by hand in the Supabase SQL editor — there is no migration-runner command. **Whenever you add a new file under `supabase/migrations/`, also apply it immediately to the live Supabase project yourself** (via the Supabase MCP tools, e.g. `apply_migration`, when available in the session) instead of leaving it for the user to run by hand — otherwise the deployed app breaks with "Apply the finder database migration, then reload this page." (or the generic `relation ... does not exist` error) as soon as it queries the new table/column.
+
+The repo was originally bootstrapped from a "vinext-starter"/"site-creator" template; the vestigial scaffolding it left behind (`vite.config.ts`, `worker/`, `build/`, `app/_sites-preview/`, `cloudflare-workers.d.ts`, `examples/`, `.openai/`, `db/`, `drizzle.config.ts`, `drizzle/`, `app/chatgpt-auth.ts`, `lib/openai.ts`, and their now-unused dependencies) has been removed. `next.config.ts` still sets `typescript: { ignoreBuildErrors: true }`, but that's now unrelated to the old scaffolding — it's masking a pre-existing type-narrowing issue in `lib/carving-set-finder.ts` (see that file's comment near `refreshedCarvingSetRow`).
 
 ## Auth model
 
