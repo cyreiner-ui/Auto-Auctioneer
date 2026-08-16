@@ -9,6 +9,7 @@ import {
   CARVING_SET_PHRASES,
   evaluateCarvingSetVision,
   refreshedCarvingSetRow,
+  sheffieldVisionEligible,
   type CarvingSetExistingRow,
 } from "./carving-set-finder";
 import { isAuctionFormat } from "./gixen-client";
@@ -451,10 +452,26 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
       if (error) throw new Error(error.message);
       for (const row of data || []) existingById.set(row.ebay_item_id, row);
     }
-    const rows = [...found.values()].map(({ item, phrases }) => {
+    const textRows = [...found.values()].map(({ item, phrases }) => {
       const carvingGroup = carvingSetGroupForPhrases(phrases);
       if (carvingGroup) return refreshedCarvingSetRow(item, phrases, run.id, existingById.get(item.itemId) as CarvingSetExistingRow | undefined, carvingGroup);
       return refreshedRow(item, phrases, run.id, existingById.get(item.itemId), resolveMaxCostPerKnife(phrases, keywordMaxCost, config().maxCost), config().swissArmyMaxCost);
+    });
+    // Sheffield-only volume gate: a Gemini vision call to resolve a case-ambiguous item only pays
+    // for itself once this run's text pass already found a genuinely large crop of qualified
+    // Sheffield leads. Below that, a case-ambiguous item (status "pending" with knife_count still
+    // unknown — a shipping-only pending row always has knife_count 1, per processCarvingSetRow's
+    // own row.knife_count != null branch) is rejected outright instead of spending a vision call.
+    // Decided once, in memory, from this run's own freshly-computed rows, before anything is
+    // written — a row rejected this way never gets detection_source set, so a later rescan still
+    // recomputes it from scratch and gets a fresh eligibility decision from that run's own count.
+    const sheffieldQualifiedCount = textRows.filter((row) => carvingSetGroupForPhrases(row.keyword_phrases || []) === "sheffield" && row.status === "qualified").length;
+    const sheffieldVisionOk = sheffieldVisionEligible(sheffieldQualifiedCount);
+    const rows = sheffieldVisionOk ? textRows : textRows.map((row) => {
+      const isSheffieldVisionPending = carvingSetGroupForPhrases(row.keyword_phrases || []) === "sheffield" && row.status === "pending" && row.knife_count == null;
+      return isSheffieldVisionPending
+        ? { ...row, status: "rejected" as const, reason: "low_volume_skip_vision", next_attempt_at: null, processed_at: new Date().toISOString() }
+        : row;
     });
     const added = ids.filter((id) => !existingById.has(id)).length;
     for (let index = 0; index < rows.length; index += 200) {
@@ -548,9 +565,12 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       const { error: saveError } = await supabaseAdmin.from("finder_items").update({
         status: qualifies ? "qualified" : "rejected", reason,
         knife_count: 1, contains_folding_knife: false, confidence: vision.confidence, detection_source: "vision", item_category: "carving_set",
-        // Material was already fully resolved from text at discovery (never from vision) — carry
-        // the value already stored on this row forward rather than asking vision about it.
-        carving_piece_count: vision.pieceCount || null, carving_has_case: vision.hasCase, carving_carbon_steel: row.carving_carbon_steel,
+        // Material was already resolved from text at discovery (accepted, since only a rejection
+        // there would keep it from ever reaching vision) — carried forward as-is, unless this same
+        // vision call just confidently overturned it to stainless, in which case the persisted
+        // value must reflect that so a later rescan's stale-reuse path (refreshedCarvingSetRow)
+        // keeps rejecting it instead of silently re-qualifying a confirmed-stainless set.
+        carving_piece_count: vision.pieceCount || null, carving_has_case: vision.hasCase, carving_carbon_steel: decision.reason === "stainless_steel_vision" ? false : row.carving_carbon_steel,
         shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null,
         total_cost: totalCost, cost_per_knife: totalCost,
         attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),

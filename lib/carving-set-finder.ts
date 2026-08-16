@@ -90,24 +90,38 @@ export function carvingSetCeiling(group: CarvingSetGroup, pieceCount: number | n
   return pieceCount != null && pieceCount >= 2 ? pieceCount * 10 + 15 : null;
 }
 
+// Sheffield-only: a Gemini vision call only pays for itself once a run's text pass already found a
+// genuinely large crop of leads to narrow down. Below this, a case-ambiguous Sheffield item is
+// rejected outright instead of spending a vision call (see lib/finder-service.ts's startFinderRun).
+// German has no equivalent gate — every case/piece-ambiguous German item still falls to vision
+// regardless of run volume.
+export const SHEFFIELD_VISION_MIN_QUALIFIED = 30;
+export function sheffieldVisionEligible(qualifiedCount: number): boolean {
+  return qualifiedCount > SHEFFIELD_VISION_MIN_QUALIFIED;
+}
+
 export type CarvingSetVisionResult = {
   hasCase: boolean;
   pieceCount: number;
   confidence: number;
   uncertaintyReason: string;
+  material: "carbon_steel" | "stainless_steel" | "indeterminate";
 };
 
 export { VisionBudgetError, VisionQuotaError };
 
-// Material (carbon steel vs. stainless) is deliberately never asked about here — it's decided
-// purely from text (see initialCarvingSetRow's negative-keyword/explicit-wording checks). This
-// call only ever resolves case presence and (for German) piece count.
+const CARVING_SET_MATERIALS = ["carbon_steel", "stainless_steel", "indeterminate"] as const;
+
+// Case presence (and, for German, piece count) were always resolved here; material (carbon steel
+// vs. stainless) is now also asked in this same call, folded into the same schema rather than a
+// second Gemini call — but only ever *acted on* for Sheffield (see evaluateCarvingSetVision).
+// German qualifies on either steel type, so its material answer is simply ignored downstream.
 export async function analyzeCarvingSetWithGemini(input: { title: string; description: string; imageUrl: string }): Promise<CarvingSetVisionResult> {
   const key = process.env.GEMINI_API_KEY?.trim();
   if (!key) throw new Error("GEMINI_API_KEY is not configured.");
   await reserveUsage();
   const model = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
-  const prompt = `Analyze this eBay listing for an antique/vintage carving set buyer. A carving set is a carving knife plus a matching serving fork, and often a sharpening steel, typically kept in a fitted presentation case or box. Determine: whether a case or box is visible in the photo, or clearly stated as included; and the total number of physical pieces in the set (knife, fork, steel, etc — do not count the case itself as a piece, and do not count repeated views of the same set). If the photo is unclear, ambiguous, or shows something other than a carving set, lower confidence and explain why. Title: ${input.title.slice(0, 300)}. Description: ${input.description.slice(0, 1200)}.`;
+  const prompt = `Analyze this eBay listing for an antique/vintage carving set buyer. A carving set is a carving knife plus a matching serving fork, and often a sharpening steel, typically kept in a fitted presentation case or box. Determine: whether a case or box is visible in the photo, or clearly stated as included; the total number of physical pieces in the set (knife, fork, steel, etc — do not count the case itself as a piece, and do not count repeated views of the same set); and, based purely on the visual appearance of the blades (color, shine, any patina/discoloration, staining), whether the blade material looks like carbon_steel (a dull gray tone, visible patina, or light surface staining/rust) or stainless_steel (bright, uniformly silver, no patina) — answer indeterminate if the photo doesn't show the blades clearly enough to tell. If the photo is unclear, ambiguous, or shows something other than a carving set, lower confidence and explain why. Title: ${input.title.slice(0, 300)}. Description: ${input.description.slice(0, 1200)}.`;
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -119,12 +133,13 @@ export async function analyzeCarvingSetWithGemini(input: { title: string; descri
         responseMimeType: "application/json",
         responseSchema: {
           type: "OBJECT",
-          required: ["hasCase", "pieceCount", "confidence", "uncertaintyReason"],
+          required: ["hasCase", "pieceCount", "confidence", "uncertaintyReason", "material"],
           properties: {
             hasCase: { type: "BOOLEAN" },
             pieceCount: { type: "INTEGER", minimum: 0 },
             confidence: { type: "NUMBER", minimum: 0, maximum: 1 },
             uncertaintyReason: { type: "STRING" },
+            material: { type: "STRING", enum: [...CARVING_SET_MATERIALS] },
           },
         },
       },
@@ -142,7 +157,9 @@ export async function analyzeCarvingSetWithGemini(input: { title: string; descri
     typeof parsed.hasCase !== "boolean" ||
     !Number.isInteger(parsed.pieceCount) ||
     typeof parsed.confidence !== "number" ||
-    typeof parsed.uncertaintyReason !== "string"
+    typeof parsed.uncertaintyReason !== "string" ||
+    typeof parsed.material !== "string" ||
+    !CARVING_SET_MATERIALS.includes(parsed.material as typeof CARVING_SET_MATERIALS[number])
   ) throw new Error("Gemini returned an invalid carving set analysis.");
   return parsed as CarvingSetVisionResult;
 }
@@ -151,8 +168,8 @@ export type CarvingSetVisionDecision = {
   confident: boolean;
   ceiling: number | null;
   // Set only when the item is definitively rejected regardless of price/shipping (low
-  // confidence, no case, or an unresolvable German piece count). Material is never a vision
-  // rejection reason — it's fully resolved from text before an item ever reaches vision.
+  // confidence, no case, an unresolvable German piece count, or — Sheffield only — a confident
+  // stainless-steel material reading).
   reason: string | null;
 };
 
@@ -162,7 +179,13 @@ export type CarvingSetVisionDecision = {
 export function evaluateCarvingSetVision(group: CarvingSetGroup, vision: CarvingSetVisionResult, confidenceThreshold: number): CarvingSetVisionDecision {
   const confident = vision.confidence >= confidenceThreshold;
   const ceiling = carvingSetCeiling(group, group === "german" ? vision.pieceCount : null);
+  // Sheffield only, and only an unconditional "stainless_steel" reading rejects — a confident
+  // "carbon_steel" or an honest "indeterminate" both pass through, matching the text pipeline's own
+  // default-accept-unless-negative-signal philosophy (see initialCarvingSetRow). German ignores
+  // vision.material entirely, exactly as it ignores the text-based material check today.
+  const stainlessConfirmed = group === "sheffield" && vision.material === "stainless_steel";
   const reason = !confident ? (vision.uncertaintyReason || "low_confidence")
+    : stainlessConfirmed ? "stainless_steel_vision"
     : !vision.hasCase ? "no_case"
     : ceiling == null ? "invalid_count"
     : null;
@@ -312,10 +335,13 @@ export function refreshedCarvingSetRow(item: CarvingSetItem, keywordPhrases: str
     carving_has_case: existing.carving_has_case,
     carving_carbon_steel: existing.carving_carbon_steel,
   };
+  // Sheffield only: a previous vision call may have confirmed stainless steel (persisted as
+  // carving_carbon_steel: false in processCarvingSetRow) even though text alone never asks vision
+  // about material at initial discovery — that stale verdict must keep rejecting the item on a
+  // later rescan where text is still case-ambiguous, exactly like the no_case check below, or it
+  // would silently "re-qualify" a set already confirmed stainless.
+  if (group === "sheffield" && existing.carving_carbon_steel === false) return { ...freshRow, ...knownFields, status: "rejected" as const, reason: "stainless_steel_vision", processed_at: new Date().toISOString() };
   if (existing.carving_has_case !== true) return { ...freshRow, ...knownFields, status: "rejected" as const, reason: "no_case", processed_at: new Date().toISOString() };
-  // No material re-check here — material is fully and finally resolved from text alone at
-  // initial discovery (see initialCarvingSetRow), before an item can ever reach "pending" in the
-  // first place, so it can never still be ambiguous by the time this stale-reuse path runs.
   if (ceiling == null) return { ...freshRow, ...knownFields, status: "rejected" as const, reason: "invalid_count", processed_at: new Date().toISOString() };
   const deal = dealAgainstCeiling(effectiveItem.itemPrice, effectiveItem.shippingCost, ceiling);
   if (!deal.resolved) {

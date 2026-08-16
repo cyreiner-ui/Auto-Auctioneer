@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import nodemailer from "nodemailer";
-import { analyzeCarvingSetText, carvingSetCeiling } from "../lib/carving-set-finder.ts";
+import { analyzeCarvingSetText, carvingSetCeiling, evaluateCarvingSetVision, sheffieldVisionEligible } from "../lib/carving-set-finder.ts";
 import { processPendingFinderItems, startFinderRun } from "../lib/finder-service.ts";
 import { supabaseAdmin } from "../lib/supabase-admin.ts";
 import { createFakeSupabase } from "./helpers/fake-supabase.mjs";
@@ -56,6 +56,37 @@ test("carvingSetCeiling: German is tiered by piece count at $10/piece + $15", ()
 test("carvingSetCeiling: German returns null when the piece count isn't resolvable", () => {
   assert.equal(carvingSetCeiling("german", null), null);
   assert.equal(carvingSetCeiling("german", 1), null, "a single piece isn't a genuine carving set");
+});
+
+test("sheffieldVisionEligible: only more than 30 qualified results unlock vision", () => {
+  assert.equal(sheffieldVisionEligible(0), false);
+  assert.equal(sheffieldVisionEligible(30), false, "exactly 30 is not \"more than\" 30");
+  assert.equal(sheffieldVisionEligible(31), true);
+});
+
+function visionResult(overrides = {}) {
+  return { hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel", ...overrides };
+}
+
+test("evaluateCarvingSetVision: a confident stainless_steel reading rejects a Sheffield item", () => {
+  const decision = evaluateCarvingSetVision("sheffield", visionResult({ material: "stainless_steel" }), 0.9);
+  assert.equal(decision.reason, "stainless_steel_vision");
+});
+
+test("evaluateCarvingSetVision: a confident carbon_steel reading does not reject a cased Sheffield item", () => {
+  const decision = evaluateCarvingSetVision("sheffield", visionResult({ material: "carbon_steel" }), 0.9);
+  assert.equal(decision.reason, null);
+});
+
+test("evaluateCarvingSetVision: an indeterminate material reading does not reject a cased Sheffield item", () => {
+  const decision = evaluateCarvingSetVision("sheffield", visionResult({ material: "indeterminate" }), 0.9);
+  assert.equal(decision.reason, null);
+});
+
+test("evaluateCarvingSetVision: German ignores the material field entirely", () => {
+  const decision = evaluateCarvingSetVision("german", visionResult({ material: "stainless_steel", pieceCount: 3 }), 0.9);
+  assert.notEqual(decision.reason, "stainless_steel_vision");
+  assert.equal(decision.reason, null, "hasCase true and a resolvable German ceiling qualifies regardless of material");
 });
 
 // --- Integration: dispatch through startFinderRun/processPendingFinderItems, exercising the
@@ -397,6 +428,94 @@ test("startFinderRun rejects a German carving set over its tiered ceiling", asyn
   });
 });
 
+function shefCasedItem(index) {
+  return carvingItem({
+    itemId: `v1|sheffield-vol-${index}|0`,
+    itemWebUrl: `https://www.ebay.com/itm/sheffield-vol-${index}`,
+    title: "Sheffield Carving Set with Fitted Case",
+    price: { value: "150.00", currency: "USD" },
+    shippingOptions: [{ shippingCost: { value: "0.00", currency: "USD" } }],
+  });
+}
+
+const sheffieldAmbiguousItem = carvingItem({
+  itemId: "v1|sheffield-ambiguous|0",
+  itemWebUrl: "https://www.ebay.com/itm/sheffield-ambiguous",
+  title: "Antique Sheffield Carving Set",
+  image: { imageUrl: "https://i.ebayimg.com/ambiguous.jpg" },
+  price: { value: "150.00", currency: "USD" },
+  shippingOptions: [{ shippingCost: { value: "0.00", currency: "USD" } }],
+});
+
+test("startFinderRun rejects a Sheffield case-ambiguous item without spending a vision call when this run's qualified count is 30 or fewer", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    let geminiCalled = false;
+    const casedItems = Array.from({ length: 30 }, (_, index) => shefCasedItem(index));
+    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [...casedItems, sheffieldAmbiguousItem] }) },
+        { test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => { geminiCalled = true; return jsonResponse({}); } },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-carving-low-volume");
+        assert.equal(run.qualified, 30, "exactly 30 qualified is not \"more than\" 30");
+        const ambiguous = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|sheffield-ambiguous|0");
+        assert.equal(ambiguous.status, "rejected");
+        assert.equal(ambiguous.reason, "low_volume_skip_vision");
+        assert.equal(geminiCalled, false, "Gemini must never be spent when this run's qualified count doesn't exceed 30");
+      });
+    });
+  });
+});
+
+test("startFinderRun leaves a Sheffield case-ambiguous item pending for vision once this run's qualified count exceeds 30, and vision can then reject it as stainless", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const casedItems = Array.from({ length: 31 }, (_, index) => shefCasedItem(index));
+    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [...casedItems, sheffieldAmbiguousItem] }) },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-carving-high-volume");
+        assert.equal(run.qualified, 31);
+        const ambiguous = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|sheffield-ambiguous|0");
+        assert.equal(ambiguous.status, "pending", "more than 30 qualified leaves the case-ambiguous item eligible for vision");
+      });
+      await withFetch([imageRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "stainless_steel" })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const ambiguous = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|sheffield-ambiguous|0");
+        assert.equal(ambiguous.status, "rejected");
+        assert.equal(ambiguous.reason, "stainless_steel_vision");
+        assert.equal(ambiguous.carving_carbon_steel, false, "the persisted material must reflect the vision-confirmed stainless verdict");
+      });
+    });
+  });
+});
+
+test("the Sheffield volume gate never applies to German carving sets", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "german carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+          itemId: "v1|german-ambiguous|0", itemWebUrl: "https://www.ebay.com/itm/german-ambiguous",
+          title: "Wusthof Carving Set, cased", // cased, but no piece count wording -> ambiguous, falls to vision
+          price: { value: "40.00", currency: "USD" },
+        })] }) },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-carving-german-ambiguous");
+        assert.equal(run.qualified, 0, "no Sheffield items at all in this run, so a wrongly-shared gate would have something to reject against");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "pending", "German case/piece-ambiguous items still fall to vision regardless of run volume");
+      });
+    });
+  });
+});
+
 test("processPendingFinderItems falls back to vision when the case isn't mentioned in text, and rejects if vision finds no case", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
@@ -412,7 +531,7 @@ test("processPendingFinderItems falls back to vision when the case isn't mention
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ hasCase: false, pieceCount: 2, confidence: 0.95, uncertaintyReason: "" })], async () => {
+      await withFetch([imageRoute, geminiRoute({ hasCase: false, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -439,14 +558,14 @@ test("processPendingFinderItems qualifies a Sheffield set via vision once case i
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "" })], async () => {
+      await withFetch([imageRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
         assert.equal(item.status, "qualified");
         assert.equal(item.total_cost, 160);
         assert.equal(item.carving_has_case, true);
-        assert.equal(item.carving_carbon_steel, true, "carried forward from the row's already-resolved material, not asked of vision");
+        assert.equal(item.carving_carbon_steel, true, "a confident carbon_steel vision reading doesn't overturn the row's already-resolved material");
       });
     });
   });
@@ -479,6 +598,40 @@ test("startFinderRun does not spend a fresh Gemini call on refresh once a carvin
         const [item] = fake.tables.finder_items;
         assert.equal(item.status, "rejected", "must not re-qualify just because the price looks cheap today");
         assert.equal(item.reason, "no_case");
+      });
+    });
+  });
+});
+
+test("startFinderRun does not spend a fresh Gemini call on refresh once a carving set was already vision-rejected as stainless steel", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }],
+      finder_items: [{
+        ebay_item_id: "v1|stale-stainless|0", run_id: "old-run", keyword_phrases: ["sheffield carving set"],
+        title: "Antique Sheffield Carving Set", short_description: "",
+        ebay_url: "https://www.ebay.com/itm/stale-stainless", image_url: "https://i.ebayimg.com/stale-stainless.jpg",
+        item_price: 150, shipping_cost: 10, currency: "USD", buying_options: ["FIXED_PRICE"],
+        status: "rejected", knife_count: 1, contains_folding_knife: false, confidence: 0.95,
+        detection_source: "vision", item_category: "carving_set", reason: "stainless_steel_vision",
+        // A prior vision call confirmed hasCase but overturned the text-default material to
+        // stainless — carving_carbon_steel: false is what makes that verdict stick.
+        carving_piece_count: 2, carving_has_case: true, carving_carbon_steel: false, discovered_at: "2026-01-01",
+      }],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+          itemId: "v1|stale-stainless|0", itemWebUrl: "https://www.ebay.com/itm/stale-stainless",
+          title: "Antique Sheffield Carving Set",
+          price: { value: "1.00", currency: "USD" }, shippingOptions: [{ shippingCost: { value: "0.00", currency: "USD" } }],
+        })] }) },
+      ], async () => {
+        await startFinderRun("manual", "run-carving-stale-stainless");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected", "must not re-qualify a confirmed-stainless set just because the price looks cheap today");
+        assert.equal(item.reason, "stainless_steel_vision");
       });
     });
   });
