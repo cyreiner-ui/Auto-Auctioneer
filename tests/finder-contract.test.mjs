@@ -37,6 +37,21 @@ test("rejects an implausibly large resolved count and defers to vision", () => {
   assert.deepEqual(analyzeListingText("Lot of 999 pocket knives"), { kind: "vision" });
 });
 
+test("surfaces a title-stated lot count to vision even without a folding/brand signal, so vision only needs to confirm blade type", () => {
+  assert.deepEqual(
+    analyzeListingText("LOT OF 15 6inch HANDMADE DAMASCUS STEEL SKINER KNIFE USA Duty paid"),
+    { kind: "vision", knownCount: 15 },
+  );
+  assert.deepEqual(
+    analyzeListingText(`LOT OF 20 8" HANDMADE DAMASCUS STEEL HUNTING SKINER KNIFE (USA tariff Free)`),
+    { kind: "vision", knownCount: 20 },
+  );
+});
+
+test("does not attach a known count to vision when nothing in the text reliably states one", () => {
+  assert.deepEqual(analyzeListingText("Assorted knife lot, condition varies"), { kind: "vision" });
+});
+
 test("does not double-count a listing that repeats its title in the description", () => {
   const title = "Lot Of 6 Pocket Knives Sheffield, Colonial, Elk Ridge, Goldblatt";
   const description = "LOT OF 6 POCKET KNIVES SHEFFIELD, COLONIAL, ELK RIDGE, GOLDBLATT. Condition is Used. Shipped with USPS Parcel Select Ground.";

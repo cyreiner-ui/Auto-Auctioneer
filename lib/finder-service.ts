@@ -243,22 +243,32 @@ function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: str
   // re-analysis is still fully ambiguous, and this is what lets already-fixed parser bugs
   // self-correct for free on the next scan instead of staying wrong forever.
   if (!existing || existing.detection_source !== "vision" || existing.knife_count == null || freshRow.knife_count != null) return freshRow;
+  // Even when text still can't confirm the folding-knife signal on its own (e.g. a fixed-blade
+  // "skinner"/"hunting knife" lot with no folding/brand wording), a title-stated count like
+  // "lot of 15" is more reliable than a stale vision-derived count from the same listing's photo
+  // (often a seller's whole catalog/stock shot, not this specific lot). Reusing the previously
+  // confirmed classification (containsFoldingKnife/confidence/category) but correcting the count
+  // this way needs no new Gemini call, and is a no-op whenever text and the stored count already
+  // agree.
+  const textAnalysis = analyzeListingText(effectiveItem.title, effectiveItem.shortDescription);
+  const knownCount = textAnalysis.kind === "vision" ? textAnalysis.knownCount : undefined;
+  const effectiveKnifeCount = knownCount ?? existing.knife_count;
   // A previously vision-classified garbage item (box cutter, plain blade, credit-card/coin knife,
   // non-Swiss-Army multi-tool) must stay rejected on refresh without re-running calculateDeal —
   // otherwise a stale garbage item could "re-qualify" purely because its price happens to look
   // good today, even though its category was never re-examined.
   if (existing.item_category && GARBAGE_CATEGORIES.has(existing.item_category)) {
-    return { ...freshRow, item_category: existing.item_category, status: "rejected" as const, reason: existing.item_category, knife_count: existing.knife_count, contains_folding_knife: existing.contains_folding_knife, confidence: existing.confidence, detection_source: "vision" as const, processed_at: new Date().toISOString() };
+    return { ...freshRow, item_category: existing.item_category, status: "rejected" as const, reason: existing.item_category, knife_count: effectiveKnifeCount, contains_folding_knife: existing.contains_folding_knife, confidence: existing.confidence, detection_source: "vision" as const, processed_at: new Date().toISOString() };
   }
   const effectiveMax = effectiveMaxCostPerKnife(existing.item_category, maxCost, swissArmyMax);
-  const knownVisionFields = { knife_count: existing.knife_count, contains_folding_knife: existing.contains_folding_knife, confidence: existing.confidence, detection_source: "vision" as const, item_category: existing.item_category };
+  const knownVisionFields = { knife_count: effectiveKnifeCount, contains_folding_knife: existing.contains_folding_knife, confidence: existing.confidence, detection_source: "vision" as const, item_category: existing.item_category };
   if (effectiveItem.shippingCost == null) {
-    if (!isShippingLookupWorthwhile(effectiveItem.itemPrice, existing.knife_count, effectiveMax)) {
+    if (!isShippingLookupWorthwhile(effectiveItem.itemPrice, effectiveKnifeCount, effectiveMax)) {
       return { ...freshRow, ...knownVisionFields, status: "rejected", reason: "over_budget", processed_at: new Date().toISOString() };
     }
     return { ...freshRow, ...knownVisionFields, status: "pending", reason: null, next_attempt_at: new Date().toISOString() };
   }
-  const deal = calculateDeal(effectiveItem.itemPrice, effectiveItem.shippingCost, existing.knife_count, effectiveMax);
+  const deal = calculateDeal(effectiveItem.itemPrice, effectiveItem.shippingCost, effectiveKnifeCount, effectiveMax);
   return {
     ...freshRow,
     ...knownVisionFields,
@@ -491,12 +501,20 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       const category = vision.itemCategory;
       const categoryRejected = GARBAGE_CATEGORIES.has(category);
       const effectiveMax = effectiveMaxCostPerKnife(category, maxCost, config().swissArmyMaxCost);
-      const confident = !categoryRejected && vision.confidence >= config().confidence && vision.knifeCount > 0 && vision.knifeCount <= FINDER_DEFAULTS.maxPlausibleKnifeCount && vision.containsFoldingKnife;
+      // A title-stated count (e.g. "lot of 15" on a fixed-blade "skinner"/"hunting knife" listing
+      // with no folding/brand wording, so analyzeListingText couldn't resolve it outright) is more
+      // reliable than vision's own count from the photo, which is prone to counting a seller's
+      // whole catalog/stock shot instead of just this listing's stated lot size. Vision still owns
+      // the folding-knife/category classification below — only the numeric count is overridden.
+      const textAnalysis = analyzeListingText(row.title, row.short_description);
+      const knownCount = textAnalysis.kind === "vision" ? textAnalysis.knownCount : undefined;
+      const effectiveKnifeCount = knownCount ?? vision.knifeCount;
+      const confident = !categoryRejected && vision.confidence >= config().confidence && effectiveKnifeCount > 0 && effectiveKnifeCount <= FINDER_DEFAULTS.maxPlausibleKnifeCount && vision.containsFoldingKnife;
       let shippingValue = row.shipping_cost == null ? null : Number(row.shipping_cost);
       let shippingSource = row.shipping_source;
       let shippingReason: string | null = null;
       if (confident && shippingValue == null) {
-        if (!isShippingLookupWorthwhile(Number(row.item_price), vision.knifeCount, effectiveMax)) {
+        if (!isShippingLookupWorthwhile(Number(row.item_price), effectiveKnifeCount, effectiveMax)) {
           shippingReason = "over_budget";
         } else {
           const shipping = await getItemShippingCost(row.ebay_item_id, await tokenForLookup());
@@ -504,10 +522,10 @@ export async function processPendingFinderItems(limit = config().batchSize) {
           else shippingReason = "missing_shipping";
         }
       }
-      const deal = confident && shippingValue != null ? calculateDeal(Number(row.item_price), shippingValue, vision.knifeCount, effectiveMax) : null;
+      const deal = confident && shippingValue != null ? calculateDeal(Number(row.item_price), shippingValue, effectiveKnifeCount, effectiveMax) : null;
       const qualifies = Boolean(confident && deal?.qualifies);
-      const reason = categoryRejected ? category : !vision.containsFoldingKnife ? "no_folding_knife" : vision.confidence < config().confidence ? (vision.uncertaintyReason || "low_confidence") : vision.knifeCount < 1 ? "invalid_count" : vision.knifeCount > FINDER_DEFAULTS.maxPlausibleKnifeCount ? "implausible_count" : shippingReason ? shippingReason : deal?.reason;
-      const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: qualifies ? "qualified" : "rejected", reason, knife_count: vision.knifeCount || null, contains_folding_knife: vision.containsFoldingKnife, confidence: vision.confidence, detection_source: "vision", item_category: category, shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null, total_cost: deal && "totalCost" in deal ? deal.totalCost : null, cost_per_knife: deal && "costPerKnife" in deal ? deal.costPerKnife : null, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
+      const reason = categoryRejected ? category : !vision.containsFoldingKnife ? "no_folding_knife" : vision.confidence < config().confidence ? (vision.uncertaintyReason || "low_confidence") : effectiveKnifeCount < 1 ? "invalid_count" : effectiveKnifeCount > FINDER_DEFAULTS.maxPlausibleKnifeCount ? "implausible_count" : shippingReason ? shippingReason : deal?.reason;
+      const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: qualifies ? "qualified" : "rejected", reason, knife_count: effectiveKnifeCount || null, contains_folding_knife: vision.containsFoldingKnife, confidence: vision.confidence, detection_source: "vision", item_category: category, shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null, total_cost: deal && "totalCost" in deal ? deal.totalCost : null, cost_per_knife: deal && "costPerKnife" in deal ? deal.costPerKnife : null, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
       if (saveError) throw new Error(saveError.message);
       if (qualifies) qualifiedIds.push(row.ebay_item_id);
       processed++;

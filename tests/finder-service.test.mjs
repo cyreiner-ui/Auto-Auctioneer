@@ -400,6 +400,45 @@ test("startFinderRun still preserves a vision count when the current text parser
   });
 });
 
+test("startFinderRun corrects a stale vision count via the title's own stated lot count, even though text still can't confirm a folding knife on its own", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const title = "LOT OF 15 6inch HANDMADE DAMASCUS STEEL SKINER KNIFE USA Duty paid";
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "damascus skinner knife", enabled: true, created_at: "2026-01-01" }],
+      finder_items: [{
+        ebay_item_id: "v1|1|0", run_id: "old-run", keyword_phrases: ["damascus skinner knife"], title, short_description: "",
+        ebay_url: "https://www.ebay.com/itm/1", image_url: "https://i.ebayimg.com/1.jpg",
+        item_price: 129, shipping_cost: 0, currency: "USD", buying_options: ["FIXED_PRICE"],
+        status: "qualified", knife_count: 55, contains_folding_knife: true, confidence: 0.92,
+        detection_source: "vision", item_category: "pocket_knife", discovered_at: "2026-01-01",
+      }],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem({
+          title, shortDescription: "",
+          price: { value: "129.00", currency: "USD" },
+          shippingOptions: [{ shippingCost: { value: "0.00", currency: "USD" } }],
+          buyingOptions: ["FIXED_PRICE"],
+        })] }) },
+      ], async () => {
+        await startFinderRun("manual", "run-skinner-knife-fix");
+        const [item] = fake.tables.finder_items;
+        // The title's own "LOT OF 15" beats the stale vision count of 55, without a new Gemini call
+        // (containsFoldingKnife/confidence/category are reused from the previous vision result).
+        assert.equal(item.knife_count, 15);
+        assert.equal(item.detection_source, "vision");
+        assert.equal(item.contains_folding_knife, true);
+        assert.equal(item.confidence, 0.92);
+        assert.equal(item.cost_per_knife, 129 / 15);
+        assert.equal(item.status, "rejected", "$129/15 = $8.60/knife is over the $3.50 default ceiling, unlike the wrongly cheap $129/55");
+        assert.equal(item.reason, "over_budget");
+      });
+    });
+  });
+});
+
 test("startFinderRun applies a keyword's per-knife price override instead of the global default", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
@@ -501,6 +540,33 @@ test("processPendingFinderItems resolves a pending item through vision and notif
         assert.equal(item.gixen_status, undefined, "qualifying via vision no longer auto-sends to Gixen either");
         assert.ok(item.notified_at);
         assert.equal(sent.length, 1);
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems trusts the title's own stated lot count over vision's count on a fixed-blade listing with no folding/brand signal", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [{
+        ebay_item_id: "v1|9|0", run_id: null,
+        title: "LOT OF 20 8\" HANDMADE DAMASCUS STEEL HUNTING SKINER KNIFE (USA tariff Free)", short_description: "",
+        image_url: "https://i.ebayimg.com/9.jpg", item_price: 149, shipping_cost: 35, buying_options: ["FIXED_PRICE"],
+        status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+      }],
+    }, async (fake) => {
+      // Gemini miscounts the seller's whole catalog photo as 120 knives; the title's "LOT OF 20" should win.
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 120, containsFoldingKnife: true, confidence: 0.95, uncertaintyReason: "", itemCategory: "pocket_knife" })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.knife_count, 20);
+        assert.equal(item.contains_folding_knife, true);
+        assert.equal(item.confidence, 0.95);
+        assert.equal(item.cost_per_knife, (149 + 35) / 20);
+        assert.equal(item.status, "rejected", "$9.20/knife is over budget, unlike the wrongly cheap $1.53/knife from vision's count of 120");
       });
     });
   });
