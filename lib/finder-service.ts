@@ -457,22 +457,25 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
       if (carvingGroup) return refreshedCarvingSetRow(item, phrases, run.id, existingById.get(item.itemId) as CarvingSetExistingRow | undefined, carvingGroup);
       return refreshedRow(item, phrases, run.id, existingById.get(item.itemId), resolveMaxCostPerKnife(phrases, keywordMaxCost, config().maxCost), config().swissArmyMaxCost);
     });
-    // Sheffield-only volume gate: a Gemini vision call to resolve a case-ambiguous item only pays
-    // for itself once this run's text pass already found a genuinely large crop of qualified
-    // Sheffield leads. Below that, a case-ambiguous item (status "pending" with knife_count still
-    // unknown — a shipping-only pending row always has knife_count 1, per processCarvingSetRow's
-    // own row.knife_count != null branch) is rejected outright instead of spending a vision call.
-    // Decided once, in memory, from this run's own freshly-computed rows, before anything is
-    // written — a row rejected this way never gets detection_source set, so a later rescan still
-    // recomputes it from scratch and gets a fresh eligibility decision from that run's own count.
-    const sheffieldQualifiedCount = textRows.filter((row) => carvingSetGroupForPhrases(row.keyword_phrases || []) === "sheffield" && row.status === "qualified").length;
-    const sheffieldVisionOk = sheffieldVisionEligible(sheffieldQualifiedCount);
-    const rows = sheffieldVisionOk ? textRows : textRows.map((row) => {
-      const isSheffieldVisionPending = carvingSetGroupForPhrases(row.keyword_phrases || []) === "sheffield" && row.status === "pending" && row.knife_count == null;
-      return isSheffieldVisionPending
-        ? { ...row, status: "rejected" as const, reason: "low_volume_skip_vision", next_attempt_at: null, processed_at: new Date().toISOString() }
-        : row;
-    });
+    // Sheffield-only volume gate: a Gemini vision call only pays for itself once this run's text
+    // pass already found a genuinely large crop of good Sheffield leads. A Sheffield row still
+    // needing vision — whether its case is text-ambiguous, or its case/ceiling are already known
+    // from text but material is still only assumed (see initialCarvingSetRow) — always lands in
+    // status "pending" with knife_count left unset (a shipping-only pending row always has
+    // knife_count 1, per processCarvingSetRow's own row.knife_count != null branch), so counting
+    // those pending rows is this run's "how many good leads, modulo vision" signal — text alone
+    // now rarely marks a Sheffield row "qualified" outright, so that former proxy no longer works.
+    // Below the threshold, every one of those pending rows is rejected outright instead of
+    // spending a vision call on it. Decided once, in memory, from this run's own freshly-computed
+    // rows, before anything is written — a row rejected this way never gets detection_source set,
+    // so a later rescan still recomputes it from scratch and gets a fresh eligibility decision from
+    // that run's own count.
+    const isSheffieldVisionPending = (row: (typeof textRows)[number]) => carvingSetGroupForPhrases(row.keyword_phrases || []) === "sheffield" && row.status === "pending" && row.knife_count == null;
+    const sheffieldVisionPendingCount = textRows.filter(isSheffieldVisionPending).length;
+    const sheffieldVisionOk = sheffieldVisionEligible(sheffieldVisionPendingCount);
+    const rows = sheffieldVisionOk ? textRows : textRows.map((row) => isSheffieldVisionPending(row)
+      ? { ...row, status: "rejected" as const, reason: "low_volume_skip_vision", next_attempt_at: null, processed_at: new Date().toISOString() }
+      : row);
     const added = ids.filter((id) => !existingById.has(id)).length;
     for (let index = 0; index < rows.length; index += 200) {
       const { error } = await supabaseAdmin.from("finder_items").upsert(rows.slice(index, index + 200), { onConflict: "ebay_item_id" });
