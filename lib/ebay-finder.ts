@@ -63,6 +63,40 @@ export async function getItemShippingCost(itemId: string, token?: string) {
   return shippingCost(payload);
 }
 
+const HTML_BLOCK_TAGS = /<\/(?:p|div|li|tr|h[1-6])>|<br\s*\/?>/gi;
+
+function htmlToText(html: string) {
+  return html
+    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(HTML_BLOCK_TAGS, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n\s*/g, "\n")
+    .trim();
+}
+
+// The Browse API's single-item endpoint (same one getItemShippingCost above already calls) returns
+// the seller's full HTML description — the item_summary/search endpoint's `shortDescription` is
+// often blank or truncated, which is exactly what leaves genuinely-informative listings (material,
+// maker, condition) falling through to a vision call instead of resolving from text. Callers that
+// need both shipping and description for the same item should call this once rather than calling
+// getItemShippingCost separately, to avoid two requests for one listing. Truncated to a few KB,
+// matching the truncation already applied to Gemini prompts elsewhere in this codebase.
+export async function getItemDescription(itemId: string, token?: string) {
+  const url = `${ebayApiBaseUrl()}/buy/browse/v1/item/${encodeURIComponent(itemId)}`;
+  const response = await fetch(url, { headers: await browseHeaders(token) });
+  if (!response.ok) throw new Error(`eBay item lookup for "${itemId}" failed (${response.status}).`);
+  const payload = await response.json() as { description?: string };
+  if (!payload.description) return "";
+  return htmlToText(payload.description).slice(0, 4000);
+}
+
 // Pass a pre-fetched `token` when calling this once per keyword in a loop (e.g. startFinderRun's
 // scan across every enabled keyword) so the run doesn't pay for a fresh OAuth round trip per
 // keyword — with 35+ keywords that's dozens of avoidable network calls stacked inside one

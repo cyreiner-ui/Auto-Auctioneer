@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appToken, getItemShippingCost, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
+import { appToken, getItemDescription, getItemShippingCost, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
 import { analyzeListingText, calculateDeal, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isScheduledRunTime, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife, type FinderScheduleSettings } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
 import {
@@ -427,6 +427,23 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     // time budget before the scan even finished, which is exactly what left production runs
     // stuck at "running" with a partial keywords_scanned count and no way to retry that day.
     await mapWithConcurrency(keywords || [], config().scanConcurrency, scanKeyword);
+    // Carving-set listings (only) get their full eBay description fetched here, before
+    // qualification ever runs — item_summary/search's shortDescription is frequently blank or
+    // truncated, which is exactly what leaves genuinely-informative listings (material, maker,
+    // condition wording the negative-keyword checks in carving-set-finder.ts depend on) falling
+    // through to a vision call instead of resolving from text. Mutates `item` in place (found's
+    // values are object references), so the enriched description flows straight into
+    // initialCarvingSetRow/refreshedCarvingSetRow below with no other change needed. Scoped to
+    // carving-set items only — the pocket-knife pipeline has no material check and doesn't need it.
+    await mapWithConcurrency([...found.values()], config().scanConcurrency, async ({ item, phrases }) => {
+      if (!carvingSetGroupForPhrases(phrases)) return;
+      try {
+        const description = await getItemDescription(item.itemId, token || undefined);
+        if (description) item.shortDescription = description;
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : `Description lookup failed for ${item.itemId}.`);
+      }
+    });
     const ids = [...found.keys()];
     const existingById = new Map<string, ExistingFinderRow>();
     for (let index = 0; index < ids.length; index += 200) {
