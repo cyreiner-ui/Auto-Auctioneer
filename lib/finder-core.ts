@@ -273,9 +273,33 @@ export function monthKey(date = new Date()) { return date.toISOString().slice(0,
 // UTC calendar day, used to key the daily vision-analysis pacing cap (see gemini-vision.ts).
 export function dayKey(date = new Date()) { return date.toISOString().slice(0, 10); }
 
-export function isDailyFinderHour(date = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }).formatToParts(date);
-  return Number(parts.find((part) => part.type === "hour")?.value) === 6;
+export type FinderScheduleSettings = {
+  enabled: boolean;
+  frequency: "daily" | "weekly";
+  hour: number; // 0-23, America/New_York local time
+  minute: number; // 0-59
+  dayOfWeek: number | null; // 0 (Sunday) - 6 (Saturday); only meaningful when frequency === "weekly"
+};
+
+const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+function easternTimeParts(date: Date) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", weekday: "short", hour12: false }).formatToParts(date);
+  const value = (type: string) => parts.find((part) => part.type === type)?.value || "";
+  return { hour: Number(value("hour")) % 24, minute: Number(value("minute")), weekday: WEEKDAY_INDEX[value("weekday")] ?? 0 };
+}
+
+// True from the scheduled minute onward for the rest of the matching day (the whole day for a
+// daily schedule, or just that one day of the week for a weekly one) — not only at the exact
+// minute. finderTick runs every minute, but a single missed tick (a cold start, a brief outage)
+// shouldn't skip the whole day/week: startFinderRun's own run_key idempotency already makes every
+// later tick that same day a cheap no-op once the first one has started the scan, so widening the
+// window here to "at or after the scheduled time" costs nothing extra.
+export function isScheduledRunTime(schedule: FinderScheduleSettings, date = new Date()): boolean {
+  if (!schedule.enabled) return false;
+  const { hour, minute, weekday } = easternTimeParts(date);
+  if (schedule.frequency === "weekly" && weekday !== schedule.dayOfWeek) return false;
+  return hour > schedule.hour || (hour === schedule.hour && minute >= schedule.minute);
 }
 
 export function finderPages(requested: number) {

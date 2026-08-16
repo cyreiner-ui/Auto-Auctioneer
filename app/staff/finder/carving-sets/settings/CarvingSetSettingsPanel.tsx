@@ -6,7 +6,10 @@ import Link from "next/link";
 type Keyword = { id: string; phrase: string; enabled: boolean };
 type NotifyRecipient = { id: string; email: string; created_at: string };
 type NotifySettings = { mode: "auctions_only" | "all_qualified"; recipients: NotifyRecipient[]; usingEnvFallback: boolean };
-type Overview = { keywords: Keyword[]; notify: NotifySettings; budget: { mode: string; freeAnalyses: number; paidAnalyses: number; analyses: number; monthlyLimit: number; remaining: number; projectedMaximum: number; dailyAnalyses: number; dailyLimit: number; dailyRemaining: number } };
+type Schedule = { enabled: boolean; frequency: "daily" | "weekly"; hour: number; minute: number; dayOfWeek: number | null };
+type Overview = { keywords: Keyword[]; notify: NotifySettings; schedule: Schedule; budget: { mode: string; freeAnalyses: number; paidAnalyses: number; analyses: number; monthlyLimit: number; remaining: number; projectedMaximum: number; dailyAnalyses: number; dailyLimit: number; dailyRemaining: number } };
+
+const WEEKDAY_LABEL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 const usd = (value: number) => Number(value || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 
@@ -37,6 +40,7 @@ export default function CarvingSetSettingsPanel() {
 
   const setEnabled = (keyword: Keyword, enabled: boolean) => request("/api/finder/keywords", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: keyword.id, enabled }) });
   const saveMode = (mode: string) => request("/api/finder/notify-settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) });
+  const saveSchedule = (patch: Partial<Schedule>) => request("/api/finder/schedule", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: "carving_set", ...patch }) });
   const budgetPercent = data ? Math.min(100, Math.round((data.budget.analyses / data.budget.monthlyLimit) * 100)) : 0;
   const dailyPercent = data ? Math.min(100, Math.round((data.budget.dailyAnalyses / data.budget.dailyLimit) * 100)) : 0;
 
@@ -51,6 +55,27 @@ export default function CarvingSetSettingsPanel() {
       <aside className="panel finder-budget"><p className="eyebrow">MONTHLY GUARDRAIL ({data.budget.mode === "paid" ? "paid" : "free"} mode)</p><h2>{data.budget.analyses.toLocaleString()} analyses</h2><p className="muted">{data.budget.remaining.toLocaleString()} remain before the {data.budget.monthlyLimit.toLocaleString()}-analysis stop this month. This budget is shared with the pocket-knife finder.</p><div className="budget-meter" role="progressbar" aria-valuenow={budgetPercent} aria-valuemin={0} aria-valuemax={100} aria-label="Monthly Gemini analysis budget used"><span style={{ width: `${budgetPercent}%` }} /></div><small>Conservative maximum used: {usd(data.budget.projectedMaximum)} / {usd(data.budget.monthlyLimit * 0.001)}</small>
         <div className="finder-daily-pacing"><p className="eyebrow">DAILY PACING</p><p className="muted">{data.budget.dailyAnalyses.toLocaleString()} / {data.budget.dailyLimit.toLocaleString()} analyses used today.</p><div className="budget-meter" role="progressbar" aria-valuenow={dailyPercent} aria-valuemin={0} aria-valuemax={100} aria-label="Today's Gemini analysis pacing cap used"><span style={{ width: `${dailyPercent}%` }} /></div></div>
       </aside>
+      <div className="panel finder-schedule">
+        <div className="panel-heading"><div><p className="eyebrow">AUTOMATION</p><h2>Automatic scan schedule</h2></div></div>
+        <label className="keyword-toggle"><input type="checkbox" checked={data.schedule.enabled} disabled={busy} onChange={(event) => void saveSchedule({ enabled: event.target.checked })} /> Run automatically</label>
+        <div className="schedule-controls">
+          <label>Frequency
+            <select value={data.schedule.frequency} disabled={busy} onChange={(event) => void saveSchedule({ frequency: event.target.value as Schedule["frequency"] })}>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+            </select>
+          </label>
+          {data.schedule.frequency === "weekly" && <label>Day
+            <select value={data.schedule.dayOfWeek ?? 0} disabled={busy} onChange={(event) => void saveSchedule({ dayOfWeek: Number(event.target.value) })}>
+              {WEEKDAY_LABEL.map((label, index) => <option key={label} value={index}>{label}</option>)}
+            </select>
+          </label>}
+          <label>Time (Eastern)
+            <input type="time" disabled={busy} value={`${String(data.schedule.hour).padStart(2, "0")}:${String(data.schedule.minute).padStart(2, "0")}`} onChange={(event) => { const [hour, minute] = event.target.value.split(":").map(Number); if (Number.isInteger(hour) && Number.isInteger(minute)) void saveSchedule({ hour, minute }); }} />
+          </label>
+        </div>
+        <p className="muted">Runs in America/New_York time. Scheduled independently from the pocket-knife finder&apos;s automatic scan.</p>
+      </div>
       <div className="panel finder-notify">
         <div className="panel-heading"><div><p className="eyebrow">EMAIL ALERTS</p><h2>Notification settings</h2></div></div>
         <p className="muted">Shared with the pocket-knife finder — one recipient list and mode for both, but carving-set deals always go out in their own separate email.</p>

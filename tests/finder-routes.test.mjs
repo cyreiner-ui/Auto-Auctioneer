@@ -4,6 +4,7 @@ import { DELETE as itemsDelete, PATCH as itemsPatch } from "../app/api/finder/it
 import { POST as gixenRetry } from "../app/api/finder/items/gixen/route.ts";
 import { POST as keywordsPost, PATCH as keywordsPatch, DELETE as keywordsDelete } from "../app/api/finder/keywords/route.ts";
 import { POST as notifySettingsPost, PATCH as notifySettingsPatch, DELETE as notifySettingsDelete } from "../app/api/finder/notify-settings/route.ts";
+import { PATCH as schedulePatch } from "../app/api/finder/schedule/route.ts";
 import { GET as overviewGet } from "../app/api/finder/route.ts";
 import { POST as runPost } from "../app/api/finder/run/route.ts";
 import { POST as tickPost } from "../app/api/finder/tick/route.ts";
@@ -53,6 +54,7 @@ test("every staff route rejects a request without valid staff auth", async () =>
         () => notifySettingsPatch(unauthed("https://x.test/api/finder/notify-settings", jsonBody({ mode: "auctions_only" }))),
         () => notifySettingsPost(unauthed("https://x.test/api/finder/notify-settings", jsonBody({ email: "a@example.test" }))),
         () => notifySettingsDelete(unauthed("https://x.test/api/finder/notify-settings?id=1", { method: "DELETE" })),
+        () => schedulePatch(unauthed("https://x.test/api/finder/schedule", jsonBody({ category: "pocket_knife", enabled: false }))),
       ];
       for (const call of cases) {
         const response = await call();
@@ -282,6 +284,36 @@ test("PATCH /api/finder/notify-settings updates the notify mode", async () => {
       assert.equal(changedBack.status, 200);
       assert.equal(fake.tables.finder_notify_settings.length, 1, "the singleton row is updated in place, not duplicated");
       assert.equal(fake.tables.finder_notify_settings[0].notify_mode, "auctions_only");
+    });
+  });
+});
+
+test("PATCH /api/finder/schedule updates only the targeted finder's schedule row", async () => {
+  await withEnv(BASE_ENV, async () => {
+    await withRoutesBackend({ finder_schedule_settings: [] }, async (fake) => {
+      const missingCategory = await schedulePatch(asStaff("https://x.test/api/finder/schedule", jsonBody({ enabled: false })));
+      assert.equal(missingCategory.status, 400);
+
+      const badFrequency = await schedulePatch(asStaff("https://x.test/api/finder/schedule", jsonBody({ category: "pocket_knife", frequency: "monthly" })));
+      assert.equal(badFrequency.status, 400);
+
+      const badHour = await schedulePatch(asStaff("https://x.test/api/finder/schedule", jsonBody({ category: "pocket_knife", hour: 24 })));
+      assert.equal(badHour.status, 400);
+
+      const updated = await schedulePatch(asStaff("https://x.test/api/finder/schedule", jsonBody({ category: "pocket_knife", enabled: false, frequency: "weekly", hour: 9, minute: 15, dayOfWeek: 2 })));
+      assert.equal(updated.status, 200);
+      assert.equal(fake.tables.finder_schedule_settings.length, 1);
+      const pocketRow = fake.tables.finder_schedule_settings.find((row) => row.category === "pocket_knife");
+      assert.equal(pocketRow.enabled, false);
+      assert.equal(pocketRow.frequency, "weekly");
+      assert.equal(pocketRow.run_hour, 9);
+      assert.equal(pocketRow.run_minute, 15);
+      assert.equal(pocketRow.day_of_week, 2);
+
+      const carvingUpdate = await schedulePatch(asStaff("https://x.test/api/finder/schedule", jsonBody({ category: "carving_set", enabled: false })));
+      assert.equal(carvingUpdate.status, 200);
+      assert.equal(fake.tables.finder_schedule_settings.length, 2, "each category gets its own row rather than sharing one");
+      assert.equal(pocketRow.enabled, false, "updating the carving-set row must not touch the pocket-knife row");
     });
   });
 });

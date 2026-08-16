@@ -1002,12 +1002,50 @@ test("finderTick only starts a search on the daily hour, but always drains the p
     mockMailer(t, []);
     await withFakeBackend({ finder_keywords: [] }, async () => {
       const offHour = await finderTick(new Date("2026-08-06T09:59:00Z"));
-      assert.equal(offHour.dailyRun, null);
+      assert.equal(offHour.runs.pocket_knife, undefined);
+      assert.equal(offHour.runs.carving_set, undefined);
       assert.deepEqual(offHour.queue, { processed: 0, deferred: 0 });
 
       const onHour = await finderTick(new Date("2026-08-06T10:30:00Z"));
-      assert.ok(onHour.dailyRun);
-      assert.equal(onHour.dailyRun.created, true);
+      assert.ok(onHour.runs.pocket_knife);
+      assert.equal(onHour.runs.pocket_knife.created, true);
+      assert.ok(onHour.runs.carving_set);
+      assert.equal(onHour.runs.carving_set.created, true, "both finders share the same default schedule until staff configure their own");
+    });
+  });
+});
+
+test("finderTick fires each finder's automatic scan independently based on its own schedule", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [],
+      finder_schedule_settings: [
+        { category: "pocket_knife", enabled: true, frequency: "daily", run_hour: 6, run_minute: 0, day_of_week: null },
+        { category: "carving_set", enabled: false, frequency: "daily", run_hour: 6, run_minute: 0, day_of_week: null },
+      ],
+    }, async () => {
+      const result = await finderTick(new Date("2026-08-06T10:30:00Z"));
+      assert.ok(result.runs.pocket_knife, "pocket-knife finder is enabled and due, so it should fire");
+      assert.equal(result.runs.carving_set, undefined, "carving-set finder is disabled, so it must not fire even though the time matches");
+    });
+  });
+});
+
+test("finderTick honors a weekly schedule, only firing on the configured day of week", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [],
+      finder_schedule_settings: [
+        { category: "pocket_knife", enabled: true, frequency: "weekly", run_hour: 6, run_minute: 0, day_of_week: 4 },
+        { category: "carving_set", enabled: true, frequency: "weekly", run_hour: 6, run_minute: 0, day_of_week: 3 },
+      ],
+    }, async () => {
+      // 2026-08-06T10:30:00Z is Thursday 06:30 America/New_York.
+      const result = await finderTick(new Date("2026-08-06T10:30:00Z"));
+      assert.ok(result.runs.pocket_knife, "Thursday matches the pocket-knife finder's configured weekday");
+      assert.equal(result.runs.carving_set, undefined, "Thursday does not match the carving-set finder's configured Wednesday");
     });
   });
 });
@@ -1139,7 +1177,8 @@ test("finderTick reconciles a run orphaned past the lock window even on an off-h
       finder_runs: [{ id: "orphaned-run", run_key: "scheduled:2026-08-12", trigger: "scheduled", status: "running", started_at: new Date(Date.now() - 60 * 60 * 1000).toISOString() }],
     }, async (fake) => {
       const result = await finderTick(new Date("2026-08-06T09:59:00Z"));
-      assert.equal(result.dailyRun, null, "an off-hour tick still must not start a new scan");
+      assert.equal(result.runs.pocket_knife, undefined, "an off-hour tick still must not start a new scan");
+      assert.equal(result.runs.carving_set, undefined, "an off-hour tick still must not start a new scan");
       const orphaned = fake.tables.finder_runs.find((row) => row.id === "orphaned-run");
       assert.equal(orphaned.status, "failed", "a run stuck 'running' for an hour should be reconciled within a single tick, without waiting for the next daily run or a manual click");
       assert.ok(orphaned.completed_at);
