@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeListingText, calculateDeal, effectiveMaxCostPerKnife, finderPages, isDailyFinderHour, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife } from "../lib/finder-core.ts";
+import { analyzeListingText, calculateDeal, effectiveMaxCostPerKnife, finderPages, isScheduledRunTime, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife } from "../lib/finder-core.ts";
 
 test("extracts explicit numeric and word lot counts", () => {
   assert.deepEqual(analyzeListingText("Lot of 12 folding pocket knives"), { kind: "resolved", count: 12, containsFoldingKnife: true, confidence: 0.99 });
@@ -221,10 +221,28 @@ test("calculates shipping-inclusive unit cost at the exact threshold", () => {
   assert.equal(calculateDeal(3, null, 1).reason, "missing_shipping");
 });
 
-test("uses calendar month keys and Eastern daily hour", () => {
+test("uses calendar month keys", () => {
   assert.equal(monthKey(new Date("2026-08-06T12:00:00Z")), "2026-08");
-  assert.equal(isDailyFinderHour(new Date("2026-08-06T10:30:00Z")), true);
-  assert.equal(isDailyFinderHour(new Date("2026-08-06T09:59:00Z")), false);
+});
+
+// 2026-08-06T10:00:00Z is 06:00 America/New_York on a Thursday (weekday index 4).
+const DAILY_SCHEDULE = { enabled: true, frequency: "daily", hour: 6, minute: 0, dayOfWeek: null };
+
+test("isScheduledRunTime: daily schedule fires at or after the scheduled minute, not before", () => {
+  assert.equal(isScheduledRunTime(DAILY_SCHEDULE, new Date("2026-08-06T09:59:00Z")), false, "05:59 ET is before the 06:00 schedule");
+  assert.equal(isScheduledRunTime(DAILY_SCHEDULE, new Date("2026-08-06T10:00:00Z")), true, "06:00 ET is exactly the scheduled minute");
+  assert.equal(isScheduledRunTime(DAILY_SCHEDULE, new Date("2026-08-06T10:30:00Z")), true, "06:30 ET is after the scheduled minute — a missed exact-minute tick shouldn't skip the whole day");
+});
+
+test("isScheduledRunTime: disabled schedule never fires", () => {
+  assert.equal(isScheduledRunTime({ ...DAILY_SCHEDULE, enabled: false }, new Date("2026-08-06T10:30:00Z")), false);
+});
+
+test("isScheduledRunTime: weekly schedule only fires on the configured day of week", () => {
+  const thursdaySchedule = { enabled: true, frequency: "weekly", hour: 6, minute: 0, dayOfWeek: 4 };
+  assert.equal(isScheduledRunTime(thursdaySchedule, new Date("2026-08-06T10:30:00Z")), true, "2026-08-06 is a Thursday (index 4) at 06:30 ET");
+  const wednesdaySchedule = { ...thursdaySchedule, dayOfWeek: 3 };
+  assert.equal(isScheduledRunTime(wednesdaySchedule, new Date("2026-08-06T10:30:00Z")), false, "same time, but Thursday isn't the configured Wednesday");
 });
 
 test("paginates 500 eBay results as 200, 200, and 100", () => {

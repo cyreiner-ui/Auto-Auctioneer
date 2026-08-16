@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appToken, getItemShippingCost, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
-import { analyzeListingText, calculateDeal, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isDailyFinderHour, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife } from "./finder-core";
+import { analyzeListingText, calculateDeal, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isScheduledRunTime, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife, type FinderScheduleSettings } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
 import {
   analyzeCarvingSetWithGemini,
@@ -52,6 +52,33 @@ async function getNotifySettings(): Promise<{ mode: FinderNotifyMode; recipients
     ? dbRecipients
     : (process.env.FINDER_ALERT_EMAILS || "").split(",").map((address) => address.trim()).filter(Boolean);
   return { mode, recipients };
+}
+
+// Matches today's hardcoded default (daily at 6am America/New_York) — used only if a category's
+// row is somehow missing (it's seeded by supabase/migrations/022_finder_schedule_settings.sql).
+const DEFAULT_SCHEDULE: FinderScheduleSettings = { enabled: true, frequency: "daily", hour: 6, minute: 0, dayOfWeek: null };
+
+async function getScheduleSettings(category: FinderCategory): Promise<FinderScheduleSettings> {
+  const { data } = await supabaseAdmin.from("finder_schedule_settings").select("*").eq("category", category).maybeSingle();
+  if (!data) return DEFAULT_SCHEDULE;
+  return {
+    enabled: Boolean(data.enabled),
+    frequency: data.frequency === "weekly" ? "weekly" : "daily",
+    hour: Number(data.run_hour),
+    minute: Number(data.run_minute),
+    dayOfWeek: data.day_of_week == null ? null : Number(data.day_of_week),
+  };
+}
+
+export async function updateScheduleSettings(category: FinderCategory, patch: Partial<{ enabled: boolean; frequency: "daily" | "weekly"; hour: number; minute: number; dayOfWeek: number | null }>) {
+  const values: Record<string, unknown> = { category, updated_at: new Date().toISOString() };
+  if (patch.enabled !== undefined) values.enabled = patch.enabled;
+  if (patch.frequency !== undefined) values.frequency = patch.frequency;
+  if (patch.hour !== undefined) values.run_hour = patch.hour;
+  if (patch.minute !== undefined) values.run_minute = patch.minute;
+  if (patch.dayOfWeek !== undefined) values.day_of_week = patch.dayOfWeek;
+  const { error } = await supabaseAdmin.from("finder_schedule_settings").upsert(values, { onConflict: "category" });
+  if (error) throw new Error(error.message);
 }
 
 type NotifyRow = {
@@ -608,18 +635,26 @@ export async function processPendingFinderItems(limit = config().batchSize) {
 }
 
 export async function finderTick(date = new Date()) {
-  // Runs every minute regardless of the daily hour, so an orphaned run gets flipped to "failed"
-  // (and the dashboard stops showing it as active) within a minute of going stale, rather than
-  // waiting for the next daily scan or a staff member clicking "Run now".
+  // Runs every minute regardless of either finder's schedule, so an orphaned run gets flipped to
+  // "failed" (and the dashboard stops showing it as active) within a minute of going stale, rather
+  // than waiting for the next automatic scan or a staff member clicking "Run now".
   await reconcileOrphanedRuns();
-  let dailyRun = null;
-  if (isDailyFinderHour(date)) dailyRun = await startFinderRun("scheduled", `scheduled:${easternDateKey(date)}`);
+  const [pocketSchedule, carvingSchedule] = await Promise.all([
+    getScheduleSettings("pocket_knife"),
+    getScheduleSettings("carving_set"),
+  ]);
+  const runs: Partial<Record<FinderCategory, Awaited<ReturnType<typeof startFinderRun>>>> = {};
+  // Each finder's automatic scan is independently scheduled and genuinely category-scoped now
+  // (unlike the old single unscoped daily call) — one finder firing never touches the other's
+  // keywords, matching the manual "Run now" buttons' behavior.
+  if (isScheduledRunTime(pocketSchedule, date)) runs.pocket_knife = await startFinderRun("scheduled", `scheduled:pocket_knife:${easternDateKey(date)}`, "pocket_knife");
+  if (isScheduledRunTime(carvingSchedule, date)) runs.carving_set = await startFinderRun("scheduled", `scheduled:carving_set:${easternDateKey(date)}`, "carving_set");
   const queue = await processPendingFinderItems();
-  return { dailyRun, queue };
+  return { runs, queue };
 }
 
 export async function finderOverview(category?: FinderCategory) {
-  const [allKeywords, results, runs, pending, rejected, qualified, usage, dailyUsage, notifySettingsRow, notifyRecipientRows] = await Promise.all([
+  const [allKeywords, results, runs, pending, rejected, qualified, usage, dailyUsage, notifySettingsRow, notifyRecipientRows, schedule] = await Promise.all([
     supabaseAdmin.from("finder_keywords").select("*").order("created_at"),
     scopeToCategory(supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").is("dismissed_at", null).order("discovered_at", { ascending: false }).limit(500), category),
     category ? supabaseAdmin.from("finder_runs").select("*").or(`category.is.null,category.eq.${category}`).order("started_at", { ascending: false }).limit(10) : supabaseAdmin.from("finder_runs").select("*").order("started_at", { ascending: false }).limit(10),
@@ -630,6 +665,7 @@ export async function finderOverview(category?: FinderCategory) {
     supabaseAdmin.from("finder_vision_usage_daily").select("*").eq("day", dayKey()).maybeSingle(),
     supabaseAdmin.from("finder_notify_settings").select("notify_mode").eq("id", true).maybeSingle(),
     supabaseAdmin.from("finder_notify_recipients").select("*").order("created_at"),
+    category ? getScheduleSettings(category) : Promise.resolve(null),
   ]);
   const firstError = [allKeywords.error, results.error, runs.error, pending.error, rejected.error, qualified.error, usage.error, dailyUsage.error, notifySettingsRow.error, notifyRecipientRows.error].find(Boolean);
   if (firstError) throw new Error(firstError.message);
@@ -652,6 +688,7 @@ export async function finderOverview(category?: FinderCategory) {
       recipients: notifyRecipients,
       usingEnvFallback: !notifyRecipients.length,
     },
+    schedule,
     // The monthly cap (reserve_finder_vision_usage) counts free + paid analyses together and
     // applies regardless of mode, so the budget the UI shows must match that, not just the
     // paid-mode count — free-mode analyses aren't actually free once Google's own free-tier
