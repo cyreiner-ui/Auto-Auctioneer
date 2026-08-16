@@ -121,7 +121,7 @@ const weightBasedLotPattern = new RegExp(
 export type TextAnalysis =
   | { kind: "reject"; reason: string }
   | { kind: "resolved"; count: number; containsFoldingKnife: true; confidence: number; swissArmy?: true }
-  | { kind: "vision" };
+  | { kind: "vision"; knownCount?: number };
 
 // Patterns that require a knife/blade word directly adjacent to the number are safe to trust
 // anywhere in the listing text. Patterns that infer a count from lot/piece phrasing without that
@@ -226,7 +226,13 @@ export function analyzeListingText(title: string, description = ""): TextAnalysi
   if (!lotPattern.test(text) && foldingSignal(text) && knifePattern.test(text)) {
     return { kind: "resolved", count: 1, containsFoldingKnife: true, confidence: 0.95, ...(swissArmy ? { swissArmy: true as const } : {}) };
   }
-  return { kind: "vision" };
+  // A fixed-blade lot (e.g. a "skinner"/"hunting knife" listing with no folding/brand wording)
+  // can't be resolved outright here — we still need vision to confirm it's actually a folding
+  // pocket knife — but a title-stated count like "lot of 15" is still more reliable than
+  // whatever vision counts in the photo (often a seller's whole catalog/stock shot, not this
+  // specific lot). Surfaced so the vision-processing step can trust it over vision's own count
+  // instead of discarding it here.
+  return { kind: "vision", ...(count && count <= FINDER_DEFAULTS.maxPlausibleKnifeCount ? { knownCount: count } : {}) };
 }
 
 // A listing's matched keywords may include a brand-specific override alongside a generic,
