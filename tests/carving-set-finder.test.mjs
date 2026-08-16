@@ -164,6 +164,27 @@ test("startFinderRun rejects a Sheffield carving set explicitly described as sta
   });
 });
 
+test("startFinderRun rejects a Sheffield carving set that mentions \"stainless\" even alongside \"carbon steel\" in the same listing", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+          title: "Antique Sheffield Carving Set, carbon steel blade, stainless bolsters, with fitted case",
+          price: { value: "50.00", currency: "USD" },
+        })] }) },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-carving-stainless-and-carbon");
+        assert.equal(run.qualified, 0);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected");
+        assert.equal(item.reason, "stainless_steel", "\"stainless\" is an unconditional negative keyword now, even when \"carbon steel\" is also mentioned");
+      });
+    });
+  });
+});
+
 test("startFinderRun qualifies a Sheffield carving set that mentions neither carbon steel nor stainless at all", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);

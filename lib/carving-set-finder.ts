@@ -219,13 +219,15 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
   // Material is resolved from text alone, never vision, and only ever applies to Sheffield —
   // German qualifies on either steel type. Most real listings say neither "carbon steel" nor
   // "stainless" at all, so this can't be an explicit-match-required check — it defaults to
-  // accepting (assumed carbon steel) unless a negative signal says otherwise: an explicit
-  // "stainless" mention with no "carbon steel" mention alongside it, or a known-stainless-only
-  // maker (these brands never produced carbon steel carving sets, regardless of what an
-  // individual listing claims).
+  // accepting (assumed carbon steel) unless a negative signal says otherwise: any "stainless"
+  // mention in the title or description (an unconditional negative keyword, same as the known-
+  // stainless-only makers below — even a listing that also says "carbon steel" is rejected rather
+  // than trusted, since a listing claiming both is more likely wrong/misleading than genuinely
+  // carbon steel), or a known-stainless-only maker (these brands never produced carbon steel
+  // carving sets, regardless of what an individual listing claims).
   if (group === "sheffield") {
     const fullText = `${item.title} ${item.shortDescription}`;
-    if (knownStainlessSheffieldBrandsPattern.test(fullText) || (text.stainless && !text.carbonSteel)) {
+    if (knownStainlessSheffieldBrandsPattern.test(fullText) || text.stainless) {
       return { ...base, ...categoryFields, status: "rejected", reason: "stainless_steel", processed_at: new Date().toISOString() };
     }
   }
