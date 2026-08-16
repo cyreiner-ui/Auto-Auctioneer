@@ -318,6 +318,10 @@ export function refreshedCarvingSetRow(item: CarvingSetItem, keywordPhrases: str
     : item;
   const fresh = initialCarvingSetRow(effectiveItem, keywordPhrases, runId, group);
   const freshRow = preservedShipping ? { ...fresh, shipping_source: "lookup" as const } : fresh;
+  // NOTE: initialCarvingSetRow's return type is a union of object literals, and not every
+  // branch includes `knife_count` — accessing it below is safe at runtime (missing means
+  // undefined, same as null for this check) but fails `tsc`, which is why the build currently
+  // runs with `typescript: { ignoreBuildErrors: true }` in next.config.ts.
   // Prefer fresh text re-derivation whenever it's conclusive; only reuse a previously
   // vision-confirmed case/material/piece-count when today's text re-analysis is still ambiguous —
   // this is what lets an already-fixed parser bug self-correct for free on the next scan.
