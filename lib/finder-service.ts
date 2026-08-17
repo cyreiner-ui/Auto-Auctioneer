@@ -366,12 +366,16 @@ function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: str
 // reading "running" while they drain, or a run with a real backlog (see the comment on
 // RUN_LOCK_WINDOW_MS) gets wrongly reconciled as abandoned before it ever gets the chance.
 async function updateRunCounts(runId: string) {
-  const { data, error } = await supabaseAdmin.from("finder_items").select("status").eq("run_id", runId);
+  const { data, error } = await supabaseAdmin.from("finder_items").select("status, first_seen_run_id, dismissed_at").eq("run_id", runId);
   if (error) throw new Error(error.message);
   const rows = data || [];
   const qualified = rows.filter((row) => row.status === "qualified").length;
   const rejected = rows.filter((row) => row.status === "rejected" || row.status === "error").length;
-  const { error: saveError } = await supabaseAdmin.from("finder_runs").update({ qualified, rejected, status: "completed", completed_at: new Date().toISOString() }).eq("id", runId);
+  // Distinct from `qualified` above (which includes days-old listings this run merely re-touched,
+  // and doesn't exclude dismissed items) — this is the count the dashboard's "Found N good deals
+  // among M new listings" sentence needs so its two numbers are actually related.
+  const newQualified = rows.filter((row) => row.first_seen_run_id === runId && row.status === "qualified" && !row.dismissed_at).length;
+  const { error: saveError } = await supabaseAdmin.from("finder_runs").update({ qualified, rejected, new_qualified: newQualified, status: "completed", completed_at: new Date().toISOString() }).eq("id", runId);
   if (saveError) throw new Error(saveError.message);
 }
 
@@ -474,8 +478,14 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
         : row;
     });
     const added = ids.filter((id) => !existingById.has(id)).length;
-    for (let index = 0; index < rows.length; index += 200) {
-      const { error } = await supabaseAdmin.from("finder_items").upsert(rows.slice(index, index + 200), { onConflict: "ebay_item_id" });
+    // Stamped only for genuinely new items (existingById already distinguishes new vs. re-touched,
+    // same check `added` above uses) — never included for an already-known item, so the upsert's
+    // conflict path leaves a previously-set value untouched. A DB trigger (see migration
+    // 023_finder_items_first_seen_run_id.sql) backstops this for any other insert path, but setting
+    // it explicitly here keeps the "new listing" distinction visible and testable at the call site.
+    const rowsWithFirstSeen = rows.map((row) => existingById.has(row.ebay_item_id) ? row : { ...row, first_seen_run_id: run.id });
+    for (let index = 0; index < rowsWithFirstSeen.length; index += 200) {
+      const { error } = await supabaseAdmin.from("finder_items").upsert(rowsWithFirstSeen.slice(index, index + 200), { onConflict: "ebay_item_id" });
       if (error) throw new Error(error.message);
     }
     await supabaseAdmin.from("finder_runs").update({ keywords_scanned: keywords?.length || 0, current_keyword: null, items_seen: found.size, items_added: added, errors }).eq("id", run.id);
@@ -743,6 +753,16 @@ export async function finderOverview(category?: FinderCategory) {
 
 export async function archivedFinderItems(category?: FinderCategory) {
   const { data, error } = await scopeToCategory(supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").not("dismissed_at", "is", null).order("dismissed_at", { ascending: false }).limit(500), category);
+  if (error) throw new Error(error.message);
+  return { results: data || [] };
+}
+
+// Every rejected row already carries a `reason` (see initialRow/refreshedRow, initialCarvingSetRow,
+// and the vision-processing paths above) — this just gives staff somewhere to see it, so a listing
+// found manually on eBay that the finder passed over can be checked against the actual reason
+// instead of staying an unexplained mismatch.
+export async function rejectedFinderItems(category?: FinderCategory) {
+  const { data, error } = await scopeToCategory(supabaseAdmin.from("finder_items").select("*").eq("status", "rejected").order("processed_at", { ascending: false }).limit(200), category);
   if (error) throw new Error(error.message);
   return { results: data || [] };
 }

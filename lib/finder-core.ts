@@ -43,6 +43,10 @@ const foldingPattern = /\b(?:folding|foldable|pocket\s*kn(?:ife|ives|ifes)|pen\s
 // Swiss Army item needs a distinct, much stricter price cap downstream — see effectiveMaxCostPerKnife.
 const swissArmyPattern = /\b(?:swiss\s+army|victorinox|wenger)\b/i;
 const knifePattern = /\bkn(?:ife|ives|ifes)\b/i;
+// Distinct from knifePattern: a bare plural with no digit or "lot" wording anywhere means more
+// than one item exists but the actual count is unknown — only a genuinely singular "knife"
+// mention is safe to default to a count of 1 (see the no-digit fallback in analyzeListingText).
+const pluralKnifePattern = /\bkn(?:ives|ifes)\b/i;
 const lotPattern = /\b(?:lot|bulk|assorted|collection|group|bundle)\b/i;
 // Garbage categories the buyer never wants, checked before any count/folding resolution so they
 // can't slip through just because the title also happens to mention "folding"/"pocket knife" or a
@@ -223,7 +227,7 @@ export function analyzeListingText(title: string, description = ""): TextAnalysi
   if (count && count <= FINDER_DEFAULTS.maxPlausibleKnifeCount && foldingSignal(text)) {
     return { kind: "resolved", count, containsFoldingKnife: true, confidence: 0.99, ...(swissArmy ? { swissArmy: true as const } : {}) };
   }
-  if (!lotPattern.test(text) && foldingSignal(text) && knifePattern.test(text)) {
+  if (!lotPattern.test(text) && foldingSignal(text) && knifePattern.test(text) && !pluralKnifePattern.test(text)) {
     return { kind: "resolved", count: 1, containsFoldingKnife: true, confidence: 0.95, ...(swissArmy ? { swissArmy: true as const } : {}) };
   }
   // A fixed-blade lot (e.g. a "skinner"/"hunting knife" listing with no folding/brand wording)
