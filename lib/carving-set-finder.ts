@@ -5,23 +5,28 @@
 // text patterns, knife-count logic, or Gemini vision schema, all of which stay untouched.
 import { VisionBudgetError, VisionQuotaError, imagePart, reserveUsage } from "./gemini-vision";
 
-export type CarvingSetGroup = "sheffield" | "german";
+export type CarvingSetGroup = "sheffield" | "german" | "generic";
 
-// The only two finder_keywords phrases this algorithm ever runs against — seeded by
-// supabase/migrations/020_finder_carving_sets.sql. Everything else keeps going through the
-// pocket-knife pipeline in lib/finder-core.ts/lib/finder-service.ts, untouched.
+// The only finder_keywords phrases this algorithm ever runs against — seeded by
+// supabase/migrations/020_finder_carving_sets.sql and 024_finder_carving_sets_generic_keyword.sql.
+// Everything else keeps going through the pocket-knife pipeline in
+// lib/finder-core.ts/lib/finder-service.ts, untouched.
 export const CARVING_SET_KEYWORDS: Record<CarvingSetGroup, string> = {
   sheffield: "sheffield carving set",
   german: "german carving set",
+  generic: "carving set",
 };
 
+// A Sheffield or German set also matches the broader generic phrase in eBay's search (its title
+// contains "carving set" too), so the more specific group must be checked first.
 export function carvingSetGroupForPhrases(phrases: string[]): CarvingSetGroup | null {
   if (phrases.includes(CARVING_SET_KEYWORDS.sheffield)) return "sheffield";
   if (phrases.includes(CARVING_SET_KEYWORDS.german)) return "german";
+  if (phrases.includes(CARVING_SET_KEYWORDS.generic)) return "generic";
   return null;
 }
 
-// Flat list of the two phrases above — used by lib/finder-service.ts to scope a manual run, the
+// Flat list of the phrases above — used by lib/finder-service.ts to scope a manual run, the
 // results/counts/archived queries, and qualification emails to just this category (via a
 // keyword_phrases array-overlap check), without adding a category column to finder_keywords.
 export const CARVING_SET_PHRASES: string[] = Object.values(CARVING_SET_KEYWORDS);
@@ -82,9 +87,10 @@ export function analyzeCarvingSetText(title: string, description = ""): CarvingS
 }
 
 // Sheffield: flat $200 all-in, regardless of piece count (carbon-steel-only is enforced
-// separately, not part of this formula). German: no material restriction, tiered by piece count —
+// separately, not part of this formula). German and generic (any cased set that's neither
+// Sheffield/English nor German-branded): no material restriction, tiered by piece count —
 // $10/piece + $15 (2pc=$35, 3pc=$45, 4pc=$55, 5pc=$65, same slope beyond 5). Returns null when the
-// German group's piece count isn't resolvable yet (must fall to vision).
+// piece count isn't resolvable yet (must fall to vision).
 export function carvingSetCeiling(group: CarvingSetGroup, pieceCount: number | null): number | null {
   if (group === "sheffield") return 200;
   return pieceCount != null && pieceCount >= 2 ? pieceCount * 10 + 15 : null;
@@ -184,11 +190,11 @@ export type CarvingSetVisionDecision = {
 // mirroring how the pocket-knife pipeline splits vision classification from the shipping fetch.
 export function evaluateCarvingSetVision(group: CarvingSetGroup, vision: CarvingSetVisionResult, confidenceThreshold: number): CarvingSetVisionDecision {
   const confident = vision.confidence >= confidenceThreshold;
-  const ceiling = carvingSetCeiling(group, group === "german" ? vision.pieceCount : null);
+  const ceiling = carvingSetCeiling(group, group !== "sheffield" ? vision.pieceCount : null);
   // Sheffield only, and only an unconditional "stainless_steel" reading rejects — a confident
   // "carbon_steel" or an honest "indeterminate" both pass through, matching the text pipeline's own
-  // default-accept-unless-negative-signal philosophy (see initialCarvingSetRow). German ignores
-  // vision.material entirely, exactly as it ignores the text-based material check today.
+  // default-accept-unless-negative-signal philosophy (see initialCarvingSetRow). German/generic
+  // ignore vision.material entirely, exactly as they ignore the text-based material check today.
   const stainlessConfirmed = group === "sheffield" && vision.material === "stainless_steel";
   const reason = !confident ? (vision.uncertaintyReason || "low_confidence")
     : stainlessConfirmed ? "stainless_steel_vision"
@@ -268,7 +274,7 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
   if (!text.isCarvingSet) return { ...base, ...categoryFields, status: "rejected", reason: "not_carving_set", processed_at: new Date().toISOString() };
 
   // Material is resolved from text alone, never vision, and only ever applies to Sheffield —
-  // German qualifies on either steel type. Most real listings say neither "carbon steel" nor
+  // German and generic sets qualify on either steel type. Most real listings say neither "carbon steel" nor
   // "stainless" at all, so this can't be an explicit-match-required check — it defaults to
   // accepting (assumed carbon steel) unless a negative signal says otherwise: any "stainless"
   // mention in the title or description (an unconditional negative keyword, same as the known-
@@ -296,12 +302,12 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
 
   const ceiling = carvingSetCeiling(group, text.pieceCount);
 
-  // German only: case plus a usable piece count are enough to fully resolve from text alone, since
-  // German has no material requirement at all. Sheffield never finalizes here even once text
+  // German and generic only: case plus a usable piece count are enough to fully resolve from text
+  // alone, since neither has a material requirement. Sheffield never finalizes here even once text
   // confirms case — the checks above only ever *reject* on a negative material signal, they never
   // *confirm* carbon steel, so a surviving Sheffield candidate still needs a vision material check
   // (below) before it can qualify, even though its case/ceiling are already known.
-  if (group === "german" && text.hasCase && ceiling != null) {
+  if (group !== "sheffield" && text.hasCase && ceiling != null) {
     const knownFields = {
       ...categoryFields,
       knife_count: 1 as const,
@@ -321,14 +327,14 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
 
   // Sheffield's ceiling is always the flat $200 regardless of case/vision, so an obviously
   // overpriced candidate can still be rejected without spending a vision call on it — mirrors the
-  // price-alone-already-over-budget shortcut the (now German-only) fast path above still uses; not
-  // worth paying for a photo just to confirm what the price already rules out.
+  // price-alone-already-over-budget shortcut the (now German/generic-only) fast path above still
+  // uses; not worth paying for a photo just to confirm what the price already rules out.
   if (group === "sheffield" && ceiling != null && item.itemPrice > ceiling) {
     return { ...base, ...categoryFields, status: "rejected", reason: "over_budget", processed_at: new Date().toISOString() };
   }
 
-  // Text alone couldn't finalize this row: German still needs vision to confirm case and/or a
-  // usable piece count, and Sheffield — whose case/ceiling may already be fully known from text —
+  // Text alone couldn't finalize this row: German/generic still need vision to confirm case and/or
+  // a usable piece count, and Sheffield — whose case/ceiling may already be fully known from text —
   // still needs a vision material check (see analyzeCarvingSetWithGemini/evaluateCarvingSetVision)
   // before it can qualify, since the checks above only ever rule material out, never confirm it.
   // Same text-first/vision-fallback shape as the pocket-knife pipeline, but via

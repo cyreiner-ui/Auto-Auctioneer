@@ -6,6 +6,7 @@ import { usePersistedState } from "../../../lib/use-persisted-state";
 export type FinderResult = {
   ebay_item_id: string; title: string; ebay_url: string; image_url: string | null; item_price: number; shipping_cost: number; total_cost: number; cost_per_knife: number; knife_count: number; detection_source: string; discovered_at: string; gixen_status?: string | null; gixen_message?: string | null; buying_options: string[]; max_bid: number | null;
   carving_piece_count?: number | null; carving_has_case?: boolean | null; carving_carbon_steel?: boolean | null;
+  reason?: string | null;
 };
 export type FinderResultsVariant = "pocket_knife" | "carving_set";
 
@@ -17,6 +18,45 @@ type TypeFilter = "AUCTION" | "BEST_OFFER" | "FIXED_PRICE";
 
 const GIXEN_BADGE: Record<string, string> = { sent: "Sent to Gixen", failed: "Gixen send failed", not_auction: "Not an auction" };
 const TYPE_FILTER_LABEL: Record<TypeFilter, string> = { AUCTION: "Bidding", BEST_OFFER: "Best offer", FIXED_PRICE: "Set price" };
+
+// Known `finder_items.reason` codes (see lib/finder-core.ts's analyzeListingText/calculateDeal,
+// lib/finder-service.ts's initialRow/refreshedRow/processPendingFinderItems, and
+// lib/carving-set-finder.ts's initialCarvingSetRow) mapped to a staff-readable explanation. Anything
+// not in this map (a dynamic Gemini/eBay error message, or a not-yet-catalogued code) falls back to
+// showing the raw reason string rather than being silently hidden.
+const REJECTION_REASON_LABEL: Record<string, string> = {
+  selection_listing: "Buyer picks one item from a lot — quantity isn't fixed",
+  no_knives_included: "Listing says no knives are actually included",
+  box_cutter: "Box cutter, not a pocket knife",
+  credit_card_knife: "Credit-card/wallet novelty knife",
+  coin_knife: "Coin novelty knife",
+  plain_blade: "Replacement/bare blade, not a full knife",
+  throwing_knife: "Throwing knife",
+  keychain_knife: "Keychain novelty knife",
+  weight_based_lot: "Sold by weight — quantity isn't stated",
+  multi_tool: "Multi-tool (corkscrew/pliers/bottle-opener), not a pocket knife",
+  non_folding_cutlery: "Reads as kitchen/table cutlery, not a folding knife",
+  no_folding_knife: "Photo didn't show a folding pocket knife",
+  invalid_price: "Listing had no usable price",
+  missing_shipping: "Shipping cost couldn't be determined",
+  invalid_count: "Knife count couldn't be determined",
+  implausible_count: "Counted more knives than plausible for one listing",
+  over_budget: "Over the per-knife budget",
+  non_usd_currency: "Priced in a non-USD currency",
+  non_usd_shipping: "Shipping quoted in a non-USD currency",
+  ended: "Listing had already ended",
+  missing_image: "No photo to analyze",
+  low_confidence: "Photo analysis wasn't confident enough",
+  low_volume_skip_vision: "Skipped photo analysis — too few qualifying Sheffield sets today to justify the cost",
+  no_case: "No case/box shown or mentioned",
+  not_carving_set: "Listing text never actually says \"carving set\"",
+  stainless_steel: "Stated or implied stainless steel, not carbon steel",
+  stainless_steel_vision: "Photo confirmed stainless steel, not carbon steel",
+  stainless_era_wording: "Wording suggests a later stainless-era set, not carbon steel",
+  faux_handle: "Imitation (faux) handle material, typical of later stainless sets",
+};
+
+function rejectionLabel(reason: string) { return REJECTION_REASON_LABEL[reason] || reason; }
 
 const usd = (value: number) => Number(value || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 
@@ -91,12 +131,13 @@ export default function FinderResultsGrid({ results, busy, emptyMessage, actions
                   {result.carving_has_case && <span>Cased</span>}
                   {result.carving_carbon_steel && <span>Carbon steel</span>}
                 </>
-              : <span>{result.knife_count} knives</span>}
+              : <span>{result.knife_count != null ? `${result.knife_count} knives` : "Knife count unknown"}</span>}
             {result.gixen_status && <span className={result.gixen_status === "failed" ? "gixen-failed" : undefined} title={result.gixen_message || undefined}>{GIXEN_BADGE[result.gixen_status] || result.gixen_status}</span>}
           </div>
           <h3>{result.title}</h3>
-          <p className="finder-price-line">{usd(result.item_price)} + {usd(result.shipping_cost)} shipping = {usd(result.total_cost)} total</p>
-          {variant === "pocket_knife" && <strong className="finder-unit-price">{usd(result.cost_per_knife)} / knife</strong>}
+          <p className="finder-price-line">{usd(result.item_price)}{result.shipping_cost != null ? ` + ${usd(result.shipping_cost)} shipping` : ""}{result.total_cost != null ? ` = ${usd(result.total_cost)} total` : ""}</p>
+          {variant === "pocket_knife" && result.cost_per_knife != null && <strong className="finder-unit-price">{usd(result.cost_per_knife)} / knife</strong>}
+          {result.reason && <p className="finder-reject-reason">Not a match: {rejectionLabel(result.reason)}</p>}
           <p className="finder-snapshot">Price captured {new Date(result.discovered_at).toLocaleString()}. Verify the current price on eBay.</p>
           {bidAction && isAuctionFormat(result.buying_options) && result.gixen_status !== "sent" && result.gixen_status !== "not_auction" &&
             <div className="finder-bid-row">
