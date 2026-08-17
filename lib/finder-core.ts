@@ -76,18 +76,30 @@ const multiToolPattern = /\bcorkscrew\b|\bbottle[\s-]*opener\b|\bpliers\b|\bleat
 // "leatherman" is deliberately excluded — unlike the other brands here, Leatherman's flagship
 // products are multi-tools, not pocket knives, so the name alone shouldn't confirm a folding-knife
 // signal (see multiToolPattern above, which rejects on the bare brand name instead).
-const brandNames = [
+const brandNameList = [
   "buck", "gerber", "kershaw", "schrade", "case", "spyderco", "benchmade", "victorinox",
   "old\\s*timer", "camillus", "boker", "imperial", "winchester", "browning",
   "smith\\s*(?:and|&)\\s*wesson", "s&w", "crkt", "sog", "civivi", "cold\\s*steel",
   "frost(?:\\s+cutlery)?", "m-tech", "ozark\\s*trail", "rough\\s*ry?der", "byrd", "coast",
   "elk\\s*ridge", "opinel", "colt", "mossy\\s*oak", "tac\\s*force", "remington", "zippo",
-].join("|");
+];
+const brandNames = brandNameList.join("|");
 // digit -> up to 2 filler words -> known brand -> up to 3 filler words -> knife word. The "lot "
 // lookbehind keeps this out of the same auction-lot-numbering trap componentPattern below avoids
 // (e.g. "Lot 45 folding pocket knife" is a lot number, not a count).
 const brandedComponentPattern = new RegExp(`(?<!lot )(?<![A-Za-z]-)\\b(\\d{1,3})\\s+(?:[A-Za-z][\\w.'-]{0,20}\\s+){0,2}?(?:${brandNames})\\b(?:\\s+[A-Za-z][\\w.'-]{0,20}){0,3}?\\s*(?:kn(?:ife|ives|ifes)|fixed\\s+blades?)\\b`, "gi");
 const brandKnifePattern = new RegExp(`\\b(?:${brandNames})\\b(?:\\s+[A-Za-z][\\w.'-]{0,20}){0,4}?\\s*kn(?:ife|ives|ifes)\\b`, "i");
+// Subset of brandNameList whose flagship consumer lines are made/sold as other things just as
+// often as folding pocket knives — real vintage kitchen/carving cutlery and flatware shares these
+// exact names (see nonFoldingCutleryPattern's comment below, which already calls these eight out).
+// A bare match on one of these, with no stated count and no explicit folding/pocket-knife wording,
+// isn't reliable proof on its own that a *single*-item listing is a folding pocket knife rather
+// than a fixed-blade hunting knife, a kitchen knife, or a display piece — see
+// singleItemFoldingSignal. Every other name in brandNameList is trusted the same for a bare single
+// match as it is for a count-corroborated one.
+const AMBIGUOUS_BRAND_NAMES = new Set(["case", "winchester", "colt", "remington", "camillus", "old\\s*timer", "browning", "imperial"]);
+const reliableBrandNames = brandNameList.filter((name) => !AMBIGUOUS_BRAND_NAMES.has(name)).join("|");
+const reliableBrandKnifePattern = new RegExp(`\\b(?:${reliableBrandNames})\\b(?:\\s+[A-Za-z][\\w.'-]{0,20}){0,4}?\\s*kn(?:ife|ives|ifes)\\b`, "i");
 const selectionPattern = /\b(?:choose|choice|select)\s+(?:one|1|a)\b|\b(?:each|per\s+knife|sold\s+separately)\b/i;
 // Anchored to the title only: a seller stating outright that a "knife" lot holds no knives
 // (empty display boxes, manuals-only estate finds) is a far stronger and safer signal than
@@ -201,6 +213,16 @@ function foldingSignal(text: string) { return foldingPattern.test(text) || brand
 // letting a bare brand match override that rejection let plenty of table cutlery through.
 function explicitFoldingSignal(text: string) { return foldingPattern.test(text) || swissArmyPattern.test(text); }
 
+// Between explicitFoldingSignal and foldingSignal: trusts a bare brand match the same as an
+// explicit folding mention, but only for the "reliable" brand subset (see reliableBrandNames)
+// whose flagship lines are folding knives specifically, not the ambiguous brands that are just as
+// common on kitchen/carving cutlery. Used only by the single-item (no stated count) resolution
+// branch below — a listing with no lot/count wording and no explicit folding wording has the least
+// corroborating evidence, so a bare match on an ambiguous brand there needs a vision check instead
+// of an instant approval. The count-corroborated branch keeps trusting every brand in
+// brandNameList via the broader foldingSignal, since a real stated count is much stronger evidence.
+function singleItemFoldingSignal(text: string) { return foldingPattern.test(text) || reliableBrandKnifePattern.test(text) || swissArmyPattern.test(text); }
+
 export function analyzeListingText(title: string, description = ""): TextAnalysis {
   const text = `${title} ${description}`.replace(/\s+/g, " ").trim();
   if (selectionPattern.test(text)) return { kind: "reject", reason: "selection_listing" };
@@ -227,7 +249,7 @@ export function analyzeListingText(title: string, description = ""): TextAnalysi
   if (count && count <= FINDER_DEFAULTS.maxPlausibleKnifeCount && foldingSignal(text)) {
     return { kind: "resolved", count, containsFoldingKnife: true, confidence: 0.99, ...(swissArmy ? { swissArmy: true as const } : {}) };
   }
-  if (!lotPattern.test(text) && foldingSignal(text) && knifePattern.test(text) && !pluralKnifePattern.test(text)) {
+  if (!lotPattern.test(text) && singleItemFoldingSignal(text) && knifePattern.test(text) && !pluralKnifePattern.test(text)) {
     return { kind: "resolved", count: 1, containsFoldingKnife: true, confidence: 0.95, ...(swissArmy ? { swissArmy: true as const } : {}) };
   }
   // A fixed-blade lot (e.g. a "skinner"/"hunting knife" listing with no folding/brand wording)

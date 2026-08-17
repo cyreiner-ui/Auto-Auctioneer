@@ -49,7 +49,9 @@ const REJECTION_REASON_LABEL: Record<string, string> = {
   low_confidence: "Photo analysis wasn't confident enough",
   low_volume_skip_vision: "Skipped photo analysis — too few qualifying Sheffield sets today to justify the cost",
   no_case: "No case/box shown or mentioned",
+  not_carving_set: "Listing text never actually says \"carving set\"",
   stainless_steel: "Stated or implied stainless steel, not carbon steel",
+  stainless_steel_vision: "Photo confirmed stainless steel, not carbon steel",
   stainless_era_wording: "Wording suggests a later stainless-era set, not carbon steel",
   faux_handle: "Imitation (faux) handle material, typical of later stainless sets",
 };

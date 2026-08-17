@@ -97,13 +97,16 @@ export function carvingSetCeiling(group: CarvingSetGroup, pieceCount: number | n
 }
 
 // Sheffield-only: a Gemini vision call only pays for itself once a run's text pass already found a
-// genuinely large crop of leads to narrow down. Below this, a case-ambiguous Sheffield item is
-// rejected outright instead of spending a vision call (see lib/finder-service.ts's startFinderRun).
-// German has no equivalent gate — every case/piece-ambiguous German item still falls to vision
-// regardless of run volume.
+// genuinely large crop of leads to narrow down. Below this, every Sheffield item still pending on
+// vision (case-ambiguous, or case/ceiling already known from text but material unconfirmed — see
+// initialCarvingSetRow) is rejected outright instead of spending a vision call (see
+// lib/finder-service.ts's startFinderRun, which counts candidates that passed every text check and
+// are within the flat $200 ceiling as this run's "how many good leads" signal, since text alone
+// rarely marks a Sheffield row "qualified" outright anymore). German has no equivalent gate — every
+// case/piece-ambiguous German item still falls to vision regardless of run volume.
 export const SHEFFIELD_VISION_MIN_QUALIFIED = 30;
-export function sheffieldVisionEligible(qualifiedCount: number): boolean {
-  return qualifiedCount > SHEFFIELD_VISION_MIN_QUALIFIED;
+export function sheffieldVisionEligible(eligibleCount: number): boolean {
+  return eligibleCount > SHEFFIELD_VISION_MIN_QUALIFIED;
 }
 
 export type CarvingSetVisionResult = {
@@ -120,14 +123,17 @@ const CARVING_SET_MATERIALS = ["carbon_steel", "stainless_steel", "indeterminate
 
 // Case presence (and, for German, piece count) were always resolved here; material (carbon steel
 // vs. stainless) is now also asked in this same call, folded into the same schema rather than a
-// second Gemini call — but only ever *acted on* for Sheffield (see evaluateCarvingSetVision).
-// German qualifies on either steel type, so its material answer is simply ignored downstream.
+// second Gemini call — and, since every surviving Sheffield candidate now reaches this call to
+// confirm material (see initialCarvingSetRow), not just case-ambiguous ones, this is Sheffield's
+// only real check against the photo, not merely a case-ambiguous fallback. Still only ever *acted
+// on* for Sheffield (see evaluateCarvingSetVision) — German qualifies on either steel type, so its
+// material answer is simply ignored downstream.
 export async function analyzeCarvingSetWithGemini(input: { title: string; description: string; imageUrl: string }): Promise<CarvingSetVisionResult> {
   const key = process.env.GEMINI_API_KEY?.trim();
   if (!key) throw new Error("GEMINI_API_KEY is not configured.");
   await reserveUsage();
   const model = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
-  const prompt = `Analyze this eBay listing for an antique/vintage carving set buyer. A carving set is a carving knife plus a matching serving fork, and often a sharpening steel, typically kept in a fitted presentation case or box. Determine: whether a case or box is visible in the photo, or clearly stated as included; the total number of physical pieces in the set (knife, fork, steel, etc — do not count the case itself as a piece, and do not count repeated views of the same set); and, based purely on the visual appearance of the blades (color, shine, any patina/discoloration, staining), whether the blade material looks like carbon_steel (a dull gray tone, visible patina, or light surface staining/rust) or stainless_steel (bright, uniformly silver, no patina) — answer indeterminate if the photo doesn't show the blades clearly enough to tell. If the photo is unclear, ambiguous, or shows something other than a carving set, lower confidence and explain why. Title: ${input.title.slice(0, 300)}. Description: ${input.description.slice(0, 1200)}.`;
+  const prompt = `Analyze this eBay listing for an antique/vintage carving set buyer. A carving set is a carving knife plus a matching serving fork, and often a sharpening steel, typically kept in a fitted presentation case or box. Determine: whether a case or box is visible in the photo, or clearly stated as included; the total number of physical pieces in the set (knife, fork, steel, etc — do not count the case itself as a piece, and do not count repeated views of the same set); and the blade material. First check whether any text is stamped, engraved, or etched directly on the blade itself indicating material (e.g. "STAINLESS", "STAINLESS STEEL", "18/8", "RUSTLESS") — if so, that marking is decisive: answer stainless_steel or carbon_steel to match it, even if the blade's color/patina looks otherwise. Only when no such marking is visible or legible, fall back to the visual appearance of the blades (color, shine, any patina/discoloration, staining): carbon_steel looks like a dull gray tone, visible patina, or light surface staining/rust, while stainless_steel looks bright and uniformly silver with no patina. Answer indeterminate only if neither a legible marking nor a clear enough photo of the blades is available. If the photo is unclear, ambiguous, or shows something other than a carving set, lower confidence and explain why. Title: ${input.title.slice(0, 300)}. Description: ${input.description.slice(0, 1200)}.`;
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -184,11 +190,11 @@ export type CarvingSetVisionDecision = {
 // mirroring how the pocket-knife pipeline splits vision classification from the shipping fetch.
 export function evaluateCarvingSetVision(group: CarvingSetGroup, vision: CarvingSetVisionResult, confidenceThreshold: number): CarvingSetVisionDecision {
   const confident = vision.confidence >= confidenceThreshold;
-  const ceiling = carvingSetCeiling(group, group === "german" ? vision.pieceCount : null);
+  const ceiling = carvingSetCeiling(group, group !== "sheffield" ? vision.pieceCount : null);
   // Sheffield only, and only an unconditional "stainless_steel" reading rejects — a confident
   // "carbon_steel" or an honest "indeterminate" both pass through, matching the text pipeline's own
-  // default-accept-unless-negative-signal philosophy (see initialCarvingSetRow). German ignores
-  // vision.material entirely, exactly as it ignores the text-based material check today.
+  // default-accept-unless-negative-signal philosophy (see initialCarvingSetRow). German/generic
+  // ignore vision.material entirely, exactly as they ignore the text-based material check today.
   const stainlessConfirmed = group === "sheffield" && vision.material === "stainless_steel";
   const reason = !confident ? (vision.uncertaintyReason || "low_confidence")
     : stainlessConfirmed ? "stainless_steel_vision"
@@ -261,6 +267,12 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
   const text = analyzeCarvingSetText(item.title, item.shortDescription);
   const categoryFields = { item_category: "carving_set" as const, carving_piece_count: text.pieceCount };
 
+  // A free-text eBay search for "sheffield/german carving set" can surface listings that never
+  // actually contain "carving set"/"carving knife and fork" wording at all (e.g. a cased pocket
+  // knife, or unrelated cutlery, that merely shares a keyword's brand/region name) — reject those
+  // outright before any case/material logic below ever runs.
+  if (!text.isCarvingSet) return { ...base, ...categoryFields, status: "rejected", reason: "not_carving_set", processed_at: new Date().toISOString() };
+
   // Material is resolved from text alone, never vision, and only ever applies to Sheffield —
   // German and generic sets qualify on either steel type. Most real listings say neither "carbon steel" nor
   // "stainless" at all, so this can't be an explicit-match-required check — it defaults to
@@ -272,7 +284,9 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
   // sets, regardless of what an individual listing claims), post-war era/style wording, or "faux"
   // handle material — the latter two are weaker, dataset-derived correlations rather than
   // production-history facts, so they get their own reason strings (not "stainless_steel") to stay
-  // diagnostic if they ever need to be dialed back.
+  // diagnostic if they ever need to be dialed back. This only ever *rejects* outright on a negative
+  // signal — it never itself confirms carbon steel; a surviving Sheffield candidate's material
+  // stays merely assumed until the vision check below confirms it (see that comment for why).
   if (group === "sheffield") {
     const fullText = `${item.title} ${item.shortDescription}`;
     if (knownStainlessSheffieldBrandsPattern.test(fullText) || text.stainless) {
@@ -287,7 +301,13 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
   }
 
   const ceiling = carvingSetCeiling(group, text.pieceCount);
-  if (text.hasCase && ceiling != null) {
+
+  // German and generic only: case plus a usable piece count are enough to fully resolve from text
+  // alone, since neither has a material requirement. Sheffield never finalizes here even once text
+  // confirms case — the checks above only ever *reject* on a negative material signal, they never
+  // *confirm* carbon steel, so a surviving Sheffield candidate still needs a vision material check
+  // (below) before it can qualify, even though its case/ceiling are already known.
+  if (group !== "sheffield" && text.hasCase && ceiling != null) {
     const knownFields = {
       ...categoryFields,
       knife_count: 1 as const,
@@ -295,10 +315,7 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
       confidence: 0.95,
       detection_source: "text" as const,
       carving_has_case: true,
-      // Fixed, group-derived value — never read from text/vision. Sheffield sets that reach this
-      // point already passed the material exclusion checks above (assumed carbon steel); German
-      // and generic sets have no material requirement at all, so null (not applicable), not "unknown".
-      carving_carbon_steel: group === "sheffield" ? true : null,
+      carving_carbon_steel: null,
     };
     const deal = dealAgainstCeiling(item.itemPrice, item.shippingCost, ceiling);
     if (!deal.resolved) {
@@ -308,10 +325,20 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
     return { ...base, ...knownFields, status: deal.qualifies ? "qualified" : "rejected", reason: deal.qualifies ? null : "over_budget", total_cost: deal.totalCost, cost_per_knife: deal.totalCost, processed_at: new Date().toISOString() };
   }
 
-  // Text alone couldn't confirm everything (case, or for German/generic, a usable piece count) — fall to
-  // vision, same text-first/vision-fallback shape as the pocket-knife pipeline, but via
-  // analyzeCarvingSetWithGemini instead of countKnivesWithGemini. Material is already fully and
-  // finally resolved by this point (accepted or rejected above), so it carries straight through.
+  // Sheffield's ceiling is always the flat $200 regardless of case/vision, so an obviously
+  // overpriced candidate can still be rejected without spending a vision call on it — mirrors the
+  // price-alone-already-over-budget shortcut the (now German/generic-only) fast path above still
+  // uses; not worth paying for a photo just to confirm what the price already rules out.
+  if (group === "sheffield" && ceiling != null && item.itemPrice > ceiling) {
+    return { ...base, ...categoryFields, status: "rejected", reason: "over_budget", processed_at: new Date().toISOString() };
+  }
+
+  // Text alone couldn't finalize this row: German/generic still need vision to confirm case and/or
+  // a usable piece count, and Sheffield — whose case/ceiling may already be fully known from text —
+  // still needs a vision material check (see analyzeCarvingSetWithGemini/evaluateCarvingSetVision)
+  // before it can qualify, since the checks above only ever rule material out, never confirm it.
+  // Same text-first/vision-fallback shape as the pocket-knife pipeline, but via
+  // analyzeCarvingSetWithGemini instead of countKnivesWithGemini.
   const carvingCarbonSteel = group === "sheffield" ? true : null;
   if (!item.imageUrl) return { ...base, ...categoryFields, carving_carbon_steel: carvingCarbonSteel, status: "rejected", reason: "missing_image", processed_at: new Date().toISOString() };
   return { ...base, ...categoryFields, carving_carbon_steel: carvingCarbonSteel, status: "pending", reason: null, next_attempt_at: new Date().toISOString() };

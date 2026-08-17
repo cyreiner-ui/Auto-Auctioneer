@@ -84,6 +84,27 @@ test("does not treat a lot number before a brand name as a quantity", () => {
   assert.deepEqual(analyzeListingText("Lot 45 Buck Knife"), { kind: "vision" });
 });
 
+test("defers a bare single-item match on an ambiguous brand (no stated count, no explicit folding wording) to vision instead of auto-approving it, since these brands are just as common on kitchen/carving cutlery", () => {
+  const ambiguousBrandTitles = [
+    "Case Knife", "Winchester Knife", "Colt Knife", "Remington Knife",
+    "Camillus Knife", "Old Timer Knife", "Browning Knife", "Imperial Knife",
+  ];
+  for (const title of ambiguousBrandTitles) {
+    assert.deepEqual(analyzeListingText(title), { kind: "vision" }, `"${title}" should defer to vision`);
+  }
+});
+
+test("still auto-resolves a bare single-item match on a reliable brand (flagship line is folding pocket knives), unaffected by the ambiguous-brand split", () => {
+  const reliableBrandTitles = ["Buck Knife", "Kershaw Knife", "Gerber Knife", "Spyderco Knife", "Benchmade Knife", "CRKT Knife", "SOG Knife"];
+  for (const title of reliableBrandTitles) {
+    assert.deepEqual(analyzeListingText(title), { kind: "resolved", count: 1, containsFoldingKnife: true, confidence: 0.95 }, `"${title}" should still auto-resolve`);
+  }
+});
+
+test("a stated count still trusts an ambiguous brand the same as a reliable one, since a real count is stronger corroborating evidence than a bare single-item brand match", () => {
+  assert.deepEqual(analyzeListingText("4 Case Knives"), { kind: "resolved", count: 4, containsFoldingKnife: true, confidence: 0.99 });
+});
+
 test("does not sum a title's stated total with a brand-anchored breakdown of that same total", () => {
   const title = "3 Knives   1 BYRD/ 2 COAST KNIVES   Airport Confiscation          LOT 508";
   assert.deepEqual(analyzeListingText(title), { kind: "resolved", count: 3, containsFoldingKnife: true, confidence: 0.99 });

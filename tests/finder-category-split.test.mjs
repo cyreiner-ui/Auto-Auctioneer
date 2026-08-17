@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import nodemailer from "nodemailer";
 import { PATCH as keywordsPatch } from "../app/api/finder/keywords/route.ts";
-import { archivedFinderItems, finderOverview, startFinderRun } from "../lib/finder-service.ts";
+import { archivedFinderItems, finderOverview, processPendingFinderItems, startFinderRun } from "../lib/finder-service.ts";
 import { COOKIE_NAME, staffSessionToken } from "../lib/staff-auth.ts";
 import { supabaseAdmin } from "../lib/supabase-admin.ts";
 import { createFakeSupabase } from "./helpers/fake-supabase.mjs";
@@ -177,6 +177,20 @@ test("an unscoped (automated) active run blocks a scoped manual run from startin
   });
 });
 
+// A Sheffield carving-set candidate now always needs a vision material check before it can
+// qualify (see lib/carving-set-finder.ts's initialCarvingSetRow), gated by the same 30-candidate
+// volume threshold as a case-ambiguous item — so this run needs more than 30 Sheffield candidates
+// to ever reach vision at all. 30 fixed-price padding items (skipped by the default auctions_only
+// notify mode, so they generate no emails of their own) plus the one real AUCTION target item
+// clears that gate without disturbing the "one email per category" assertion this test exists for.
+function shefPaddingItem(index) {
+  return {
+    itemId: `v1|carving-pad-${index}|0`, title: "Sheffield Carving Set with Fitted Case",
+    shortDescription: "", itemWebUrl: `https://www.ebay.com/itm/carving-pad-${index}`, image: { imageUrl: `https://i.ebayimg.com/carving-pad-${index}.jpg` },
+    price: { value: "150.00", currency: "USD" }, shippingOptions: [{ shippingCost: { value: "0.00", currency: "USD" } }], buyingOptions: ["FIXED_PRICE"],
+  };
+}
+
 test("a single run that qualifies both a pocket-knife and a carving-set item sends two separate emails, never one mixed email", async (t) => {
   await withEnv(ENV, async () => {
     const sent = [];
@@ -192,11 +206,14 @@ test("a single run that qualifies both a pocket-knife and a carving-set item sen
         {
           test: (url) => url.startsWith(SEARCH_URL),
           respond: (url) => new URL(url).searchParams.get("q").startsWith("sheffield carving set")
-            ? jsonResponse({ itemSummaries: [{
-                itemId: "v1|carving|0", title: "Antique Sheffield Carving Set, carbon steel blade, with fitted case",
-                shortDescription: "", itemWebUrl: "https://www.ebay.com/itm/carving", image: { imageUrl: "https://i.ebayimg.com/carving.jpg" },
-                price: { value: "180.00", currency: "USD" }, shippingOptions: [{ shippingCost: { value: "0.00", currency: "USD" } }], buyingOptions: ["AUCTION"],
-              }] })
+            ? jsonResponse({ itemSummaries: [
+                ...Array.from({ length: 30 }, (_, index) => shefPaddingItem(index)),
+                {
+                  itemId: "v1|carving|0", title: "Antique Sheffield Carving Set, carbon steel blade, with fitted case",
+                  shortDescription: "", itemWebUrl: "https://www.ebay.com/itm/carving", image: { imageUrl: "https://i.ebayimg.com/carving.jpg" },
+                  price: { value: "180.00", currency: "USD" }, shippingOptions: [{ shippingCost: { value: "0.00", currency: "USD" } }], buyingOptions: ["AUCTION"],
+                },
+              ] })
             : jsonResponse({ itemSummaries: [{
                 itemId: "v1|pocket|0", title: "Lot of 10 Smith & Wesson Pocket Knives",
                 shortDescription: "", itemWebUrl: "https://www.ebay.com/itm/pocket", image: { imageUrl: "https://i.ebayimg.com/pocket.jpg" },
@@ -205,18 +222,26 @@ test("a single run that qualifies both a pocket-knife and a carving-set item sen
         },
       ], async () => {
         const { run } = await startFinderRun("manual", "run-mixed-categories");
-        assert.equal(run.qualified, 2);
-        assert.equal(sent.length, 2, "one email per category, never combined");
-        const subjects = sent.map((message) => message.subject).sort();
-        assert.match(subjects[0], /carving set/);
-        assert.match(subjects[1], /pocket knife/);
-        const carvingEmail = sent.find((message) => /carving set/.test(message.subject));
-        const pocketEmail = sent.find((message) => /pocket knife/.test(message.subject));
-        assert.match(carvingEmail.html, /Sheffield Carving Set/);
-        assert.doesNotMatch(carvingEmail.html, /Smith &amp; Wesson/);
-        assert.match(pocketEmail.html, /Smith &amp; Wesson/);
-        assert.doesNotMatch(pocketEmail.html, /Sheffield Carving Set/);
+        assert.equal(run.qualified, 1, "the pocket-knife item resolves and qualifies from text alone; every Sheffield candidate is left pending on vision");
+        assert.equal(sent.length, 1, "only the pocket-knife email fires from this run's text pass");
       });
+      await withFetch([
+        { test: (url) => url.includes("i.ebayimg.com"), respond: () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/jpeg" } }) },
+        { test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => jsonResponse({ candidates: [{ content: { parts: [{ text: JSON.stringify({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel" }) }] } }] }) },
+      ], async () => {
+        const { processed } = await processPendingFinderItems(40);
+        assert.equal(processed, 31, "all 30 padding items plus the one real target item get vision-confirmed");
+        assert.equal(sent.length, 2, "one email per category, never combined");
+      });
+      const subjects = sent.map((message) => message.subject).sort();
+      assert.match(subjects[0], /carving set/);
+      assert.match(subjects[1], /pocket knife/);
+      const carvingEmail = sent.find((message) => /carving set/.test(message.subject));
+      const pocketEmail = sent.find((message) => /pocket knife/.test(message.subject));
+      assert.match(carvingEmail.html, /Sheffield Carving Set/);
+      assert.doesNotMatch(carvingEmail.html, /Smith &amp; Wesson/);
+      assert.match(pocketEmail.html, /Smith &amp; Wesson/);
+      assert.doesNotMatch(pocketEmail.html, /Sheffield Carving Set/);
     });
   });
 });
