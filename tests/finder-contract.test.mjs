@@ -17,6 +17,22 @@ test("rejects choose-one listings and sends ambiguous lots to vision", () => {
   assert.deepEqual(analyzeListingText("TSA confiscated knives assorted lot"), { kind: "vision" });
 });
 
+test("rejects genuine per-item-price selection listings worded without choose/select", () => {
+  assert.deepEqual(analyzeListingText("Pocket knife lot", "$15 each, pick your favorite"), { kind: "reject", reason: "selection_listing" });
+  assert.deepEqual(analyzeListingText("Folding knife lot", "Lot of 5, each sold separately"), { kind: "reject", reason: "selection_listing" });
+});
+
+test("does not mistake routine descriptive boilerplate for a per-item selection listing", () => {
+  assert.deepEqual(
+    analyzeListingText("Lot of 20 Handmade Damascus Steel Pocket Folding Knife", "Each knife is individually handcrafted, so slight variations in the pattern are natural."),
+    { kind: "resolved", count: 20, containsFoldingKnife: true, confidence: 0.99 },
+  );
+  assert.deepEqual(
+    analyzeListingText("Pocket Knife Lot Of 10", "Each knife features stainless steel blades and a manual opening mechanism."),
+    { kind: "resolved", count: 10, containsFoldingKnife: true, confidence: 0.99 },
+  );
+});
+
 test("does not mistake auction lot numbering for a knife count", () => {
   assert.deepEqual(analyzeListingText("Lot 45 folding pocket knife"), { kind: "vision" });
 });

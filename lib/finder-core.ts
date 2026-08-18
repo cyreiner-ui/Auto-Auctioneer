@@ -100,7 +100,13 @@ const brandKnifePattern = new RegExp(`\\b(?:${brandNames})\\b(?:\\s+[A-Za-z][\\w
 const AMBIGUOUS_BRAND_NAMES = new Set(["case", "winchester", "colt", "remington", "camillus", "old\\s*timer", "browning", "imperial"]);
 const reliableBrandNames = brandNameList.filter((name) => !AMBIGUOUS_BRAND_NAMES.has(name)).join("|");
 const reliableBrandKnifePattern = new RegExp(`\\b(?:${reliableBrandNames})\\b(?:\\s+[A-Za-z][\\w.'-]{0,20}){0,4}?\\s*kn(?:ife|ives|ifes)\\b`, "i");
-const selectionPattern = /\b(?:choose|choice|select)\s+(?:one|1|a)\b|\b(?:each|per\s+knife|sold\s+separately)\b/i;
+// A bare "each" used to be enough to reject here, meant to catch "$5 each, choose one" per-item
+// listings — but production data showed it matching routine descriptive boilerplate instead
+// ("Each knife is carefully crafted...", "each featuring a manual opening mechanism") in ordinary
+// fixed-quantity lots (97.5% of selection_listing rejections had no choose/select/sold-separately
+// wording anywhere in the title). "each" now only counts alongside real per-item-price or
+// selection-sale wording.
+const selectionPattern = /\b(?:choose|choice|select)\s+(?:one|1|a)\b|\bper\s+knife\b|\bsold\s+separately\b|\$\s*\d+(?:\.\d{2})?\s*(?:each|apiece)\b|\beach\s+(?:is\s+)?sold\s+separately\b|\beach\s+listing\b/i;
 // Anchored to the title only: a seller stating outright that a "knife" lot holds no knives
 // (empty display boxes, manuals-only estate finds) is a far stronger and safer signal than
 // scanning the full description, where an aside about one empty accessory (e.g. a sheath) sold
