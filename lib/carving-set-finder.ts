@@ -252,26 +252,26 @@ export type CarvingSetExistingRow = {
   shipping_source: string | null;
 };
 
-// Mirrors initialRow's contract in lib/finder-service.ts (same base fields, same status/pending
-// shape for the finder_items upsert) but via wholly separate qualification logic. knife_count is
-// always written as 1 — a carving set is one unit; piece count only ever feeds the German pricing
-// formula, never the qualification divisor (that's the exact "3 piece set" miscount risk this
-// separation exists to avoid).
-export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: string[], runId: string, group: CarvingSetGroup) {
-  const base = baseRow(item, keywordPhrases, runId);
-  if (item.currency !== "USD") return { ...base, status: "rejected", reason: "non_usd_currency", processed_at: new Date().toISOString() };
-  if (item.shippingCost != null && item.shippingCurrency !== "USD") return { ...base, status: "rejected", reason: "non_usd_shipping", processed_at: new Date().toISOString() };
-  if (!Number.isFinite(item.itemPrice) || item.itemPrice < 0) return { ...base, status: "rejected", reason: "invalid_price", processed_at: new Date().toISOString() };
-  if (item.itemEndDate && new Date(item.itemEndDate).getTime() <= Date.now()) return { ...base, status: "rejected", reason: "ended", processed_at: new Date().toISOString() };
+export type CarvingSetTextDecision =
+  | { kind: "reject"; reason: string; pieceCount: number | null }
+  | { kind: "resolved"; qualifies: boolean; reason: string | null; pieceCount: number | null; totalCost: number }
+  | { kind: "needs-shipping"; ceiling: number; pieceCount: number | null }
+  | { kind: "vision"; pieceCount: number | null };
 
-  const text = analyzeCarvingSetText(item.title, item.shortDescription);
-  const categoryFields = { item_category: "carving_set" as const, carving_piece_count: text.pieceCount };
+// The text-only qualification decision, independent of the item's currency/price/end-date and of
+// whether a photo is available — shared by initialCarvingSetRow (discovery, during the scan) and
+// processCarvingSetRow's pending-queue re-check (lib/finder-service.ts, after the item's full eBay
+// description is fetched lazily rather than eagerly during the scan — see the comment on the
+// removed scan-time description fetch in startFinderRun for why). Both callers evaluate identical
+// title/description text the same way; only when in the pipeline it happens differs.
+export function decideCarvingSetFromText(title: string, description: string, group: CarvingSetGroup, itemPrice: number, shippingCost: number | null): CarvingSetTextDecision {
+  const text = analyzeCarvingSetText(title, description);
 
   // A free-text eBay search for "sheffield/german carving set" can surface listings that never
   // actually contain "carving set"/"carving knife and fork" wording at all (e.g. a cased pocket
   // knife, or unrelated cutlery, that merely shares a keyword's brand/region name) — reject those
   // outright before any case/material logic below ever runs.
-  if (!text.isCarvingSet) return { ...base, ...categoryFields, status: "rejected", reason: "not_carving_set", processed_at: new Date().toISOString() };
+  if (!text.isCarvingSet) return { kind: "reject", reason: "not_carving_set", pieceCount: text.pieceCount };
 
   // Material is resolved from text alone, never vision, and only ever applies to Sheffield —
   // German and generic sets qualify on either steel type. Most real listings say neither "carbon steel" nor
@@ -288,16 +288,10 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
   // signal — it never itself confirms carbon steel; a surviving Sheffield candidate's material
   // stays merely assumed until the vision check below confirms it (see that comment for why).
   if (group === "sheffield") {
-    const fullText = `${item.title} ${item.shortDescription}`;
-    if (knownStainlessSheffieldBrandsPattern.test(fullText) || text.stainless) {
-      return { ...base, ...categoryFields, status: "rejected", reason: "stainless_steel", processed_at: new Date().toISOString() };
-    }
-    if (stainlessEraPattern.test(fullText)) {
-      return { ...base, ...categoryFields, status: "rejected", reason: "stainless_era_wording", processed_at: new Date().toISOString() };
-    }
-    if (fauxHandlePattern.test(fullText)) {
-      return { ...base, ...categoryFields, status: "rejected", reason: "faux_handle", processed_at: new Date().toISOString() };
-    }
+    const fullText = `${title} ${description}`;
+    if (knownStainlessSheffieldBrandsPattern.test(fullText) || text.stainless) return { kind: "reject", reason: "stainless_steel", pieceCount: text.pieceCount };
+    if (stainlessEraPattern.test(fullText)) return { kind: "reject", reason: "stainless_era_wording", pieceCount: text.pieceCount };
+    if (fauxHandlePattern.test(fullText)) return { kind: "reject", reason: "faux_handle", pieceCount: text.pieceCount };
   }
 
   const ceiling = carvingSetCeiling(group, text.pieceCount);
@@ -308,30 +302,19 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
   // *confirm* carbon steel, so a surviving Sheffield candidate still needs a vision material check
   // (below) before it can qualify, even though its case/ceiling are already known.
   if (group !== "sheffield" && text.hasCase && ceiling != null) {
-    const knownFields = {
-      ...categoryFields,
-      knife_count: 1 as const,
-      contains_folding_knife: false as const,
-      confidence: 0.95,
-      detection_source: "text" as const,
-      carving_has_case: true,
-      carving_carbon_steel: null,
-    };
-    const deal = dealAgainstCeiling(item.itemPrice, item.shippingCost, ceiling);
+    const deal = dealAgainstCeiling(itemPrice, shippingCost, ceiling);
     if (!deal.resolved) {
-      if (deal.overBudgetOnPriceAlone) return { ...base, ...knownFields, status: "rejected", reason: "over_budget", processed_at: new Date().toISOString() };
-      return { ...base, ...knownFields, status: "pending", reason: null, next_attempt_at: new Date().toISOString() };
+      if (deal.overBudgetOnPriceAlone) return { kind: "reject", reason: "over_budget", pieceCount: text.pieceCount };
+      return { kind: "needs-shipping", ceiling, pieceCount: text.pieceCount };
     }
-    return { ...base, ...knownFields, status: deal.qualifies ? "qualified" : "rejected", reason: deal.qualifies ? null : "over_budget", total_cost: deal.totalCost, cost_per_knife: deal.totalCost, processed_at: new Date().toISOString() };
+    return { kind: "resolved", qualifies: deal.qualifies, reason: deal.qualifies ? null : "over_budget", pieceCount: text.pieceCount, totalCost: deal.totalCost };
   }
 
   // Sheffield's ceiling is always the flat $200 regardless of case/vision, so an obviously
   // overpriced candidate can still be rejected without spending a vision call on it — mirrors the
   // price-alone-already-over-budget shortcut the (now German/generic-only) fast path above still
   // uses; not worth paying for a photo just to confirm what the price already rules out.
-  if (group === "sheffield" && ceiling != null && item.itemPrice > ceiling) {
-    return { ...base, ...categoryFields, status: "rejected", reason: "over_budget", processed_at: new Date().toISOString() };
-  }
+  if (group === "sheffield" && ceiling != null && itemPrice > ceiling) return { kind: "reject", reason: "over_budget", pieceCount: text.pieceCount };
 
   // Text alone couldn't finalize this row: German/generic still need vision to confirm case and/or
   // a usable piece count, and Sheffield — whose case/ceiling may already be fully known from text —
@@ -339,6 +322,36 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
   // before it can qualify, since the checks above only ever rule material out, never confirm it.
   // Same text-first/vision-fallback shape as the pocket-knife pipeline, but via
   // analyzeCarvingSetWithGemini instead of countKnivesWithGemini.
+  return { kind: "vision", pieceCount: text.pieceCount };
+}
+
+// Mirrors initialRow's contract in lib/finder-service.ts (same base fields, same status/pending
+// shape for the finder_items upsert) but via wholly separate qualification logic. knife_count is
+// always written as 1 — a carving set is one unit; piece count only ever feeds the German pricing
+// formula, never the qualification divisor (that's the exact "3 piece set" miscount risk this
+// separation exists to avoid).
+export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: string[], runId: string, group: CarvingSetGroup) {
+  const base = baseRow(item, keywordPhrases, runId);
+  if (item.currency !== "USD") return { ...base, status: "rejected", reason: "non_usd_currency", processed_at: new Date().toISOString() };
+  if (item.shippingCost != null && item.shippingCurrency !== "USD") return { ...base, status: "rejected", reason: "non_usd_shipping", processed_at: new Date().toISOString() };
+  if (!Number.isFinite(item.itemPrice) || item.itemPrice < 0) return { ...base, status: "rejected", reason: "invalid_price", processed_at: new Date().toISOString() };
+  if (item.itemEndDate && new Date(item.itemEndDate).getTime() <= Date.now()) return { ...base, status: "rejected", reason: "ended", processed_at: new Date().toISOString() };
+
+  const decision = decideCarvingSetFromText(item.title, item.shortDescription, group, item.itemPrice, item.shippingCost);
+  const categoryFields = { item_category: "carving_set" as const, carving_piece_count: decision.pieceCount };
+
+  if (decision.kind === "reject") return { ...base, ...categoryFields, status: "rejected", reason: decision.reason, processed_at: new Date().toISOString() };
+
+  if (decision.kind === "resolved") {
+    const knownFields = { ...categoryFields, knife_count: 1 as const, contains_folding_knife: false as const, confidence: 0.95, detection_source: "text" as const, carving_has_case: true, carving_carbon_steel: null };
+    return { ...base, ...knownFields, status: decision.qualifies ? "qualified" : "rejected", reason: decision.reason, total_cost: decision.totalCost, cost_per_knife: decision.totalCost, processed_at: new Date().toISOString() };
+  }
+
+  if (decision.kind === "needs-shipping") {
+    const knownFields = { ...categoryFields, knife_count: 1 as const, contains_folding_knife: false as const, confidence: 0.95, detection_source: "text" as const, carving_has_case: true, carving_carbon_steel: null };
+    return { ...base, ...knownFields, status: "pending", reason: null, next_attempt_at: new Date().toISOString() };
+  }
+
   const carvingCarbonSteel = group === "sheffield" ? true : null;
   if (!item.imageUrl) return { ...base, ...categoryFields, carving_carbon_steel: carvingCarbonSteel, status: "rejected", reason: "missing_image", processed_at: new Date().toISOString() };
   return { ...base, ...categoryFields, carving_carbon_steel: carvingCarbonSteel, status: "pending", reason: null, next_attempt_at: new Date().toISOString() };

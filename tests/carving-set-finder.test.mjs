@@ -123,9 +123,14 @@ const ENV = {
 
 const TOKEN_URL = "https://api.sandbox.ebay.com/identity/v1/oauth2/token";
 const SEARCH_URL = "https://api.sandbox.ebay.com/buy/browse/v1/item_summary/search";
+const ITEM_URL = "https://api.sandbox.ebay.com/buy/browse/v1/item/";
 const tokenRoute = { test: (url) => url.startsWith(TOKEN_URL), respond: () => jsonResponse({ access_token: "fake-token" }) };
 const imageRoute = { test: (url) => url.includes("i.ebayimg.com"), respond: () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/jpeg" } }) };
 const geminiRoute = (body) => ({ test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => jsonResponse({ candidates: [{ content: { parts: [{ text: JSON.stringify(body) }] } }] }) });
+// processCarvingSetRow now fetches the item's full description (lazily, one row at a time) before
+// ever falling through to vision — see the comment above that fetch in lib/finder-service.ts.
+// Every pending-queue vision test needs this mocked too, alongside imageRoute/geminiRoute.
+const descriptionRoute = { test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ description: "" }) };
 
 function carvingItem(overrides = {}) {
   return {
@@ -467,7 +472,7 @@ test("startFinderRun leaves every Sheffield candidate pending for vision once th
         assert.equal(fake.tables.finder_items.length, 31);
         for (const row of fake.tables.finder_items) assert.equal(row.status, "pending", "more than 30 pending-for-vision candidates leaves every one of them eligible for vision");
       });
-      await withFetch([imageRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel" })], async () => {
+      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel" })], async () => {
         const { processed } = await processPendingFinderItems(40);
         assert.equal(processed, 31);
         for (const row of fake.tables.finder_items) {
@@ -495,7 +500,7 @@ test("processPendingFinderItems rejects a Sheffield set as stainless_steel_visio
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "stainless_steel" })], async () => {
+      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "stainless_steel" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -543,7 +548,7 @@ test("processPendingFinderItems falls back to vision when the case isn't mention
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ hasCase: false, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel" })], async () => {
+      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: false, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -570,7 +575,7 @@ test("processPendingFinderItems qualifies a Sheffield set via vision once case i
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([imageRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel" })], async () => {
+      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -578,6 +583,63 @@ test("processPendingFinderItems qualifies a Sheffield set via vision once case i
         assert.equal(item.total_cost, 160);
         assert.equal(item.carving_has_case, true);
         assert.equal(item.carving_carbon_steel, true, "a confident carbon_steel vision reading doesn't overturn the row's already-resolved material");
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems fetches the full description first and rejects a Sheffield set as stainless_steel from text alone, without ever spending a vision call", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [{
+        // eBay's search endpoint returned a blank shortDescription, so this row reached "pending"
+        // with material merely assumed (carving_carbon_steel: true) — the same shape startFinderRun
+        // now always leaves behind for a carving-set item, since the description fetch that used to
+        // happen eagerly during the scan happens here instead (see the comment on the removed
+        // scan-time fetch in startFinderRun).
+        ebay_item_id: "v1|lazy-stainless|0", run_id: null, keyword_phrases: ["sheffield carving set"],
+        title: "Antique Sheffield Carving Set, with fitted case", short_description: "",
+        carving_carbon_steel: true,
+        image_url: "https://i.ebayimg.com/lazy-stainless.jpg", item_price: 150, shipping_cost: 10, buying_options: ["FIXED_PRICE"],
+        status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+      }],
+    }, async (fake) => {
+      const fullDescriptionRoute = { test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ description: "Blade stamped STAINLESS STEEL, Sheffield England." }) };
+      await withFetch([tokenRoute, fullDescriptionRoute], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected");
+        assert.equal(item.reason, "stainless_steel", "resolved from the newly-fetched description, no vision call needed (none was mocked)");
+        assert.equal(item.short_description, "Blade stamped STAINLESS STEEL, Sheffield England.", "the fetched description is persisted, not left blank");
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems fetches the full description first and qualifies a German set from text alone once it reveals a case and piece count, without ever spending a vision call", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [{
+        ebay_item_id: "v1|lazy-german|0", run_id: null, keyword_phrases: ["german carving set"],
+        title: "Wusthof Carving Set", short_description: "",
+        image_url: "https://i.ebayimg.com/lazy-german.jpg", item_price: 40, shipping_cost: 0, buying_options: ["FIXED_PRICE"],
+        status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+      }],
+    }, async (fake) => {
+      const fullDescriptionRoute = { test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ description: "This 3 piece set comes cased, in excellent condition." }) };
+      await withFetch([tokenRoute, fullDescriptionRoute], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "qualified", "3 pieces caps at $45 (10*3+15), $40 total qualifies");
+        assert.equal(item.detection_source, "text");
+        assert.equal(item.carving_piece_count, 3);
+        assert.equal(item.total_cost, 40);
       });
     });
   });

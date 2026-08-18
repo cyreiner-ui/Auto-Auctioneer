@@ -7,6 +7,7 @@ import {
   carvingSetCeiling,
   carvingSetGroupForPhrases,
   CARVING_SET_PHRASES,
+  decideCarvingSetFromText,
   evaluateCarvingSetVision,
   refreshedCarvingSetRow,
   sheffieldVisionEligible,
@@ -433,23 +434,16 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     // time budget before the scan even finished, which is exactly what left production runs
     // stuck at "running" with a partial keywords_scanned count and no way to retry that day.
     await mapWithConcurrency(keywords || [], config().scanConcurrency, scanKeyword);
-    // Carving-set listings (only) get their full eBay description fetched here, before
-    // qualification ever runs — item_summary/search's shortDescription is frequently blank or
-    // truncated, which is exactly what leaves genuinely-informative listings (material, maker,
-    // condition wording the negative-keyword checks in carving-set-finder.ts depend on) falling
-    // through to a vision call instead of resolving from text. Mutates `item` in place (found's
-    // values are object references), so the enriched description flows straight into
-    // initialCarvingSetRow/refreshedCarvingSetRow below with no other change needed. Scoped to
-    // carving-set items only — the pocket-knife pipeline has no material check and doesn't need it.
-    await mapWithConcurrency([...found.values()], config().scanConcurrency, async ({ item, phrases }) => {
-      if (!carvingSetGroupForPhrases(phrases)) return;
-      try {
-        const description = await getItemDescription(item.itemId, token || undefined);
-        if (description) item.shortDescription = description;
-      } catch (error) {
-        errors.push(error instanceof Error ? error.message : `Description lookup failed for ${item.itemId}.`);
-      }
-    });
+    // Carving-set items' full eBay description used to be fetched here, eagerly, for every item
+    // found — one network call per item, hundreds per run for a broad keyword like "carving set".
+    // That reliably blew this route's 60-second serverless budget (Vercel's own platform limit,
+    // not the app-level 15-minute finder_runs watchdog — see RUN_LOCK_WINDOW_MS above) whenever a
+    // scan turned up enough items, which is exactly what left carving_set runs stuck "running"
+    // with items_seen at 0 until the watchdog reconciled them as abandoned. The description fetch
+    // (and the text re-check it enables) now happens lazily, per item, inside
+    // processPendingFinderItems's processCarvingSetRow — the same incremental, tick-bounded queue
+    // that already handles Gemini vision — so no single scan invocation's duration depends on how
+    // many carving-set listings a keyword happens to match.
     const ids = [...found.keys()];
     const existingById = new Map<string, ExistingFinderRow>();
     for (let index = 0; index < ids.length; index += 200) {
@@ -554,12 +548,59 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         processed++;
         return;
       }
+      // The full eBay description used to be fetched eagerly for every carving-set item during
+      // startFinderRun's scan; it's now fetched here instead, lazily and one row at a time, so no
+      // single scan invocation's duration depends on how many listings a keyword happens to match
+      // (see the comment above the removed scan-time fetch in startFinderRun). Re-running the text
+      // decision against the enriched description first — before ever touching Gemini — often
+      // resolves the row outright (the same benefit the eager fetch existed for), and always gives
+      // vision better context on the description it does still need to fall through to.
+      const description = await getItemDescription(row.ebay_item_id, await tokenForLookup());
+      const textDecision = decideCarvingSetFromText(row.title, description, group, Number(row.item_price), row.shipping_cost == null ? null : Number(row.shipping_cost));
+      if (textDecision.kind === "reject") {
+        const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: "rejected", reason: textDecision.reason, item_category: "carving_set", carving_piece_count: textDecision.pieceCount, short_description: description, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
+        if (saveError) throw new Error(saveError.message);
+        processed++;
+        return;
+      }
+      if (textDecision.kind === "resolved" || textDecision.kind === "needs-shipping") {
+        let shippingValue = row.shipping_cost == null ? null : Number(row.shipping_cost);
+        let shippingSource = row.shipping_source;
+        let totalCost: number | null;
+        let qualifies: boolean;
+        let reason: string | null;
+        if (textDecision.kind === "resolved") {
+          totalCost = textDecision.totalCost;
+          qualifies = textDecision.qualifies;
+          reason = textDecision.reason;
+        } else {
+          const shipping = await getItemShippingCost(row.ebay_item_id, await tokenForLookup());
+          if (shipping.value != null && (shipping.currency === "" || shipping.currency === "USD")) { shippingValue = shipping.value; shippingSource = "lookup"; }
+          totalCost = shippingValue != null ? Math.round((Number(row.item_price) + shippingValue) * 100) / 100 : null;
+          qualifies = totalCost != null && totalCost <= textDecision.ceiling;
+          reason = shippingValue == null ? "missing_shipping" : (qualifies ? null : "over_budget");
+        }
+        const { error: saveError } = await supabaseAdmin.from("finder_items").update({
+          status: qualifies ? "qualified" : "rejected", reason,
+          knife_count: 1, contains_folding_knife: false, confidence: 0.95, detection_source: "text", item_category: "carving_set",
+          carving_piece_count: textDecision.pieceCount, carving_has_case: true, carving_carbon_steel: null,
+          shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null,
+          total_cost: totalCost, cost_per_knife: totalCost, short_description: description,
+          attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),
+        }).eq("ebay_item_id", row.ebay_item_id);
+        if (saveError) throw new Error(saveError.message);
+        if (qualifies) qualifiedIds.push(row.ebay_item_id);
+        processed++;
+        return;
+      }
+      // textDecision.kind === "vision": still needs a photo (case ambiguous, or — Sheffield only —
+      // material unconfirmed), even with the now-enriched description in hand.
       if (visionExhaustedMessage) {
-        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: visionExhaustedMessage }).eq("ebay_item_id", row.ebay_item_id);
+        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: visionExhaustedMessage, short_description: description }).eq("ebay_item_id", row.ebay_item_id);
         deferred++;
         return;
       }
-      const vision = await analyzeCarvingSetWithGemini({ title: row.title, description: row.short_description, imageUrl: row.image_url || "" });
+      const vision = await analyzeCarvingSetWithGemini({ title: row.title, description, imageUrl: row.image_url || "" });
       const decision = evaluateCarvingSetVision(group, vision, config().confidence);
       let shippingValue = row.shipping_cost == null ? null : Number(row.shipping_cost);
       let shippingSource = row.shipping_source;
@@ -586,7 +627,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         // keeps rejecting it instead of silently re-qualifying a confirmed-stainless set.
         carving_piece_count: vision.pieceCount || null, carving_has_case: vision.hasCase, carving_carbon_steel: decision.reason === "stainless_steel_vision" ? false : row.carving_carbon_steel,
         shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null,
-        total_cost: totalCost, cost_per_knife: totalCost,
+        total_cost: totalCost, cost_per_knife: totalCost, short_description: description,
         attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),
       }).eq("ebay_item_id", row.ebay_item_id);
       if (saveError) throw new Error(saveError.message);

@@ -226,6 +226,10 @@ test("a single run that qualifies both a pocket-knife and a carving-set item sen
         assert.equal(sent.length, 1, "only the pocket-knife email fires from this run's text pass");
       });
       await withFetch([
+        tokenRoute,
+        // processCarvingSetRow now fetches the item's full description before ever falling
+        // through to vision (see the comment above that fetch in lib/finder-service.ts).
+        { test: (url) => url.startsWith("https://api.sandbox.ebay.com/buy/browse/v1/item/"), respond: () => jsonResponse({ description: "" }) },
         { test: (url) => url.includes("i.ebayimg.com"), respond: () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/jpeg" } }) },
         { test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => jsonResponse({ candidates: [{ content: { parts: [{ text: JSON.stringify({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel" }) }] } }] }) },
       ], async () => {
