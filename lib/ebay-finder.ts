@@ -1,6 +1,14 @@
 import { ebayApiBaseUrl } from "./ebay-endpoints";
 import { FINDER_DEFAULTS, finderPages } from "./finder-core";
 
+// Every fetch below carries this timeout. Without one, a single stalled eBay response left
+// startFinderRun's per-item description-fetch mapWithConcurrency batch (hundreds of individual
+// item lookups) stuck holding a concurrency slot forever — the whole scan sat at 0 items_seen
+// until the 15-minute finder_runs watchdog killed it (confirmed twice in production: a scheduled
+// and a manual carving_set run, both stuck mid-batch with no further progress). A timeout turns a
+// hung request into an ordinary rejected promise, which every call site already catches per-item.
+const EBAY_REQUEST_TIMEOUT_MS = 20_000;
+
 export type EbayFinderItem = {
   itemId: string;
   title: string;
@@ -26,6 +34,7 @@ export async function appToken() {
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: "grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope",
+    signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`eBay token request failed (${response.status}).`);
   const payload = await response.json() as { access_token?: string };
@@ -57,7 +66,7 @@ async function browseHeaders(token?: string) {
 // per item — each one is a real network call and adds up fast against a serverless timeout.
 export async function getItemShippingCost(itemId: string, token?: string) {
   const url = `${ebayApiBaseUrl()}/buy/browse/v1/item/${encodeURIComponent(itemId)}`;
-  const response = await fetch(url, { headers: await browseHeaders(token) });
+  const response = await fetch(url, { headers: await browseHeaders(token), signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`eBay item lookup for "${itemId}" failed (${response.status}).`);
   const payload = await response.json() as { shippingOptions?: Array<{ shippingCost?: { value?: string; currency?: string } }> };
   return shippingCost(payload);
@@ -90,7 +99,7 @@ function htmlToText(html: string) {
 // matching the truncation already applied to Gemini prompts elsewhere in this codebase.
 export async function getItemDescription(itemId: string, token?: string) {
   const url = `${ebayApiBaseUrl()}/buy/browse/v1/item/${encodeURIComponent(itemId)}`;
-  const response = await fetch(url, { headers: await browseHeaders(token) });
+  const response = await fetch(url, { headers: await browseHeaders(token), signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`eBay item lookup for "${itemId}" failed (${response.status}).`);
   const payload = await response.json() as { description?: string };
   if (!payload.description) return "";
@@ -123,6 +132,7 @@ export async function searchEbayKeyword(keyword: string, requested: number = FIN
         "X-EBAY-C-MARKETPLACE-ID": marketplace,
         "X-EBAY-C-ENDUSERCTX": `contextualLocation=country%3DUS%2Czip%3D${encodeURIComponent(zip)}`,
       },
+      signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error(`eBay search for “${keyword}” failed (${response.status}).`);
     const payload = await response.json() as { itemSummaries?: Array<Record<string, unknown>> };

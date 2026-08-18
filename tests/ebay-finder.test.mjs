@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getItemShippingCost, searchEbayKeyword } from "../lib/ebay-finder.ts";
+import { getItemDescription, getItemShippingCost, searchEbayKeyword } from "../lib/ebay-finder.ts";
 import { jsonResponse, textResponse, withEnv, withFetch } from "./helpers/fake-fetch.mjs";
 
 const EBAY_ENV = { EBAY_CLIENT_ID: "client-id", EBAY_CLIENT_SECRET: "client-secret", EBAY_ENVIRONMENT: "sandbox" };
@@ -212,6 +212,52 @@ test("getItemShippingCost throws when the item lookup fails", async () => {
   await withEnv(EBAY_ENV, async () => {
     await withFetch([tokenRoute, { test: (url) => url.startsWith(ITEM_URL), respond: () => textResponse("not found", { status: 404 }) }], async () => {
       await assert.rejects(() => getItemShippingCost("v1|1|0"), /failed \(404\)/);
+    });
+  });
+});
+
+test("getItemDescription strips HTML and truncates the result", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    await withFetch([
+      tokenRoute,
+      { test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ description: "<p>Lot of <b>10</b> knives.</p><p>Ships fast!</p>" }) },
+    ], async () => {
+      const result = await getItemDescription("v1|1|0");
+      assert.equal(result, "Lot of 10 knives.\nShips fast!");
+    });
+  });
+});
+
+test("getItemDescription returns an empty string when the listing has no description", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    await withFetch([tokenRoute, { test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({}) }], async () => {
+      const result = await getItemDescription("v1|1|0");
+      assert.equal(result, "");
+    });
+  });
+});
+
+test("getItemDescription throws when the item lookup fails", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    await withFetch([tokenRoute, { test: (url) => url.startsWith(ITEM_URL), respond: () => textResponse("not found", { status: 404 }) }], async () => {
+      await assert.rejects(() => getItemDescription("v1|1|0"), /failed \(404\)/);
+    });
+  });
+});
+
+test("every eBay request carries an abort timeout, so one stalled response can't hang a batch forever", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    const signals = [];
+    await withFetch([
+      { test: (url) => url.startsWith(TOKEN_URL), respond: (url, init) => { signals.push(init?.signal); return jsonResponse({ access_token: "fake-app-token" }); } },
+      { test: (url) => url.startsWith(SEARCH_URL), respond: (url, init) => { signals.push(init?.signal); return jsonResponse({ itemSummaries: [] }); } },
+      { test: (url) => url.startsWith(ITEM_URL), respond: (url, init) => { signals.push(init?.signal); return jsonResponse({ shippingOptions: [] }); } },
+    ], async () => {
+      await searchEbayKeyword("knife lot", 10);
+      await getItemShippingCost("v1|1|0");
+      await getItemDescription("v1|1|0");
+      assert.equal(signals.length, 6);
+      for (const signal of signals) assert.ok(signal instanceof AbortSignal, "expected every eBay fetch to carry an AbortSignal timeout");
     });
   });
 });
