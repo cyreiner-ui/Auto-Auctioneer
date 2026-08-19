@@ -5,7 +5,7 @@ import { usePersistedState } from "../../../lib/use-persisted-state";
 
 export type FinderResult = {
   ebay_item_id: string; title: string; ebay_url: string; image_url: string | null; item_price: number; shipping_cost: number; total_cost: number; cost_per_knife: number; knife_count: number; detection_source: string; discovered_at: string; gixen_status?: string | null; gixen_message?: string | null; buying_options: string[]; max_bid: number | null;
-  carving_piece_count?: number | null; carving_has_case?: boolean | null; carving_carbon_steel?: boolean | null;
+  carving_piece_count?: number | null; carving_has_case?: boolean | null; carving_carbon_steel?: boolean | null; carving_stag_handle?: boolean | null;
   reason?: string | null;
 };
 export type FinderResultsVariant = "pocket_knife" | "carving_set";
@@ -54,6 +54,10 @@ const REJECTION_REASON_LABEL: Record<string, string> = {
   stainless_steel_vision: "Photo confirmed stainless steel, not carbon steel",
   stainless_era_wording: "Wording suggests a later stainless-era set, not carbon steel",
   faux_handle: "Imitation (faux) handle material, typical of later stainless sets",
+  modern_origin: "Modern (USA/Japan-made) manufacture, not antique English/German",
+  wood_carving_tool: "Wood-carving/whittling tool kit, not table-carving cutlery",
+  not_stag_handle: "Handle material isn't stag/antler",
+  not_stag_handle_vision: "Photo didn't confirm a stag/antler handle",
 };
 
 function rejectionLabel(reason: string) { return REJECTION_REASON_LABEL[reason] || reason; }
@@ -130,6 +134,7 @@ export default function FinderResultsGrid({ results, busy, emptyMessage, actions
                   <span>{result.carving_piece_count ?? 1} piece{(result.carving_piece_count ?? 1) === 1 ? "" : "s"}</span>
                   {result.carving_has_case && <span>Cased</span>}
                   {result.carving_carbon_steel && <span>Carbon steel</span>}
+                  {result.carving_stag_handle && <span>Stag handle</span>}
                 </>
               : <span>{result.knife_count != null ? `${result.knife_count} knives` : "Knife count unknown"}</span>}
             {result.gixen_status && <span className={result.gixen_status === "failed" ? "gixen-failed" : undefined} title={result.gixen_message || undefined}>{GIXEN_BADGE[result.gixen_status] || result.gixen_status}</span>}

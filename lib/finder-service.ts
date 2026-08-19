@@ -6,6 +6,7 @@ import {
   analyzeCarvingSetWithGemini,
   carvingSetCeiling,
   carvingSetGroupForPhrases,
+  CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS,
   CARVING_SET_PHRASES,
   decideCarvingSetFromText,
   evaluateCarvingSetVision,
@@ -120,7 +121,7 @@ async function notifyNewlyQualified(ebayItemIds: string[]) {
   if (!ebayItemIds.length) return;
   const { data, error } = await supabaseAdmin
     .from("finder_items")
-    .select("ebay_item_id, title, ebay_url, image_url, item_price, shipping_cost, total_cost, cost_per_knife, knife_count, notified_at, gixen_status, buying_options, keyword_phrases, carving_piece_count, carving_has_case, carving_carbon_steel")
+    .select("ebay_item_id, title, ebay_url, image_url, item_price, shipping_cost, total_cost, cost_per_knife, knife_count, notified_at, gixen_status, buying_options, keyword_phrases, carving_piece_count, carving_has_case, carving_carbon_steel, carving_stag_handle")
     .eq("status", "qualified")
     .in("ebay_item_id", ebayItemIds);
   if (error || !data?.length) return;
@@ -163,6 +164,7 @@ type FinderRow = {
   carving_piece_count: number | null;
   carving_has_case: boolean | null;
   carving_carbon_steel: boolean | null;
+  carving_stag_handle: boolean | null;
 };
 
 // Categories that never qualify, at any price, regardless of which stage (text or vision)
@@ -304,6 +306,7 @@ type ExistingFinderRow = {
   carving_piece_count: number | null;
   carving_has_case: boolean | null;
   carving_carbon_steel: boolean | null;
+  carving_stag_handle: boolean | null;
 };
 
 function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, existing: ExistingFinderRow | undefined, maxCost: number, swissArmyMax: number) {
@@ -418,7 +421,8 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const PROGRESS_WRITE_EVERY = 5;
     async function scanKeyword(keyword: { phrase: string; max_cost_per_knife?: number | null }) {
       try {
-        for (const item of await searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined)) {
+        const extraExcludeTerms = carvingSetGroupForPhrases([keyword.phrase]) ? CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS : [];
+        for (const item of await searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms)) {
           const current = found.get(item.itemId);
           if (current) current.phrases.push(keyword.phrase);
           else found.set(item.itemId, { item, phrases: [keyword.phrase] });
@@ -447,7 +451,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const ids = [...found.keys()];
     const existingById = new Map<string, ExistingFinderRow>();
     for (let index = 0; index < ids.length; index += 200) {
-      const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id, knife_count, contains_folding_knife, confidence, detection_source, item_category, shipping_cost, shipping_source, carving_piece_count, carving_has_case, carving_carbon_steel").in("ebay_item_id", ids.slice(index, index + 200));
+      const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id, knife_count, contains_folding_knife, confidence, detection_source, item_category, shipping_cost, shipping_source, carving_piece_count, carving_has_case, carving_carbon_steel, carving_stag_handle").in("ebay_item_id", ids.slice(index, index + 200));
       if (error) throw new Error(error.message);
       for (const row of data || []) existingById.set(row.ebay_item_id, row);
     }
@@ -583,7 +587,10 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         const { error: saveError } = await supabaseAdmin.from("finder_items").update({
           status: qualifies ? "qualified" : "rejected", reason,
           knife_count: 1, contains_folding_knife: false, confidence: 0.95, detection_source: "text", item_category: "carving_set",
-          carving_piece_count: textDecision.pieceCount, carving_has_case: true, carving_carbon_steel: null,
+          // decideCarvingSetFromText's fast path only reaches "resolved"/"needs-shipping" once
+          // text.stagHandle === "stag" is already confirmed, so carving_stag_handle is always true
+          // here, same as carving_has_case.
+          carving_piece_count: textDecision.pieceCount, carving_has_case: true, carving_carbon_steel: null, carving_stag_handle: true,
           shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null,
           total_cost: totalCost, cost_per_knife: totalCost, short_description: description,
           attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),
@@ -593,8 +600,9 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         processed++;
         return;
       }
-      // textDecision.kind === "vision": still needs a photo (case ambiguous, or — Sheffield only —
-      // material unconfirmed), even with the now-enriched description in hand.
+      // textDecision.kind === "vision": still needs a photo (case ambiguous, handle material
+      // ambiguous, or — Sheffield only — blade material unconfirmed), even with the now-enriched
+      // description in hand.
       if (visionExhaustedMessage) {
         await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: visionExhaustedMessage, short_description: description }).eq("ebay_item_id", row.ebay_item_id);
         deferred++;
@@ -625,7 +633,10 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         // vision call just confidently overturned it to stainless, in which case the persisted
         // value must reflect that so a later rescan's stale-reuse path (refreshedCarvingSetRow)
         // keeps rejecting it instead of silently re-qualifying a confirmed-stainless set.
-        carving_piece_count: vision.pieceCount || null, carving_has_case: vision.hasCase, carving_carbon_steel: decision.reason === "stainless_steel_vision" ? false : row.carving_carbon_steel,
+        // carving_stag_handle, unlike material, is a positive requirement for every group — this
+        // vision call always answers it directly (true only when confidently "stag"), never merely
+        // carried forward, since a fresh answer is available on every vision call.
+        carving_piece_count: vision.pieceCount || null, carving_has_case: vision.hasCase, carving_carbon_steel: decision.reason === "stainless_steel_vision" ? false : row.carving_carbon_steel, carving_stag_handle: vision.handleMaterial === "stag",
         shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null,
         total_cost: totalCost, cost_per_knife: totalCost, short_description: description,
         attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),

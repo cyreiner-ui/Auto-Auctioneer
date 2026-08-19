@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import nodemailer from "nodemailer";
-import { analyzeCarvingSetText, carvingSetCeiling, evaluateCarvingSetVision, initialCarvingSetRow, sheffieldVisionEligible } from "../lib/carving-set-finder.ts";
+import { analyzeCarvingSetText, carvingSetCeiling, carvingSetGroupForPhrases, decideCarvingSetFromText, evaluateCarvingSetVision, initialCarvingSetRow, sheffieldVisionEligible } from "../lib/carving-set-finder.ts";
 import { processPendingFinderItems, startFinderRun } from "../lib/finder-service.ts";
 import { supabaseAdmin } from "../lib/supabase-admin.ts";
 import { createFakeSupabase } from "./helpers/fake-supabase.mjs";
@@ -37,6 +37,69 @@ test("analyzeCarvingSetText flags carving-set phrasing", () => {
   assert.equal(analyzeCarvingSetText("Sheffield Carving Set").isCarvingSet, true);
   assert.equal(analyzeCarvingSetText("Sheffield Carving Knife and Fork Set").isCarvingSet, true);
   assert.equal(analyzeCarvingSetText("Sheffield Pocket Knife Lot").isCarvingSet, false);
+});
+
+test("analyzeCarvingSetText: stagHandle is \"stag\" only for a genuine (non-faux) stag/antler mention", () => {
+  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, Stag Horn Handle, cased").stagHandle, "stag");
+  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, Antler Handle, cased").stagHandle, "stag");
+  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, Faux Stag Horn Handle, cased").stagHandle, "other", "\"faux\" stag is not a genuine stag handle");
+});
+
+test("analyzeCarvingSetText: stagHandle is \"other\" for an explicit competing handle material", () => {
+  for (const material of ["bone handle", "ivory handle", "mother of pearl handle", "pearl handle", "celluloid handle", "bakelite handle", "plastic handle", "wood handle", "wooden handle", "delrin handle", "micarta handle", "g10 handle", "synthetic handle"]) {
+    assert.equal(analyzeCarvingSetText(`Sheffield Carving Set, ${material}, cased`).stagHandle, "other", `"${material}" should reject as a competing material`);
+  }
+});
+
+test("analyzeCarvingSetText: stagHandle is \"ambiguous\" when the text says nothing about handle material", () => {
+  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, cased").stagHandle, "ambiguous");
+});
+
+test("carvingSetGroupForPhrases: a brand-specific generic phrase resolves to \"generic\", and the disabled legacy bare phrase still resolves too", () => {
+  assert.equal(carvingSetGroupForPhrases(["elkington carving set"]), "generic");
+  assert.equal(carvingSetGroupForPhrases(["mappin and webb carving set"]), "generic");
+  assert.equal(carvingSetGroupForPhrases(["carving set"]), "generic", "the disabled legacy phrase must still resolve, so old rows re-evaluate on rescan instead of leaking into the pocket-knife pipeline");
+  assert.equal(carvingSetGroupForPhrases(["sheffield carving set"]), "sheffield");
+  assert.equal(carvingSetGroupForPhrases(["german carving set"]), "german");
+  assert.equal(carvingSetGroupForPhrases(["old timer knife lot"]), null);
+});
+
+test("decideCarvingSetFromText rejects modern-manufacture wording, for every group", () => {
+  for (const group of ["sheffield", "german", "generic"]) {
+    for (const title of ["Elkington Carving Set, Made in USA, cased", "Elkington Carving Set, Japanese Stainless, cased", "Elkington Carving Set, American Made, cased"]) {
+      const decision = decideCarvingSetFromText(title, "", group, 50, 0);
+      assert.equal(decision.kind, "reject", `"${title}" (${group}) should reject`);
+      assert.equal(decision.reason, "modern_origin", `"${title}" (${group}) should reject as modern_origin`);
+    }
+  }
+});
+
+test("decideCarvingSetFromText rejects wood-carving/whittling tool kits, for every group", () => {
+  for (const group of ["sheffield", "german", "generic"]) {
+    for (const title of ["BeaverCraft S13 Wood Carving Set, Whittling Knife Kit", "Flexcut Detail Knife Carving Set 5pc", "Basswood Chip Carving Set, 6 gouges"]) {
+      const decision = decideCarvingSetFromText(title, "", group, 50, 0);
+      assert.equal(decision.kind, "reject", `"${title}" (${group}) should reject`);
+      assert.equal(decision.reason, "wood_carving_tool", `"${title}" (${group}) should reject as wood_carving_tool`);
+    }
+  }
+});
+
+test("decideCarvingSetFromText rejects an explicit non-stag handle, for every group", () => {
+  for (const group of ["sheffield", "german", "generic"]) {
+    const decision = decideCarvingSetFromText("Elkington Carving Set, Bone Handle, cased", "", group, 50, 0);
+    assert.equal(decision.kind, "reject");
+    assert.equal(decision.reason, "not_stag_handle");
+  }
+});
+
+test("decideCarvingSetFromText: German/generic only resolve from text alone once a stag handle is confirmed — an ambiguous handle falls to vision instead of qualifying", () => {
+  for (const group of ["german", "generic"]) {
+    const ambiguous = decideCarvingSetFromText("Elkington Carving Set 3 piece, cased", "", group, 40, 0);
+    assert.equal(ambiguous.kind, "vision", `${group}: case/piece count alone must not resolve without a confirmed stag handle`);
+    const confirmed = decideCarvingSetFromText("Elkington Carving Set 3 piece, Stag Horn Handle, cased", "", group, 40, 0);
+    assert.equal(confirmed.kind, "resolved", `${group}: a confirmed stag handle lets text resolve as before`);
+    assert.equal(confirmed.qualifies, true);
+  }
 });
 
 test("initialCarvingSetRow rejects a cased, well-priced listing that never actually says \"carving set\", since eBay's free-text search can surface non-carving-set items for these keywords", () => {
@@ -79,7 +142,7 @@ test("sheffieldVisionEligible: only more than 30 qualified results unlock vision
 });
 
 function visionResult(overrides = {}) {
-  return { hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel", ...overrides };
+  return { hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel", handleMaterial: "stag", ...overrides };
 }
 
 test("evaluateCarvingSetVision: a confident stainless_steel reading rejects a Sheffield item", () => {
@@ -101,6 +164,14 @@ test("evaluateCarvingSetVision: German ignores the material field entirely", () 
   const decision = evaluateCarvingSetVision("german", visionResult({ material: "stainless_steel", pieceCount: 3 }), 0.9);
   assert.notEqual(decision.reason, "stainless_steel_vision");
   assert.equal(decision.reason, null, "hasCase true and a resolvable German ceiling qualifies regardless of material");
+});
+
+test("evaluateCarvingSetVision: only a confident \"stag\" handleMaterial reading passes, for every group", () => {
+  for (const group of ["sheffield", "german", "generic"]) {
+    assert.equal(evaluateCarvingSetVision(group, visionResult({ handleMaterial: "other" }), 0.9).reason, "not_stag_handle_vision", `${group}: "other" must reject`);
+    assert.equal(evaluateCarvingSetVision(group, visionResult({ handleMaterial: "indeterminate" }), 0.9).reason, "not_stag_handle_vision", `${group}: "indeterminate" doesn't confirm stag either, unlike the material field's default-accept`);
+    assert.equal(evaluateCarvingSetVision(group, visionResult({ handleMaterial: "stag" }), 0.9).reason, null, `${group}: a confident "stag" reading passes`);
+  }
 });
 
 // --- Integration: dispatch through startFinderRun/processPendingFinderItems, exercising the
@@ -351,23 +422,46 @@ test("initialCarvingSetRow: a genuine antique Sheffield carving set (real stag h
   assert.equal(row.carving_carbon_steel, true);
 });
 
-test("era/style and faux-handle wording never reject a German carving set (no material restriction for that group)", async (t) => {
+test("era/style wording never rejects a German carving set (no material restriction for that group)", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
     await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "german carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
       await withFetch([
         tokenRoute,
         { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
-          itemId: "v1|german-mcm-faux|0", itemWebUrl: "https://www.ebay.com/itm/german-mcm-faux",
-          title: "Solingen MCM Danish 3 piece Carving Set, Faux Stag Horn Handle, cased",
+          itemId: "v1|german-mcm|0", itemWebUrl: "https://www.ebay.com/itm/german-mcm",
+          title: "Solingen MCM Danish 3 piece Carving Set, Stag Horn Handle, cased",
           price: { value: "40.00", currency: "USD" },
         })] }) },
       ], async () => {
-        const { run } = await startFinderRun("manual", "run-carving-german-mcm-faux");
-        assert.equal(run.qualified, 1, "German carving sets have no material restriction, so era/faux wording must not reject them");
+        const { run } = await startFinderRun("manual", "run-carving-german-mcm");
+        assert.equal(run.qualified, 1, "German carving sets have no material restriction, so era wording must not reject them");
         const [item] = fake.tables.finder_items;
         assert.equal(item.status, "qualified");
         assert.equal(item.carving_carbon_steel, null);
+        assert.equal(item.carving_stag_handle, true);
+      });
+    });
+  });
+});
+
+test("a \"faux\" stag handle rejects a German carving set too, since the stag-handle requirement applies to every group, not just Sheffield", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "german carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+          itemId: "v1|german-faux|0", itemWebUrl: "https://www.ebay.com/itm/german-faux",
+          title: "Solingen 3 piece Carving Set, Faux Stag Horn Handle, cased",
+          price: { value: "40.00", currency: "USD" },
+        })] }) },
+      ], async () => {
+        const { run } = await startFinderRun("manual", "run-carving-german-faux");
+        assert.equal(run.qualified, 0);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected");
+        assert.equal(item.reason, "not_stag_handle");
       });
     });
   });
@@ -381,7 +475,7 @@ test("startFinderRun qualifies a German carving set under the tiered $10/piece +
         tokenRoute,
         { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
           itemId: "v1|german|0", itemWebUrl: "https://www.ebay.com/itm/german",
-          title: "Wusthof 3 piece Carving Set, cased",
+          title: "Wusthof 3 piece Carving Set, Stag Horn Handle, cased",
           price: { value: "40.00", currency: "USD" },
         })] }) },
       ], async () => {
@@ -405,7 +499,7 @@ test("startFinderRun rejects a German carving set over its tiered ceiling", asyn
         tokenRoute,
         { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
           itemId: "v1|german-over|0", itemWebUrl: "https://www.ebay.com/itm/german-over",
-          title: "Wusthof 2 piece Carving Set, cased",
+          title: "Wusthof 2 piece Carving Set, Stag Horn Handle, cased",
           price: { value: "60.00", currency: "USD" },
         })] }) },
       ], async () => {
@@ -472,13 +566,14 @@ test("startFinderRun leaves every Sheffield candidate pending for vision once th
         assert.equal(fake.tables.finder_items.length, 31);
         for (const row of fake.tables.finder_items) assert.equal(row.status, "pending", "more than 30 pending-for-vision candidates leaves every one of them eligible for vision");
       });
-      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel" })], async () => {
+      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel", handleMaterial: "stag" })], async () => {
         const { processed } = await processPendingFinderItems(40);
         assert.equal(processed, 31);
         for (const row of fake.tables.finder_items) {
           assert.equal(row.status, "qualified");
           assert.equal(row.detection_source, "vision");
           assert.equal(row.carving_carbon_steel, true);
+          assert.equal(row.carving_stag_handle, true);
         }
       });
     });
@@ -500,7 +595,7 @@ test("processPendingFinderItems rejects a Sheffield set as stainless_steel_visio
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "stainless_steel" })], async () => {
+      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "stainless_steel", handleMaterial: "stag" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -548,7 +643,7 @@ test("processPendingFinderItems falls back to vision when the case isn't mention
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: false, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel" })], async () => {
+      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: false, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel", handleMaterial: "stag" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -575,7 +670,7 @@ test("processPendingFinderItems qualifies a Sheffield set via vision once case i
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel" })], async () => {
+      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel", handleMaterial: "stag" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
@@ -583,6 +678,7 @@ test("processPendingFinderItems qualifies a Sheffield set via vision once case i
         assert.equal(item.total_cost, 160);
         assert.equal(item.carving_has_case, true);
         assert.equal(item.carving_carbon_steel, true, "a confident carbon_steel vision reading doesn't overturn the row's already-resolved material");
+        assert.equal(item.carving_stag_handle, true);
       });
     });
   });
@@ -631,7 +727,7 @@ test("processPendingFinderItems fetches the full description first and qualifies
         status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
       }],
     }, async (fake) => {
-      const fullDescriptionRoute = { test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ description: "This 3 piece set comes cased, in excellent condition." }) };
+      const fullDescriptionRoute = { test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ description: "This 3 piece set comes cased, with a stag horn handle, in excellent condition." }) };
       await withFetch([tokenRoute, fullDescriptionRoute], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
@@ -640,6 +736,7 @@ test("processPendingFinderItems fetches the full description first and qualifies
         assert.equal(item.detection_source, "text");
         assert.equal(item.carving_piece_count, 3);
         assert.equal(item.total_cost, 40);
+        assert.equal(item.carving_stag_handle, true);
       });
     });
   });

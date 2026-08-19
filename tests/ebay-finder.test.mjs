@@ -76,6 +76,44 @@ test("appends the default junk-word exclusions to the search query", async () =>
   });
 });
 
+test("appends extraExcludeTerms after the default junk-word exclusions", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    let seenQuery;
+    await withFetch([
+      tokenRoute,
+      {
+        test: (url) => url.startsWith(SEARCH_URL),
+        respond: (url) => {
+          seenQuery = new URL(url).searchParams.get("q");
+          return jsonResponse({ itemSummaries: [] });
+        },
+      },
+    ], async () => {
+      await searchEbayKeyword("elkington carving set", 10, undefined, ["usa", "america", "american", "japan", "japanese"]);
+      assert.equal(seenQuery, "elkington carving set -throwing -keychain -multitool -leatherman -usa -america -american -japan -japanese");
+    });
+  });
+});
+
+test("omitting extraExcludeTerms leaves the query unchanged from the default exclusions alone", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    let seenQuery;
+    await withFetch([
+      tokenRoute,
+      {
+        test: (url) => url.startsWith(SEARCH_URL),
+        respond: (url) => {
+          seenQuery = new URL(url).searchParams.get("q");
+          return jsonResponse({ itemSummaries: [] });
+        },
+      },
+    ], async () => {
+      await searchEbayKeyword("knife lot", 10);
+      assert.equal(seenQuery, "knife lot -throwing -keychain -multitool -leatherman");
+    });
+  });
+});
+
 test("drops results missing an id, title, or URL", async () => {
   await withEnv(EBAY_ENV, async () => {
     await withFetch([
