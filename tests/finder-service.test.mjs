@@ -111,6 +111,35 @@ test("startFinderRun qualifies an auction item, emails the alert, but does not a
   });
 });
 
+test("startFinderRun's scan appends the carving-set modern-origin exclude terms only to carving-set keyword searches, not ordinary pocket-knife ones", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const seenQueries = {};
+    await withFakeBackend({
+      finder_keywords: [
+        { id: "k1", phrase: "elkington carving set", enabled: true, created_at: "2026-01-01" },
+        { id: "k2", phrase: "knife lot", enabled: true, created_at: "2026-01-02" },
+      ],
+    }, async () => {
+      await withFetch([
+        tokenRoute,
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: (url) => {
+            const q = new URL(url).searchParams.get("q");
+            seenQueries[q.split(" -")[0]] = q;
+            return jsonResponse({ itemSummaries: [] });
+          },
+        },
+      ], async () => {
+        await startFinderRun("manual", "run-carving-exclude-terms");
+        assert.match(seenQueries["elkington carving set"], /-usa -america -american -japan -japanese/, "carving-set keyword searches get the modern-origin exclusions too");
+        assert.doesNotMatch(seenQueries["knife lot"], /-usa|-japan/, "ordinary pocket-knife keyword searches must not be widened by the carving-set-only exclusions");
+      });
+    });
+  });
+});
+
 test("startFinderRun only emails auction-format items in a mixed qualifying batch", async (t) => {
   await withEnv(ENV, async () => {
     const sent = [];

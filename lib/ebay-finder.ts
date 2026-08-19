@@ -110,7 +110,7 @@ export async function getItemDescription(itemId: string, token?: string) {
 // scan across every enabled keyword) so the run doesn't pay for a fresh OAuth round trip per
 // keyword — with 35+ keywords that's dozens of avoidable network calls stacked inside one
 // request's time budget.
-export async function searchEbayKeyword(keyword: string, requested: number = FINDER_DEFAULTS.resultsPerKeyword, token?: string) {
+export async function searchEbayKeyword(keyword: string, requested: number = FINDER_DEFAULTS.resultsPerKeyword, token?: string, extraExcludeTerms: string[] = []) {
   const authToken = token || await appToken();
   const marketplace = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
   const zip = process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip;
@@ -119,8 +119,11 @@ export async function searchEbayKeyword(keyword: string, requested: number = FIN
     const url = new URL(`${ebayApiBaseUrl()}/buy/browse/v1/item_summary/search`);
     // eBay's Browse API q param supports "-word" exclusion syntax; trims the clearest junk
     // (throwing knives, keychain knives, multi-tools, Leatherman) before it's even fetched. See
-    // FINDER_DEFAULTS.excludeTerms for why the list stays narrow.
-    const query = FINDER_DEFAULTS.excludeTerms.length ? `${keyword} ${FINDER_DEFAULTS.excludeTerms.map((term) => `-${term}`).join(" ")}` : keyword;
+    // FINDER_DEFAULTS.excludeTerms for why the list stays narrow. extraExcludeTerms lets a caller
+    // (lib/finder-service.ts, for carving-set keywords) layer on additional per-search exclusions
+    // — e.g. CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS — without widening every other keyword's search.
+    const excludeTerms = [...FINDER_DEFAULTS.excludeTerms, ...extraExcludeTerms];
+    const query = excludeTerms.length ? `${keyword} ${excludeTerms.map((term) => `-${term}`).join(" ")}` : keyword;
     url.searchParams.set("q", query);
     url.searchParams.set("limit", String(limit));
     url.searchParams.set("offset", String(offset));
