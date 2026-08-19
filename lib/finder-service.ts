@@ -609,7 +609,10 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         return;
       }
       const vision = await analyzeCarvingSetWithGemini({ title: row.title, description, imageUrl: row.image_url || "" });
-      const decision = evaluateCarvingSetVision(group, vision, config().confidence);
+      // textDecision.kind === "vision" here (every other kind returned above), so caseConfirmed/
+      // stagConfirmed are always present — pass through what text already established rather than
+      // letting a less-reliable vision photo read override an already-settled fact.
+      const decision = evaluateCarvingSetVision(group, vision, config().confidence, { hasCase: textDecision.caseConfirmed, stag: textDecision.stagConfirmed });
       let shippingValue = row.shipping_cost == null ? null : Number(row.shipping_cost);
       let shippingSource = row.shipping_source;
       let shippingReason: string | null = null;
@@ -635,8 +638,11 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         // keeps rejecting it instead of silently re-qualifying a confirmed-stainless set.
         // carving_stag_handle, unlike material, is a positive requirement for every group — this
         // vision call always answers it directly (true only when confidently "stag"), never merely
-        // carried forward, since a fresh answer is available on every vision call.
-        carving_piece_count: vision.pieceCount || null, carving_has_case: vision.hasCase, carving_carbon_steel: decision.reason === "stainless_steel_vision" ? false : row.carving_carbon_steel, carving_stag_handle: vision.handleMaterial === "stag",
+        // carried forward, since a fresh answer is available on every vision call. carving_has_case
+        // and carving_stag_handle use decision.hasCase/decision.stagConfirmed (merged with whatever
+        // text already confirmed — see evaluateCarvingSetVision), not the raw vision.* fields, so a
+        // text-confirmed fact persists correctly even when vision's own photo read disagreed.
+        carving_piece_count: vision.pieceCount || null, carving_has_case: decision.hasCase, carving_carbon_steel: decision.reason === "stainless_steel_vision" ? false : row.carving_carbon_steel, carving_stag_handle: decision.stagConfirmed,
         shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null,
         total_cost: totalCost, cost_per_knife: totalCost, short_description: description,
         attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),

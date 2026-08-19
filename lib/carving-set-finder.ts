@@ -60,13 +60,19 @@ export const CARVING_SET_PHRASES: string[] = [CARVING_SET_KEYWORDS.sheffield, CA
 // (modernOriginPattern) is the fallback for anything this coarse eBay-side trim misses.
 export const CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS = ["usa", "america", "american", "japan", "japanese"];
 
-const carvingSetPattern = /\bcarving\s+(?:set|knife\s*(?:and|&)\s*fork(?:\s+set)?)\b/i;
+// The "and"/"&" between knife and fork is optional — sellers commonly write "Carving Knife Fork
+// Set" or "...Carving Knife Fork Steel Box...Set" with no conjunction at all, which the stricter
+// form used to miss entirely, false-rejecting genuine antique sets as "not_carving_set" before any
+// other logic ran.
+const carvingSetPattern = /\bcarving\s+(?:set|knife\s*(?:(?:and|&)\s*)?fork(?:\s+set)?)\b/i;
 // Explicit case/box wording only — never a bare /case/i. W.R. Case & Sons is a real, common knife
 // brand, so "Case Carving Set" (the brand) must not be misread as "a carving set with a case."
 const caseIndicatorPattern = /\b(?:with\s+(?:its\s+|a\s+|the\s+)?(?:original\s+|fitted\s+|presentation\s+)?case\b|\bin\s+(?:its\s+|a\s+|the\s+)?(?:original\s+|fitted\s+|presentation\s+)?case\b|\bcased\b|\bboxed\b|\bpresentation\s+(?:case|box)\b|\bfitted\s+(?:case|box)\b|\boriginal\s+box\b)/i;
 const carbonSteelPattern = /\bcarbon[\s-]*steel\b/i;
 const stainlessPattern = /\bstainless(?:[\s-]*steel)?\b/i;
-const pieceCountPattern = /\b(\d{1,2})[\s-]*(?:pcs?|pieces?)\b/i;
+// Tolerates a trailing paren right after the digit (e.g. "Antler Handled (2) Piece Carving Set") —
+// a common way sellers parenthesize the count, which the whitespace/hyphen-only gap used to miss.
+const pieceCountPattern = /\b(\d{1,2})\)?[\s-]*(?:pcs?|pieces?)\b/i;
 // Sheffield-only negative keyword: these specific makers produced (near) exclusively stainless
 // steel cutlery, even on listings that don't explicitly say "stainless" — a real production-history
 // fact staff supplied, not something inferable from text patterns alone. Checked unconditionally,
@@ -105,7 +111,14 @@ const modernOriginPattern = /\b(?:made\s+in\s+(?:the\s+)?usa|usa[\s-]*made|ameri
 // (which mostly avoid surfacing these in the first place) and the eBay-side exclude terms — this
 // is also what makes the disabled legacy "carving set" phrase (see CARVING_SET_KEYWORDS.generic)
 // safe to keep recognized: old rows discovered under it re-reject here on their next rescan.
-const woodCarvingToolPattern = /\b(?:whittl\w*|wood[\s-]*carving|chip[\s-]*carving|spoon[\s-]*carving|basswood|beavercraft|flexcut|sloyd|detail\s*knife|hook\s*knife|gouges?|chisels?)\b/i;
+//
+// Deliberately excludes bare "gouge(s)"/"chisel(s)" — those words also show up in ordinary
+// cutlery condition-report language ("no deep gouges or structural damage", "chisel-ground edge")
+// completely unrelated to woodworking tools, which false-rejected a genuine antique carving set in
+// production (a Rehwappen stag-handle set whose own condition report used exactly that "gouges"
+// wording). Real whittling-kit listings essentially always also say "wood carving"/"whittling"/a
+// brand name/etc., so those tokens still catch them without this false-positive risk.
+const woodCarvingToolPattern = /\b(?:whittl\w*|wood[\s-]*carving|chip[\s-]*carving|spoon[\s-]*carving|basswood|beavercraft|flexcut|sloyd|detail\s*knife|hook\s*knife)\b/i;
 
 // Group-agnostic positive requirement: this buyer only wants stag/antler-handle sets, for every
 // group (Sheffield and German used to qualify on any handle material — that's changed). Explicit
@@ -251,6 +264,11 @@ export async function analyzeCarvingSetWithGemini(input: { title: string; descri
 export type CarvingSetVisionDecision = {
   confident: boolean;
   ceiling: number | null;
+  // Merged with whatever text already confirmed (see textConfirmed below) — the values actually
+  // used for qualification, and what callers should persist to carving_has_case/carving_stag_handle
+  // rather than the raw vision.hasCase/vision.handleMaterial fields.
+  hasCase: boolean;
+  stagConfirmed: boolean;
   // Set only when the item is definitively rejected regardless of price/shipping (low
   // confidence, no case, an unresolvable German piece count, a handle vision couldn't confirm as
   // stag, or — Sheffield only — a confident stainless-steel material reading).
@@ -260,7 +278,14 @@ export type CarvingSetVisionDecision = {
 // Pure decision logic over an already-fetched vision result — no I/O, so it's cheaply testable on
 // its own. The shipping lookup and final price/ceiling comparison stay in finder-service.ts,
 // mirroring how the pocket-knife pipeline splits vision classification from the shipping fetch.
-export function evaluateCarvingSetVision(group: CarvingSetGroup, vision: CarvingSetVisionResult, confidenceThreshold: number): CarvingSetVisionDecision {
+//
+// textConfirmed carries whatever decideCarvingSetFromText already established before falling back
+// to vision (see its "vision" decision kind) — a case or stag handle the *text* already confirmed
+// is treated as settled, not re-litigated against vision's own (less reliable) photo read. Without
+// this, a title that plainly says "stag horn"/"antler handle" could still be rejected as
+// not_stag_handle_vision just because vision's photo-based guess didn't independently agree — the
+// single biggest source of false-positive rejections found in production.
+export function evaluateCarvingSetVision(group: CarvingSetGroup, vision: CarvingSetVisionResult, confidenceThreshold: number, textConfirmed: { hasCase: boolean; stag: boolean }): CarvingSetVisionDecision {
   const confident = vision.confidence >= confidenceThreshold;
   const ceiling = carvingSetCeiling(group, group !== "sheffield" ? vision.pieceCount : null);
   // Sheffield only, and only an unconditional "stainless_steel" reading rejects — a confident
@@ -268,17 +293,18 @@ export function evaluateCarvingSetVision(group: CarvingSetGroup, vision: Carving
   // default-accept-unless-negative-signal philosophy (see initialCarvingSetRow). German/generic
   // ignore vision.material entirely, exactly as they ignore the text-based material check today.
   const stainlessConfirmed = group === "sheffield" && vision.material === "stainless_steel";
-  // Every group, unlike the material check above: this is a positive requirement, so only a
-  // confident "stag" reading passes — "indeterminate" doesn't confirm it any more than "other"
-  // does, since an unconfirmed handle isn't a stag handle.
-  const stagConfirmed = vision.handleMaterial === "stag";
+  const hasCase = textConfirmed.hasCase || vision.hasCase;
+  // Every group: this is a positive requirement, so only a confirmed "stag" passes — but that
+  // confirmation can come from the text (already trusted at discovery) just as validly as from a
+  // confident vision reading. "indeterminate"/"other" from vision doesn't override a text "stag".
+  const stagConfirmed = textConfirmed.stag || vision.handleMaterial === "stag";
   const reason = !confident ? (vision.uncertaintyReason || "low_confidence")
     : stainlessConfirmed ? "stainless_steel_vision"
     : !stagConfirmed ? "not_stag_handle_vision"
-    : !vision.hasCase ? "no_case"
+    : !hasCase ? "no_case"
     : ceiling == null ? "invalid_count"
     : null;
-  return { confident, ceiling, reason };
+  return { confident, ceiling, hasCase, stagConfirmed, reason };
 }
 
 export type CarvingSetItem = {
@@ -334,7 +360,10 @@ export type CarvingSetTextDecision =
   | { kind: "reject"; reason: string; pieceCount: number | null }
   | { kind: "resolved"; qualifies: boolean; reason: string | null; pieceCount: number | null; totalCost: number }
   | { kind: "needs-shipping"; ceiling: number; pieceCount: number | null }
-  | { kind: "vision"; pieceCount: number | null };
+  // caseConfirmed/stagConfirmed carry whatever text already established even though it wasn't
+  // enough to fully resolve the row — evaluateCarvingSetVision treats these as already-settled
+  // facts rather than asking vision to independently reconfirm them (see that function's comment).
+  | { kind: "vision"; pieceCount: number | null; caseConfirmed: boolean; stagConfirmed: boolean };
 
 // The text-only qualification decision, independent of the item's currency/price/end-date and of
 // whether a photo is available — shared by initialCarvingSetRow (discovery, during the scan) and
@@ -417,7 +446,10 @@ export function decideCarvingSetFromText(title: string, description: string, gro
   // analyzeCarvingSetWithGemini/evaluateCarvingSetVision) before it can qualify, since the checks
   // above only ever rule material out, never confirm it. Same text-first/vision-fallback shape as
   // the pocket-knife pipeline, but via analyzeCarvingSetWithGemini instead of countKnivesWithGemini.
-  return { kind: "vision", pieceCount: text.pieceCount };
+  // caseConfirmed/stagConfirmed carry forward whatever text DID establish (even though it wasn't
+  // enough on its own to resolve the row) so evaluateCarvingSetVision doesn't ask vision to
+  // re-decide a fact the seller's own text already settled.
+  return { kind: "vision", pieceCount: text.pieceCount, caseConfirmed: text.hasCase, stagConfirmed: text.stagHandle === "stag" };
 }
 
 // Mirrors initialRow's contract in lib/finder-service.ts (same base fields, same status/pending
