@@ -33,10 +33,31 @@ test("analyzeCarvingSetText extracts an explicit piece count", () => {
   assert.equal(analyzeCarvingSetText("German Carving Set boxed").pieceCount, null);
 });
 
+test("analyzeCarvingSetText extracts a parenthetical piece count, e.g. \"(2) Piece\"", () => {
+  assert.equal(analyzeCarvingSetText("Antique Joseph Rodgers & Sons England Antler Handled (2) Piece Carving Set Good").pieceCount, 2);
+});
+
 test("analyzeCarvingSetText flags carving-set phrasing", () => {
   assert.equal(analyzeCarvingSetText("Sheffield Carving Set").isCarvingSet, true);
   assert.equal(analyzeCarvingSetText("Sheffield Carving Knife and Fork Set").isCarvingSet, true);
+  assert.equal(analyzeCarvingSetText("Sheffield Carving Knife & Fork").isCarvingSet, true);
   assert.equal(analyzeCarvingSetText("Sheffield Pocket Knife Lot").isCarvingSet, false);
+});
+
+test("analyzeCarvingSetText flags \"carving knife fork\" phrasing with no \"and\"/\"&\" conjunction, a common seller phrasing this used to miss entirely", () => {
+  assert.equal(analyzeCarvingSetText("Joseph Rodgers Sheffield England Antler Carving Knife Fork Steel Box Antique Set").isCarvingSet, true);
+  assert.equal(analyzeCarvingSetText("Regent Sheffield Carving Knife Fork Set Stainless Steel Wood Handle 10.5\" Blade").isCarvingSet, true);
+});
+
+test("decideCarvingSetFromText: \"no deep gouges\"/other cutlery condition-report wording no longer false-rejects as a wood-carving tool", () => {
+  // Verbatim from a production Rehwappen stag-handle carving set that was wrongly rejected as
+  // wood_carving_tool solely because its condition report said "No deep gouges or structural damage".
+  const title = "Vtg Rehwappen Solingen Stag Carving Set Knife 12.5\" German Hunting Shop Boxed";
+  const description = "Handles: 100% Genuine, rugged natural stag antler horn handles. Metal Condition: The knife blade shows some light, non-deep superficial hairline scratches/scuffs on the finish from age and storage handling. No deep gouges or structural damage.";
+  for (const group of ["sheffield", "german", "generic"]) {
+    const decision = decideCarvingSetFromText(title, description, group, 115, 0);
+    assert.notEqual(decision.reason, "wood_carving_tool", `${group}: "no deep gouges" is condition wording, not a woodworking-tool signal`);
+  }
 });
 
 test("analyzeCarvingSetText: stagHandle is \"stag\" only for a genuine (non-faux) stag/antler mention", () => {
@@ -89,6 +110,23 @@ test("decideCarvingSetFromText rejects an explicit non-stag handle, for every gr
     const decision = decideCarvingSetFromText("Elkington Carving Set, Bone Handle, cased", "", group, 50, 0);
     assert.equal(decision.kind, "reject");
     assert.equal(decision.reason, "not_stag_handle");
+  }
+});
+
+test("decideCarvingSetFromText: falling back to vision still carries forward whatever text already confirmed, for every group", () => {
+  for (const group of ["sheffield", "german", "generic"]) {
+    // Stag confirmed by text, case not mentioned at all — matches the production titles that were
+    // wrongly rejected as not_stag_handle_vision (e.g. "Joseph Rodgers ... stag horn ... carving set").
+    const stagOnly = decideCarvingSetFromText("Joseph Rodgers and Sons stag horn Victorian Era four piece carving set", "", group, 150, 0);
+    assert.equal(stagOnly.kind, "vision");
+    assert.equal(stagOnly.stagConfirmed, true);
+    assert.equal(stagOnly.caseConfirmed, false);
+
+    // Case confirmed by text, stag not mentioned — the symmetric case.
+    const caseOnly = decideCarvingSetFromText("Elkington Carving Set, cased", "", group, 150, 0);
+    assert.equal(caseOnly.kind, "vision");
+    assert.equal(caseOnly.caseConfirmed, true);
+    assert.equal(caseOnly.stagConfirmed, false);
   }
 });
 
@@ -145,33 +183,62 @@ function visionResult(overrides = {}) {
   return { hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel", handleMaterial: "stag", ...overrides };
 }
 
+// Text confirmed neither case nor stag — isolates vision's own decision logic, same as every test
+// below except the ones specifically about the text-confirmed-overrides-vision behavior.
+const NOTHING_FROM_TEXT = { hasCase: false, stag: false };
+
 test("evaluateCarvingSetVision: a confident stainless_steel reading rejects a Sheffield item", () => {
-  const decision = evaluateCarvingSetVision("sheffield", visionResult({ material: "stainless_steel" }), 0.9);
+  const decision = evaluateCarvingSetVision("sheffield", visionResult({ material: "stainless_steel" }), 0.9, NOTHING_FROM_TEXT);
   assert.equal(decision.reason, "stainless_steel_vision");
 });
 
 test("evaluateCarvingSetVision: a confident carbon_steel reading does not reject a cased Sheffield item", () => {
-  const decision = evaluateCarvingSetVision("sheffield", visionResult({ material: "carbon_steel" }), 0.9);
+  const decision = evaluateCarvingSetVision("sheffield", visionResult({ material: "carbon_steel" }), 0.9, NOTHING_FROM_TEXT);
   assert.equal(decision.reason, null);
 });
 
 test("evaluateCarvingSetVision: an indeterminate material reading does not reject a cased Sheffield item", () => {
-  const decision = evaluateCarvingSetVision("sheffield", visionResult({ material: "indeterminate" }), 0.9);
+  const decision = evaluateCarvingSetVision("sheffield", visionResult({ material: "indeterminate" }), 0.9, NOTHING_FROM_TEXT);
   assert.equal(decision.reason, null);
 });
 
 test("evaluateCarvingSetVision: German ignores the material field entirely", () => {
-  const decision = evaluateCarvingSetVision("german", visionResult({ material: "stainless_steel", pieceCount: 3 }), 0.9);
+  const decision = evaluateCarvingSetVision("german", visionResult({ material: "stainless_steel", pieceCount: 3 }), 0.9, NOTHING_FROM_TEXT);
   assert.notEqual(decision.reason, "stainless_steel_vision");
   assert.equal(decision.reason, null, "hasCase true and a resolvable German ceiling qualifies regardless of material");
 });
 
-test("evaluateCarvingSetVision: only a confident \"stag\" handleMaterial reading passes, for every group", () => {
+test("evaluateCarvingSetVision: only a confident \"stag\" handleMaterial reading passes, for every group, when text confirmed nothing", () => {
   for (const group of ["sheffield", "german", "generic"]) {
-    assert.equal(evaluateCarvingSetVision(group, visionResult({ handleMaterial: "other" }), 0.9).reason, "not_stag_handle_vision", `${group}: "other" must reject`);
-    assert.equal(evaluateCarvingSetVision(group, visionResult({ handleMaterial: "indeterminate" }), 0.9).reason, "not_stag_handle_vision", `${group}: "indeterminate" doesn't confirm stag either, unlike the material field's default-accept`);
-    assert.equal(evaluateCarvingSetVision(group, visionResult({ handleMaterial: "stag" }), 0.9).reason, null, `${group}: a confident "stag" reading passes`);
+    assert.equal(evaluateCarvingSetVision(group, visionResult({ handleMaterial: "other" }), 0.9, NOTHING_FROM_TEXT).reason, "not_stag_handle_vision", `${group}: "other" must reject`);
+    assert.equal(evaluateCarvingSetVision(group, visionResult({ handleMaterial: "indeterminate" }), 0.9, NOTHING_FROM_TEXT).reason, "not_stag_handle_vision", `${group}: "indeterminate" doesn't confirm stag either, unlike the material field's default-accept`);
+    assert.equal(evaluateCarvingSetVision(group, visionResult({ handleMaterial: "stag" }), 0.9, NOTHING_FROM_TEXT).reason, null, `${group}: a confident "stag" reading passes`);
   }
+});
+
+test("evaluateCarvingSetVision: a text-confirmed stag handle survives even when vision's own photo read disagrees or is unsure", () => {
+  for (const group of ["sheffield", "german", "generic"]) {
+    for (const handleMaterial of ["other", "indeterminate", "stag"]) {
+      const decision = evaluateCarvingSetVision(group, visionResult({ handleMaterial }), 0.9, { hasCase: false, stag: true });
+      assert.notEqual(decision.reason, "not_stag_handle_vision", `${group}/${handleMaterial}: text already confirmed stag, vision must not override it`);
+      assert.equal(decision.stagConfirmed, true);
+    }
+  }
+});
+
+test("evaluateCarvingSetVision: a text-confirmed case survives even when vision says no case", () => {
+  for (const group of ["sheffield", "german", "generic"]) {
+    const decision = evaluateCarvingSetVision(group, visionResult({ hasCase: false }), 0.9, { hasCase: true, stag: true });
+    assert.notEqual(decision.reason, "no_case", `${group}: text already confirmed a case, vision must not override it`);
+    assert.equal(decision.hasCase, true);
+  }
+});
+
+test("evaluateCarvingSetVision: without any text confirmation, vision's own no-case/no-stag readings still reject as before", () => {
+  const noCase = evaluateCarvingSetVision("german", visionResult({ hasCase: false }), 0.9, NOTHING_FROM_TEXT);
+  assert.equal(noCase.reason, "no_case");
+  const noStag = evaluateCarvingSetVision("german", visionResult({ handleMaterial: "other" }), 0.9, NOTHING_FROM_TEXT);
+  assert.equal(noStag.reason, "not_stag_handle_vision");
 });
 
 // --- Integration: dispatch through startFinderRun/processPendingFinderItems, exercising the
