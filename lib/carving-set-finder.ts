@@ -486,12 +486,12 @@ export function refreshedCarvingSetRow(item: CarvingSetItem, keywordPhrases: str
     carving_carbon_steel: existing.carving_carbon_steel,
     carving_stag_handle: existing.carving_stag_handle,
   };
-  // Every group: a previous vision call may have confirmed the handle isn't stag (persisted as
-  // carving_stag_handle: false in processCarvingSetRow) even though text alone never asks vision
-  // about the handle at initial discovery unless it was ambiguous — that stale verdict must keep
-  // rejecting the item on a later rescan where text is still handle-ambiguous, exactly like the
-  // no_case check below, or it would silently "re-qualify" a set already confirmed non-stag.
-  if (existing.carving_stag_handle === false) return { ...freshRow, ...knownFields, status: "rejected" as const, reason: "not_stag_handle_vision", processed_at: new Date().toISOString() };
+  // Every group: stag handle is a positive requirement (unlike material/case, nothing here ever
+  // defaults to true), so a stale row only stays qualifiable if a previous vision call actually
+  // confirmed "stag" — not merely failed to confirm "not stag". This also covers rows persisted by
+  // a pre-fix build that predates this column entirely (carving_stag_handle: null): those must
+  // re-reject here rather than silently qualify on stale case/ceiling data alone.
+  if (existing.carving_stag_handle !== true) return { ...freshRow, ...knownFields, status: "rejected" as const, reason: "not_stag_handle_vision", processed_at: new Date().toISOString() };
   // Sheffield only: a previous vision call may have confirmed stainless steel (persisted as
   // carving_carbon_steel: false in processCarvingSetRow) even though text alone never asks vision
   // about material at initial discovery — that stale verdict must keep rejecting the item on a

@@ -754,7 +754,9 @@ test("startFinderRun does not spend a fresh Gemini call on refresh once a carvin
         item_price: 150, shipping_cost: 10, currency: "USD", buying_options: ["FIXED_PRICE"],
         status: "rejected", knife_count: 1, contains_folding_knife: false, confidence: 0.95,
         detection_source: "vision", item_category: "carving_set", reason: "no_case",
-        carving_piece_count: 2, carving_has_case: false, carving_carbon_steel: true, discovered_at: "2026-01-01",
+        // Stag handle was already confirmed by a prior vision call — this test is about the case
+        // requirement specifically, not stag, so stag must not be what re-rejects it here.
+        carving_piece_count: 2, carving_has_case: false, carving_carbon_steel: true, carving_stag_handle: true, discovered_at: "2026-01-01",
       }],
     }, async (fake) => {
       await withFetch([
@@ -786,9 +788,9 @@ test("startFinderRun does not spend a fresh Gemini call on refresh once a carvin
         item_price: 150, shipping_cost: 10, currency: "USD", buying_options: ["FIXED_PRICE"],
         status: "rejected", knife_count: 1, contains_folding_knife: false, confidence: 0.95,
         detection_source: "vision", item_category: "carving_set", reason: "stainless_steel_vision",
-        // A prior vision call confirmed hasCase but overturned the text-default material to
-        // stainless — carving_carbon_steel: false is what makes that verdict stick.
-        carving_piece_count: 2, carving_has_case: true, carving_carbon_steel: false, discovered_at: "2026-01-01",
+        // A prior vision call confirmed hasCase and stag handle but overturned the text-default
+        // material to stainless — carving_carbon_steel: false is what makes that verdict stick.
+        carving_piece_count: 2, carving_has_case: true, carving_carbon_steel: false, carving_stag_handle: true, discovered_at: "2026-01-01",
       }],
     }, async (fake) => {
       await withFetch([
@@ -803,6 +805,42 @@ test("startFinderRun does not spend a fresh Gemini call on refresh once a carvin
         const [item] = fake.tables.finder_items;
         assert.equal(item.status, "rejected", "must not re-qualify a confirmed-stainless set just because the price looks cheap today");
         assert.equal(item.reason, "stainless_steel_vision");
+      });
+    });
+  });
+});
+
+test("startFinderRun re-rejects a stale German set as not_stag_handle_vision on refresh when a prior vision call never actually confirmed a stag handle (e.g. a row from before this column existed)", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "german carving set", enabled: true, created_at: "2026-01-01" }],
+      finder_items: [{
+        ebay_item_id: "v1|stale-no-stag|0", run_id: "old-run", keyword_phrases: ["german carving set"],
+        title: "Wertheimer German Knife Fork Cutlery Carving Set", short_description: "",
+        ebay_url: "https://www.ebay.com/itm/stale-no-stag", image_url: "https://i.ebayimg.com/stale-no-stag.jpg",
+        item_price: 30, shipping_cost: 0, currency: "USD", buying_options: ["FIXED_PRICE"],
+        // Case and material were confirmed by a prior vision call (predating the stag-handle
+        // requirement), so it currently sits qualified — but carving_stag_handle was never asked
+        // about back then, so it's null, not true. A confirmed case/ceiling from a stale row must
+        // never be enough on its own to qualify once stag is a hard requirement.
+        status: "qualified", knife_count: 1, contains_folding_knife: false, confidence: 0.95,
+        detection_source: "vision", item_category: "carving_set", reason: null,
+        carving_piece_count: 2, carving_has_case: true, carving_carbon_steel: null, carving_stag_handle: null, discovered_at: "2026-01-01",
+      }],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+          itemId: "v1|stale-no-stag|0", itemWebUrl: "https://www.ebay.com/itm/stale-no-stag",
+          title: "Wertheimer German Knife Fork Cutlery Carving Set",
+          price: { value: "30.00", currency: "USD" }, shippingOptions: [{ shippingCost: { value: "0.00", currency: "USD" } }],
+        })] }) },
+      ], async () => {
+        await startFinderRun("manual", "run-carving-stale-no-stag");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected", "an unconfirmed stag handle must not survive as qualified just because case/ceiling were already known");
+        assert.equal(item.reason, "not_stag_handle_vision");
       });
     });
   });
