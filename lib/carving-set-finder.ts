@@ -505,6 +505,27 @@ export function refreshedCarvingSetRow(item: CarvingSetItem, keywordPhrases: str
   // this is what lets an already-fixed parser bug self-correct for free on the next scan.
   if (!existing || existing.detection_source !== "vision" || existing.knife_count == null || freshRow.knife_count != null) return freshRow;
 
+  // A prior vision call ran, but if it never actually asked about the stag handle at all
+  // (carving_stag_handle: null, not an explicit true/false — only possible for a row discovered
+  // before that column/question existed), that dimension isn't "confirmed false," it's simply
+  // unresolved under today's logic. Rejecting it from this stale, incomplete data would trap every
+  // such legacy row in a permanent false rejection: it still needs vision for case/piece count
+  // (that's the only reason this stale-reuse path was reached at all), so it can never re-resolve
+  // from text alone and reach the fresh-derivation return above — the exact bug that let hundreds
+  // of genuinely stag-handled listings (title explicitly said "stag horn"/"antler") sit rejected as
+  // not_stag_handle_vision in production even after evaluateCarvingSetVision was fixed to trust a
+  // text-confirmed stag handle. Send it back to a real, fresh vision call instead, which will
+  // persist a definitive true/false and make this row's future rescans behave normally.
+  //
+  // knife_count must be explicitly nulled out here, not just omitted: freshRow's "vision" branch
+  // never sets it (a brand-new row simply has no value yet), but this is an UPDATE to an EXISTING
+  // row whose knife_count is already 1 from the stale verdict being discarded — Postgres upsert
+  // only overwrites columns actually present in the payload, so omitting it would silently leave
+  // the stale knife_count: 1 in place. processCarvingSetRow treats knife_count != null as "already
+  // fully resolved, only shipping is missing" and skips straight to a shipping lookup — exactly
+  // the bug that let this fix's own fresh-vision-call intent get silently bypassed in testing.
+  if (existing.carving_stag_handle == null) return { ...freshRow, knife_count: null };
+
   const pieceCount = existing.carving_piece_count;
   const ceiling = carvingSetCeiling(group, pieceCount);
   const knownFields = {

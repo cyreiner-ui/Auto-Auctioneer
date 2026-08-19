@@ -877,7 +877,7 @@ test("startFinderRun does not spend a fresh Gemini call on refresh once a carvin
   });
 });
 
-test("startFinderRun re-rejects a stale German set as not_stag_handle_vision on refresh when a prior vision call never actually confirmed a stag handle (e.g. a row from before this column existed)", async (t) => {
+test("startFinderRun sends a stale German set back for a fresh vision call when a prior vision call never actually asked about the stag handle (e.g. a row from before this column existed), instead of permanently rejecting it from incomplete stale data", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
     await withFakeBackend({
@@ -889,8 +889,12 @@ test("startFinderRun re-rejects a stale German set as not_stag_handle_vision on 
         item_price: 30, shipping_cost: 0, currency: "USD", buying_options: ["FIXED_PRICE"],
         // Case and material were confirmed by a prior vision call (predating the stag-handle
         // requirement), so it currently sits qualified — but carving_stag_handle was never asked
-        // about back then, so it's null, not true. A confirmed case/ceiling from a stale row must
-        // never be enough on its own to qualify once stag is a hard requirement.
+        // about back then, so it's null, not true or false. That's genuinely unresolved, not
+        // "confirmed not stag" — rejecting it outright from this stale, incomplete data would trap
+        // it in a permanent false rejection (this title has no case/piece-count wording either, so
+        // it can never resolve from text alone and reach the fresh-derivation path). It must
+        // instead get a real fresh vision call, which is the only thing that can properly answer
+        // the stag question under the current logic.
         status: "qualified", knife_count: 1, contains_folding_knife: false, confidence: 0.95,
         detection_source: "vision", item_category: "carving_set", reason: null,
         carving_piece_count: 2, carving_has_case: true, carving_carbon_steel: null, carving_stag_handle: null, discovered_at: "2026-01-01",
@@ -906,8 +910,46 @@ test("startFinderRun re-rejects a stale German set as not_stag_handle_vision on 
       ], async () => {
         await startFinderRun("manual", "run-carving-stale-no-stag");
         const [item] = fake.tables.finder_items;
-        assert.equal(item.status, "rejected", "an unconfirmed stag handle must not survive as qualified just because case/ceiling were already known");
-        assert.equal(item.reason, "not_stag_handle_vision");
+        assert.equal(item.status, "pending", "an unconfirmed (not merely unproven) stag handle must get a fresh vision call, not stay qualified or become a permanent rejection");
+        assert.equal(item.knife_count, null, "explicitly cleared, not left at its stale value — otherwise processCarvingSetRow would mistake this pending row for one only missing shipping and skip the fresh vision call entirely");
+      });
+    });
+  });
+});
+
+test("end to end: a legacy stale row with an unresolved stag handle gets a fresh vision call on rescan and correctly qualifies once that call confirms stag — this is what production was failing to do", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "german carving set", enabled: true, created_at: "2026-01-01" }],
+      finder_items: [{
+        ebay_item_id: "v1|legacy-stag|0", run_id: "old-run", keyword_phrases: ["german carving set"],
+        title: "Vintage German Stag Gold Tone Carving Set Animals On Blade", short_description: "",
+        ebay_url: "https://www.ebay.com/itm/legacy-stag", image_url: "https://i.ebayimg.com/legacy-stag.jpg",
+        // $30 total, under the $35 (10*2+15) 2-piece German ceiling — a genuinely good deal.
+        item_price: 30, shipping_cost: 0, currency: "USD", buying_options: ["FIXED_PRICE"],
+        status: "qualified", knife_count: 1, contains_folding_knife: false, confidence: 0.95,
+        detection_source: "vision", item_category: "carving_set", reason: null,
+        carving_piece_count: 2, carving_has_case: true, carving_carbon_steel: null, carving_stag_handle: null, discovered_at: "2026-01-01",
+      }],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [carvingItem({
+          itemId: "v1|legacy-stag|0", itemWebUrl: "https://www.ebay.com/itm/legacy-stag",
+          title: "Vintage German Stag Gold Tone Carving Set Animals On Blade",
+          price: { value: "30.00", currency: "USD" }, shippingOptions: [{ shippingCost: { value: "0.00", currency: "USD" } }],
+        })] }) },
+      ], async () => {
+        await startFinderRun("manual", "run-carving-legacy-stag-rescan");
+        assert.equal(fake.tables.finder_items[0].status, "pending");
+      });
+      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel", handleMaterial: "stag" })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "qualified", "the fresh vision call confirms stag, so this genuinely-good listing now qualifies instead of being stuck rejected");
+        assert.equal(item.carving_stag_handle, true);
       });
     });
   });
