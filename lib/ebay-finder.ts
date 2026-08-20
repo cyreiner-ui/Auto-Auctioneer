@@ -138,8 +138,18 @@ export async function searchEbayKeyword(keyword: string, requested: number = FIN
       signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error(`eBay search for “${keyword}” failed (${response.status}).`);
-    const payload = await response.json() as { itemSummaries?: Array<Record<string, unknown>> };
+    const payload = await response.json() as { total?: number; itemSummaries?: Array<Record<string, unknown>> };
     const summaries = payload.itemSummaries || [];
+    // TEMPORARY: diagnosing why the "(Lot of 24) TSA Confiscated EDC Manual Pocket Knives #318"
+    // listing (287535686773) never shows up in finder_items despite ranking #5 on eBay's own
+    // site search for "tsa confiscated knives" — set FINDER_DEBUG_ITEM_ID to the numeric eBay
+    // item id (no "v1|...|0" wrapper) to log whether the Browse API's raw response contains it
+    // for a given keyword/page. Remove once root-caused.
+    const debugItemId = process.env.FINDER_DEBUG_ITEM_ID?.trim();
+    if (debugItemId) {
+      const found = summaries.find((raw) => String((raw as { itemId?: string }).itemId || "").includes(debugItemId));
+      console.log(`[finder-debug] keyword=${JSON.stringify(keyword)} query=${JSON.stringify(query)} offset=${offset} limit=${limit} apiTotal=${payload.total ?? "?"} pageCount=${summaries.length} debugItemFound=${Boolean(found)}${found ? ` debugItemTitle=${JSON.stringify((found as { title?: string }).title)}` : ""}`);
+    }
     for (const raw of summaries) {
       const item = raw as {
         itemId?: string; title?: string; shortDescription?: string; itemWebUrl?: string;
