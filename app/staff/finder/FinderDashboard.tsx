@@ -103,6 +103,7 @@ export default function FinderDashboard() {
           <Link className="back finder-settings-link" href={KIND_SETTINGS_HREF[kind]}>Search settings</Link>
           <Link className="back finder-settings-link" href={KIND_ARCHIVED_HREF[kind]}>Archived items</Link>
           <Link className="back finder-settings-link" href={KIND_REJECTED_HREF[kind]}>Rejected items</Link>
+          <Link className="back finder-settings-link" href="/staff/finder/debug">Debugger</Link>
         </div>
       </div>
       <button className="primary" disabled={busy} onClick={() => void request("/api/finder/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: kind }) })}>{busy ? "Working…" : "Run now"}</button>
