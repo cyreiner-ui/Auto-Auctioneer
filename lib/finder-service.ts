@@ -501,6 +501,31 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
   }
 }
 
+export type FinderKeywordProbe = { phrase: string; itemsReturned: number; hitResultsCap: boolean; found: boolean; matchedTitle: string | null; error: string | null };
+
+// Standing diagnostic for "why didn't the finder pick up listing X" reports: independently of
+// any finder_items row, re-runs every enabled keyword's live eBay search and checks whether the
+// given item id (either the bare numeric eBay id or the full "v1|...|0" form) shows up in the
+// raw results. Distinguishes "genuinely absent from the eBay Browse API's results" from "present,
+// but the keyword search returned so many results it hit resultsPerKeyword before reaching it".
+export async function debugFindItemAcrossKeywords(itemId: string): Promise<FinderKeywordProbe[]> {
+  const { data: keywordRows, error: keywordError } = await supabaseAdmin.from("finder_keywords").select("phrase").eq("enabled", true).order("created_at");
+  if (keywordError) throw new Error(keywordError.message);
+  const keywords = keywordRows || [];
+  const token = keywords.length ? await appToken() : null;
+  async function probeKeyword(keyword: { phrase: string }): Promise<FinderKeywordProbe> {
+    try {
+      const extraExcludeTerms = carvingSetGroupForPhrases([keyword.phrase]) ? CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS : [];
+      const items = await searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms);
+      const match = items.find((item) => item.itemId.includes(itemId));
+      return { phrase: keyword.phrase, itemsReturned: items.length, hitResultsCap: items.length >= config().searchDepth, found: Boolean(match), matchedTitle: match?.title ?? null, error: null };
+    } catch (error) {
+      return { phrase: keyword.phrase, itemsReturned: 0, hitResultsCap: false, found: false, matchedTitle: null, error: error instanceof Error ? error.message : "Search failed." };
+    }
+  }
+  return mapWithConcurrency(keywords, config().scanConcurrency, probeKeyword);
+}
+
 export async function processPendingFinderItems(limit = config().batchSize) {
   const now = new Date().toISOString();
   const { data, error } = await supabaseAdmin.from("finder_items").select("*").eq("status", "pending").lte("next_attempt_at", now).order("discovered_at").limit(limit);
