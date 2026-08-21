@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { archivedFinderItems, type FinderCategory } from "@/lib/finder-service";
+import { archivedFinderItems, isFinderCategory, type FinderCategory } from "@/lib/finder-service";
 import { requireStaff } from "@/lib/staff-auth";
 
 function parseCategory(value: string | null): FinderCategory | undefined {
-  return value === "pocket_knife" || value === "carving_set" ? value : undefined;
+  return isFinderCategory(value) ? value : undefined;
 }
 
 export async function GET(request: Request) {

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { processPendingFinderItems, startFinderRun, type FinderCategory } from "@/lib/finder-service";
+import { isFinderCategory, processPendingFinderItems, startFinderRun, type FinderCategory } from "@/lib/finder-service";
 import { requireStaff } from "@/lib/staff-auth";
 
 // Gixen auto-send now drives a headless browser (see lib/gixen-client.ts),
@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 function parseCategory(value: unknown): FinderCategory | undefined {
-  return value === "pocket_knife" || value === "carving_set" ? value : undefined;
+  return isFinderCategory(value) ? value : undefined;
 }
 
 export async function POST(request: Request) {
