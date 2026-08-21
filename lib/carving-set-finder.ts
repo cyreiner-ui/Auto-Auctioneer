@@ -52,6 +52,15 @@ export const CARVING_SET_CATEGORY_ID = "131608";
 // reissues.
 export const CARVING_SET_USED_CONDITION_ID = "3000";
 
+// How many of the category's newest listings to pull per day (staff estimate: roughly this many
+// new Flatware Sets listings appear daily) — kept as its own constant, independent of
+// config().searchDepth (which sizes every phrase search's page depth and is tunable via
+// EBAY_FINDER_RESULTS_PER_KEYWORD), so tuning that keyword-search setting can never silently
+// change this category browse's API budget too, or vice versa. The category holds many thousands
+// of listings total; sorted newest-first (see searchEbayCategoryNewlyListed), this reliably covers
+// a day's worth of new listings without paging through the rest of the catalog.
+export const CARVING_SET_CATEGORY_BROWSE_LIMIT = 500;
+
 // Synthetic keyword_phrases entry stamped on finder_items rows discovered via the category browse
 // above instead of any text search, so carvingSetGroupForPhrases below (and every keyword_phrases
 // array-overlap query in lib/finder-service.ts — results/rejected/archived lists, qualification

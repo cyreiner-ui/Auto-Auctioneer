@@ -166,6 +166,51 @@ test("startFinderRun(category) only scans that category's enabled keywords", asy
   });
 });
 
+function fakeItemPage(count, offset) {
+  return Array.from({ length: count }, (_, i) => ({
+    itemId: `v1|browse-${offset + i}|0`,
+    title: `Flatware set ${offset + i}`,
+    itemWebUrl: `https://www.ebay.com/itm/${offset + i}`,
+  }));
+}
+
+test("the Flatware Sets category browse stays capped at 500 even when EBAY_FINDER_RESULTS_PER_KEYWORD is tuned for keyword searches", async () => {
+  await withEnv({ ...ENV, EBAY_FINDER_RESULTS_PER_KEYWORD: "50" }, async () => {
+    const keywordLimits = [];
+    const categoryBrowseLimits = [];
+    await withFakeBackend({
+      finder_keywords: [{ id: "k2", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-02" }],
+    }, async () => {
+      await withFetch([
+        tokenRoute,
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: (url) => {
+            const params = new URL(url).searchParams;
+            const limit = Number(params.get("limit"));
+            if (params.get("category_ids")) {
+              categoryBrowseLimits.push(limit);
+              // Return a full page every time so the category browse's own pagination keeps
+              // going through all of its planned pages instead of stopping early — otherwise this
+              // test couldn't tell "capped at 500" apart from "stopped after the first page".
+              return jsonResponse({ itemSummaries: fakeItemPage(limit, Number(params.get("offset"))) });
+            }
+            keywordLimits.push(limit);
+            return jsonResponse({ itemSummaries: [] });
+          },
+        },
+      ], async () => {
+        await startFinderRun("manual", "run-carving-budget-check", "carving_set");
+        // The overridden env var does shrink the keyword search's own page size...
+        assert.deepEqual(keywordLimits, [50]);
+        // ...but the category browse pages in fixed 200-per-request chunks up to its own
+        // independent 500 cap (see CARVING_SET_CATEGORY_BROWSE_LIMIT), unaffected either way.
+        assert.deepEqual(categoryBrowseLimits, [200, 200, 100]);
+      });
+    });
+  });
+});
+
 test("a running carving-set-scoped run never blocks a concurrently started pocket-knife-scoped run, or vice versa", async () => {
   await withEnv(ENV, async () => {
     await withFakeBackend({

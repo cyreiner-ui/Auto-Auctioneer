@@ -6,6 +6,7 @@ import {
   analyzeCarvingSetWithGemini,
   carvingSetCeiling,
   carvingSetGroupForPhrases,
+  CARVING_SET_CATEGORY_BROWSE_LIMIT,
   CARVING_SET_CATEGORY_BROWSE_PHRASE,
   CARVING_SET_CATEGORY_ID,
   CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS,
@@ -451,7 +452,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     // it runs once per carving-set-scoped scan instead, independent of any keyword row.
     if (category === "carving_set") {
       try {
-        for (const item of await searchEbayCategoryNewlyListed(CARVING_SET_CATEGORY_ID, config().searchDepth, token || undefined, CARVING_SET_USED_CONDITION_ID)) {
+        for (const item of await searchEbayCategoryNewlyListed(CARVING_SET_CATEGORY_ID, CARVING_SET_CATEGORY_BROWSE_LIMIT, token || undefined, CARVING_SET_USED_CONDITION_ID)) {
           const current = found.get(item.itemId);
           if (current) current.phrases.push(CARVING_SET_CATEGORY_BROWSE_PHRASE);
           else found.set(item.itemId, { item, phrases: [CARVING_SET_CATEGORY_BROWSE_PHRASE] });
