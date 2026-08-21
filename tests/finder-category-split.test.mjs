@@ -115,6 +115,7 @@ test("editing a carving-set keyword via the shared keywords route never touches 
 test("startFinderRun(category) only scans that category's enabled keywords", async () => {
   await withEnv(ENV, async () => {
     const searchedPhrases = [];
+    const categoryBrowses = [];
     await withFakeBackend({
       finder_keywords: [
         { id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" },
@@ -124,13 +125,26 @@ test("startFinderRun(category) only scans that category's enabled keywords", asy
     }, async () => {
       await withFetch([
         tokenRoute,
-        { test: (url) => url.startsWith(SEARCH_URL), respond: (url) => { searchedPhrases.push(new URL(url).searchParams.get("q")); return jsonResponse({ itemSummaries: [] }); } },
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: (url) => {
+            const params = new URL(url).searchParams;
+            const categoryIds = params.get("category_ids");
+            if (categoryIds) categoryBrowses.push(categoryIds);
+            else searchedPhrases.push(params.get("q"));
+            return jsonResponse({ itemSummaries: [] });
+          },
+        },
       ], async () => {
         await startFinderRun("manual", "run-carving-only", "carving_set");
         // searchEbayKeyword appends exclusion terms (see FINDER_DEFAULTS.excludeTerms) to every
         // query, so match on the keyword being searched, not the exact resulting query string.
         assert.equal(searchedPhrases.length, 2);
         assert.ok(searchedPhrases.every((phrase) => phrase.startsWith("sheffield carving set") || phrase.startsWith("german carving set")), "a carving-set-scoped run must never search the pocket-knife keyword");
+        // A carving-set-scoped run also browses the "Flatware Sets" category directly (see
+        // CARVING_SET_CATEGORY_ID) — a separate lead source alongside the phrase searches above,
+        // not gated by any finder_keywords row.
+        assert.deepEqual(categoryBrowses, ["131608"]);
       });
     });
     searchedPhrases.length = 0;

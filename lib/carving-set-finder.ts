@@ -38,11 +38,33 @@ export const CARVING_SET_KEYWORDS = {
   ],
 } as const;
 
+// eBay category ID for "Flatware Sets" (Home & Garden > Kitchen, Dining & Bar > Flatware, Knives &
+// Cutlery > Flatware Sets). Antique carving/fish-knife sets are routinely listed here by sellers who
+// never write "carving set" (or any of the brand names above) anywhere in the title or description —
+// invisible to every phrase-based search this file drives. Browsed directly by category (see
+// searchEbayCategoryNewlyListed in lib/ebay-finder.ts), sorted newest-first, once per carving-set
+// scan in lib/finder-service.ts's startFinderRun — not folded into the phrase loop, since it isn't a
+// text search at all.
+export const CARVING_SET_CATEGORY_ID = "131608";
+
+// eBay's numeric condition ID for "Used" (developer.ebay.com's condition-id-values reference).
+// Applied to every carving-set eBay search — this buyer wants only used cutlery, never new-made
+// reissues.
+export const CARVING_SET_USED_CONDITION_ID = "3000";
+
+// Synthetic keyword_phrases entry stamped on finder_items rows discovered via the category browse
+// above instead of any text search, so carvingSetGroupForPhrases below (and every keyword_phrases
+// array-overlap query in lib/finder-service.ts — results/rejected/archived lists, qualification
+// emails) still recognizes them as carving-set rows despite eBay never seeing this string as a q=
+// term.
+export const CARVING_SET_CATEGORY_BROWSE_PHRASE = "flatware sets category browse";
+
 // A Sheffield or German set also matches the broader generic phrases in eBay's search (their
 // titles contain "carving set" too), so the more specific groups must be checked first.
 export function carvingSetGroupForPhrases(phrases: string[]): CarvingSetGroup | null {
   if (phrases.includes(CARVING_SET_KEYWORDS.sheffield)) return "sheffield";
   if (phrases.includes(CARVING_SET_KEYWORDS.german)) return "german";
+  if (phrases.includes(CARVING_SET_CATEGORY_BROWSE_PHRASE)) return "generic";
   if (phrases.some((phrase) => (CARVING_SET_KEYWORDS.generic as readonly string[]).includes(phrase))) return "generic";
   return null;
 }
@@ -50,7 +72,7 @@ export function carvingSetGroupForPhrases(phrases: string[]): CarvingSetGroup | 
 // Flat list of the phrases above — used by lib/finder-service.ts to scope a manual run, the
 // results/counts/archived queries, and qualification emails to just this category (via a
 // keyword_phrases array-overlap check), without adding a category column to finder_keywords.
-export const CARVING_SET_PHRASES: string[] = [CARVING_SET_KEYWORDS.sheffield, CARVING_SET_KEYWORDS.german, ...CARVING_SET_KEYWORDS.generic];
+export const CARVING_SET_PHRASES: string[] = [CARVING_SET_KEYWORDS.sheffield, CARVING_SET_KEYWORDS.german, ...CARVING_SET_KEYWORDS.generic, CARVING_SET_CATEGORY_BROWSE_PHRASE];
 
 // Single-word tokens appended as eBay Browse API "-word" exclusions to every carving-set search
 // (all three groups — see lib/finder-service.ts's scanKeyword), on top of the shared
