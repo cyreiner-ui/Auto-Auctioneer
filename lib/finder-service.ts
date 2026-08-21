@@ -437,12 +437,24 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     // resolves to the carving-set/gaucho-knife algorithm, the same test the per-item dispatch
     // already uses.
     const keywordCategory = (phrase: string): FinderCategory => carvingSetGroupForPhrases([phrase]) ? "carving_set" : gauchoKnifeGroupForPhrases([phrase]) ? "gaucho_knife" : "pocket_knife";
-    const keywords = category
-      ? (allKeywords || []).filter((keyword) => keywordCategory(keyword.phrase) === category)
-      : (allKeywords || []);
+    // Fetched up front (not just inside the image-search block below) because it also gates the
+    // gaucho keyword *supplement*: with zero reference photos configured, there's nothing for
+    // Gemini to compare a candidate against, so this run should discover nothing at all for this
+    // category — not queue up hundreds of listings destined to just sit deferred.
+    const { data: gauchoReferenceImageRows, error: gauchoReferenceError } = (!category || category === "gaucho_knife")
+      ? await supabaseAdmin.from("finder_reference_images").select("id, storage_path").eq("category", "gaucho_knife")
+      : { data: null, error: null };
+    if (gauchoReferenceError) throw new Error(gauchoReferenceError.message);
+    const hasGauchoReferenceImages = Boolean(gauchoReferenceImageRows?.length);
+    const errors: string[] = [];
+    if (category === "gaucho_knife" && !hasGauchoReferenceImages) errors.push("No reference images are configured yet — upload at least one before running the gaucho-knife finder.");
+    const keywords = (allKeywords || []).filter((keyword) => {
+      const resolvedCategory = keywordCategory(keyword.phrase);
+      if (resolvedCategory === "gaucho_knife" && !hasGauchoReferenceImages) return false;
+      return category ? resolvedCategory === category : true;
+    });
     const keywordMaxCost = new Map((keywords || []).map((keyword) => [keyword.phrase, keyword.max_cost_per_knife]));
     const found = new Map<string, { item: EbayFinderItem; phrases: string[] }>();
-    const errors: string[] = [];
     let scanned = 0;
     const totalKeywords = keywords?.length || 0;
     // Fetch the eBay app token once and reuse it across every keyword search in this run —
@@ -480,12 +492,11 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     // keyword-only search would miss exactly the listings this category exists to catch. Hits are
     // merged into the same `found` map, tagged with a synthetic phrase carrying which reference
     // image produced them (imageSearchPhrase) so category resolution and staff auditability both
-    // still work. Runs whenever this scan touches gaucho_knife at all (unscoped, or explicitly
-    // scoped to it) — never for a pocket_knife/carving_set-scoped run.
-    if (!category || category === "gaucho_knife") {
-      const { data: referenceImages, error: referenceError } = await supabaseAdmin.from("finder_reference_images").select("id, storage_path").eq("category", "gaucho_knife");
-      if (referenceError) throw new Error(referenceError.message);
-      const imageToken = referenceImages?.length ? (token || await appToken()) : null;
+    // still work. Skipped entirely with zero reference photos configured (hasGauchoReferenceImages,
+    // computed above alongside the keyword filter) — there's nothing to search by.
+    if (hasGauchoReferenceImages) {
+      const referenceImages = gauchoReferenceImageRows || [];
+      const imageToken = token || await appToken();
       async function scanReferenceImage(reference: { id: string; storage_path: string }) {
         try {
           const imageBase64 = await referenceImageBase64(reference.storage_path);
