@@ -125,8 +125,9 @@ const knownStainlessSheffieldBrandsPattern = /\b(?:regent|crown\s*crest|lewis[\s
 // material wording, same as the brand list.
 const stainlessEraPattern = /\b(?:mcm|mid[\s-]?century(?:\s+modern)?|danish)\b/i;
 
-// Sheffield-only negative keyword: "faux" (imitation) stag horn/antler/pearl handles correlate with
-// later, mass-produced (stainless) sets in this dataset, as opposed to "real"/"genuine" stag horn.
+// Sheffield-only negative keyword: "faux" (imitation) stag horn/antler/pearl/ivory handles
+// correlate with later, mass-produced (stainless) sets in this dataset, as opposed to
+// "real"/"genuine" stag horn or ivory.
 const fauxHandlePattern = /\bfaux\b/i;
 
 // Group-agnostic negative keyword: modern-manufacture wording. This buyer wants antique
@@ -151,13 +152,16 @@ const modernOriginPattern = /\b(?:made\s+in\s+(?:the\s+)?usa|usa[\s-]*made|ameri
 // brand name/etc., so those tokens still catch them without this false-positive risk.
 const woodCarvingToolPattern = /\b(?:whittl\w*|wood[\s-]*carving|chip[\s-]*carving|spoon[\s-]*carving|basswood|beavercraft|flexcut|sloyd|detail\s*knife|hook\s*knife)\b/i;
 
-// Group-agnostic positive requirement: this buyer only wants stag/antler-handle sets, for every
-// group (Sheffield and German used to qualify on any handle material — that's changed). Explicit
-// mentions of a competing handle material are treated as decisive, same "an explicit negative wins"
-// philosophy as the stainless-vs-carbon-steel check above — a listing mentioning both stag and a
-// competing material is more likely wrong/misleading than genuinely stag, so it's rejected too.
+// Group-agnostic positive requirement: every group wants a stag/antler-handle set. Sheffield sets
+// alone also accept a genuine ivory handle (a buyer preference specific to Sheffield export ware —
+// German/generic sets still require stag only, same as before). Explicit mentions of a competing
+// handle material are treated as decisive, same "an explicit negative wins" philosophy as the
+// stainless-vs-carbon-steel check above — a listing mentioning both stag/ivory and a competing
+// material (or both stag AND ivory together, a contradictory combination) is more likely
+// wrong/misleading than genuinely one or the other, so it's rejected too.
 const stagHandlePattern = /\bstag(?:\s*horn|\s*antler)?\b|\bantler\b/i;
-const nonStagHandlePattern = /\b(?:bone|ivory|mother[\s-]*of[\s-]*pearl|pearl\s+handle|celluloid|bakelite|plastic\s+handle|wood(?:en)?\s+handle|delrin|micarta|g-?10|synthetic\s+handle)\b/i;
+const ivoryHandlePattern = /\bivory\b/i;
+const otherHandlePattern = /\b(?:bone|mother[\s-]*of[\s-]*pearl|pearl\s+handle|celluloid|bakelite|plastic\s+handle|wood(?:en)?\s+handle|delrin|micarta|g-?10|synthetic\s+handle)\b/i;
 
 export type CarvingSetTextSignals = {
   isCarvingSet: boolean;
@@ -165,12 +169,13 @@ export type CarvingSetTextSignals = {
   pieceCount: number | null;
   carbonSteel: boolean;
   stainless: boolean;
-  // "stag" only when stag/antler wording appears with no competing handle-material wording;
-  // "other" when a competing material is mentioned (with or without stag, since a contradictory
-  // listing is treated as a negative signal, not a positive one); "ambiguous" when the text says
-  // nothing about handle material at all — that must fall to vision, never resolve as qualified
-  // from text alone (see decideCarvingSetFromText).
-  stagHandle: "stag" | "other" | "ambiguous";
+  // Raw material read from text, group-agnostic — "ivory" only becomes an accepted positive match
+  // for Sheffield (see decideCarvingSetFromText); every other group treats it the same as "other".
+  // "other" when a competing material is mentioned, or stag and ivory are both mentioned together
+  // (a contradictory listing, treated as a negative signal rather than a positive one); "ambiguous"
+  // when the text says nothing about handle material at all — that must fall to vision, never
+  // resolve as qualified from text alone.
+  handleMaterial: "stag" | "ivory" | "other" | "ambiguous";
 };
 
 // Pure fact-extraction only — this does not decide qualification itself, since that depends on
@@ -180,17 +185,20 @@ export function analyzeCarvingSetText(title: string, description = ""): CarvingS
   const pieceMatch = text.match(pieceCountPattern);
   const pieceCount = pieceMatch ? Number(pieceMatch[1]) : null;
   const stagMentioned = stagHandlePattern.test(text);
-  // "Faux stag" (imitation) is not a genuine stag handle — reuses the same fauxHandlePattern the
-  // Sheffield-only material check below relies on, scoped here to only flip a *stag* mention
-  // (a stray "faux" elsewhere, e.g. describing an unrelated part, shouldn't affect this signal).
-  const nonStagMentioned = nonStagHandlePattern.test(text) || (stagMentioned && fauxHandlePattern.test(text));
+  const ivoryMentioned = ivoryHandlePattern.test(text);
+  // "Faux stag"/"faux ivory" (imitation) is not the genuine material — reuses the same
+  // fauxHandlePattern the Sheffield-only material check below relies on, scoped here to only flip
+  // a stag/ivory mention (a stray "faux" elsewhere, e.g. describing an unrelated part, shouldn't
+  // affect this signal).
+  const faux = fauxHandlePattern.test(text);
+  const rejectMaterial = otherHandlePattern.test(text) || (faux && (stagMentioned || ivoryMentioned)) || (stagMentioned && ivoryMentioned);
   return {
     isCarvingSet: carvingSetPattern.test(text),
     hasCase: caseIndicatorPattern.test(text),
     pieceCount: pieceCount && pieceCount > 0 ? pieceCount : null,
     carbonSteel: carbonSteelPattern.test(text),
     stainless: stainlessPattern.test(text),
-    stagHandle: nonStagMentioned ? "other" : stagMentioned ? "stag" : "ambiguous",
+    handleMaterial: rejectMaterial ? "other" : stagMentioned ? "stag" : ivoryMentioned ? "ivory" : "ambiguous",
   };
 }
 
@@ -204,19 +212,6 @@ export function carvingSetCeiling(group: CarvingSetGroup, pieceCount: number | n
   return pieceCount != null && pieceCount >= 2 ? pieceCount * 10 + 15 : null;
 }
 
-// Sheffield-only: a Gemini vision call only pays for itself once a run's text pass already found a
-// genuinely large crop of leads to narrow down. Below this, every Sheffield item still pending on
-// vision (case-ambiguous, or case/ceiling already known from text but material unconfirmed — see
-// initialCarvingSetRow) is rejected outright instead of spending a vision call (see
-// lib/finder-service.ts's startFinderRun, which counts candidates that passed every text check and
-// are within the flat $200 ceiling as this run's "how many good leads" signal, since text alone
-// rarely marks a Sheffield row "qualified" outright anymore). German has no equivalent gate — every
-// case/piece-ambiguous German item still falls to vision regardless of run volume.
-export const SHEFFIELD_VISION_MIN_QUALIFIED = 30;
-export function sheffieldVisionEligible(eligibleCount: number): boolean {
-  return eligibleCount > SHEFFIELD_VISION_MIN_QUALIFIED;
-}
-
 export type CarvingSetVisionResult = {
   hasCase: boolean;
   pieceCount: number;
@@ -225,14 +220,15 @@ export type CarvingSetVisionResult = {
   material: "carbon_steel" | "stainless_steel" | "indeterminate";
   // Positive requirement, for every group — see evaluateCarvingSetVision. Unlike `material`
   // (Sheffield-only, default-accept-unless-disproven), a set only qualifies when this is
-  // confidently "stag" — "indeterminate" doesn't confirm it any more than "other" does.
-  handleMaterial: "stag" | "other" | "indeterminate";
+  // confidently "stag" (any group) or "ivory" (Sheffield only) — "indeterminate" doesn't confirm
+  // it any more than "other" does.
+  handleMaterial: "stag" | "ivory" | "other" | "indeterminate";
 };
 
 export { VisionBudgetError, VisionQuotaError };
 
 const CARVING_SET_MATERIALS = ["carbon_steel", "stainless_steel", "indeterminate"] as const;
-const CARVING_SET_HANDLE_MATERIALS = ["stag", "other", "indeterminate"] as const;
+const CARVING_SET_HANDLE_MATERIALS = ["stag", "ivory", "other", "indeterminate"] as const;
 
 // Case presence (and, for German, piece count) were always resolved here; material (carbon steel
 // vs. stainless) is now also asked in this same call, folded into the same schema rather than a
@@ -241,12 +237,22 @@ const CARVING_SET_HANDLE_MATERIALS = ["stag", "other", "indeterminate"] as const
 // only real check against the photo, not merely a case-ambiguous fallback. Still only ever *acted
 // on* for Sheffield (see evaluateCarvingSetVision) — German qualifies on either steel type, so its
 // material answer is simply ignored downstream.
-export async function analyzeCarvingSetWithGemini(input: { title: string; description: string; imageUrl: string }): Promise<CarvingSetVisionResult> {
+export async function analyzeCarvingSetWithGemini(input: { title: string; description: string; imageUrl: string; group: CarvingSetGroup }): Promise<CarvingSetVisionResult> {
   const key = process.env.GEMINI_API_KEY?.trim();
   if (!key) throw new Error("GEMINI_API_KEY is not configured.");
   await reserveUsage();
   const model = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
-  const prompt = `Analyze this eBay listing for an antique/vintage carving set buyer. A carving set is a carving knife plus a matching serving fork, and often a sharpening steel, typically kept in a fitted presentation case or box. Determine: whether a case or box is visible in the photo, or clearly stated as included; the total number of physical pieces in the set (knife, fork, steel, etc — do not count the case itself as a piece, and do not count repeated views of the same set); the blade material; and the handle material. First check whether any text is stamped, engraved, or etched directly on the blade itself indicating material (e.g. "STAINLESS", "STAINLESS STEEL", "18/8", "RUSTLESS") — if so, that marking is decisive: answer stainless_steel or carbon_steel to match it, even if the blade's color/patina looks otherwise. Only when no such marking is visible or legible, fall back to the visual appearance of the blades (color, shine, any patina/discoloration, staining): carbon_steel looks like a dull gray tone, visible patina, or light surface staining/rust, while stainless_steel looks bright and uniformly silver with no patina. Answer indeterminate only if neither a legible marking nor a clear enough photo of the blades is available. This buyer only wants stag/antler-handle sets: stag horn has a natural, irregular, tapering surface with visible pores/texture and color variation, unlike smooth wood, uniform bone or ivory, plastic, or metal handles. Answer "stag" only when the handle is clearly stag/antler horn; answer "other" when it's clearly a different material; answer "indeterminate" only if the handle isn't clearly visible enough to tell. If the photo is unclear, ambiguous, or shows something other than a carving set, lower confidence and explain why. Title: ${input.title.slice(0, 300)}. Description: ${input.description.slice(0, 1200)}.`;
+  // Sheffield alone also accepts a genuine ivory handle — the two most easily confused materials
+  // in this dataset are genuine ivory and celluloid (a common ivory imitation used on later,
+  // mass-produced sets): celluloid shows visible parallel lines/striations running down the
+  // length of the handle from its manufacturing process, while genuine ivory is a plain, uniform
+  // white/cream color and sometimes shows a single straight crack running lengthwise down the
+  // handle from natural aging — a crack, not the repeating striped pattern celluloid shows.
+  // German/generic sets keep the original stag-only wording; ivory is just another "other" for them.
+  const handleGuidance = input.group === "sheffield"
+    ? `This buyer wants stag/antler-handle sets, and for this Sheffield set also accepts a genuine ivory handle. Stag horn has a natural, irregular, tapering surface with visible pores/texture and color variation. Genuine ivory is a plain, uniform white or cream color, and sometimes shows a single straight crack running lengthwise down the handle from natural aging. Celluloid, a common ivory imitation, instead shows visible parallel lines/striations running down the length of the handle — that striped pattern is the giveaway it is celluloid, NOT genuine ivory. Answer "stag" only when the handle is clearly stag/antler horn; answer "ivory" only when it's clearly genuine ivory (plain white/cream, no parallel lines/striations); answer "other" when it's clearly a different material (including celluloid or any other ivory imitation, wood, bone, mother-of-pearl, plastic, or metal); answer "indeterminate" only if the handle isn't clearly visible enough to tell.`
+    : `This buyer only wants stag/antler-handle sets: stag horn has a natural, irregular, tapering surface with visible pores/texture and color variation, unlike smooth wood, uniform bone or ivory, plastic, or metal handles. Answer "stag" only when the handle is clearly stag/antler horn; answer "other" when it's clearly a different material; answer "indeterminate" only if the handle isn't clearly visible enough to tell.`;
+  const prompt = `Analyze this eBay listing for an antique/vintage carving set buyer. A carving set is a carving knife plus a matching serving fork, and often a sharpening steel, typically kept in a fitted presentation case or box. Determine: whether a case or box is visible in the photo, or clearly stated as included; the total number of physical pieces in the set (knife, fork, steel, etc — do not count the case itself as a piece, and do not count repeated views of the same set); the blade material; and the handle material. First check whether any text is stamped, engraved, or etched directly on the blade itself indicating material (e.g. "STAINLESS", "STAINLESS STEEL", "18/8", "RUSTLESS") — if so, that marking is decisive: answer stainless_steel or carbon_steel to match it, even if the blade's color/patina looks otherwise. Only when no such marking is visible or legible, fall back to the visual appearance of the blades (color, shine, any patina/discoloration, staining): carbon_steel looks like a dull gray tone, visible patina, or light surface staining/rust, while stainless_steel looks bright and uniformly silver with no patina. Answer indeterminate only if neither a legible marking nor a clear enough photo of the blades is available. ${handleGuidance} If the photo is unclear, ambiguous, or shows something other than a carving set, lower confidence and explain why. Title: ${input.title.slice(0, 300)}. Description: ${input.description.slice(0, 1200)}.`;
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -296,13 +302,18 @@ export type CarvingSetVisionDecision = {
   confident: boolean;
   ceiling: number | null;
   // Merged with whatever text already confirmed (see textConfirmed below) — the values actually
-  // used for qualification, and what callers should persist to carving_has_case/carving_stag_handle
-  // rather than the raw vision.hasCase/vision.handleMaterial fields.
+  // used for qualification, and what callers should persist to
+  // carving_has_case/carving_handle_material rather than the raw vision.hasCase/vision.handleMaterial
+  // fields. Always resolved to one of "stag"/"ivory"/"other" once a vision call has run — never
+  // left unset, mirroring how carving_carbon_steel is always resolved (true/false) once vision
+  // runs; "other" covers both an explicitly competing material and an honest "indeterminate" vision
+  // read, since neither confirms an acceptable handle.
   hasCase: boolean;
-  stagConfirmed: boolean;
+  handleMaterial: "stag" | "ivory" | "other";
   // Set only when the item is definitively rejected regardless of price/shipping (low
   // confidence, no case, an unresolvable German piece count, a handle vision couldn't confirm as
-  // stag, or — Sheffield only — a confident stainless-steel material reading).
+  // stag (or, Sheffield only, ivory), or — Sheffield only — a confident stainless-steel material
+  // reading).
   reason: string | null;
 };
 
@@ -311,12 +322,12 @@ export type CarvingSetVisionDecision = {
 // mirroring how the pocket-knife pipeline splits vision classification from the shipping fetch.
 //
 // textConfirmed carries whatever decideCarvingSetFromText already established before falling back
-// to vision (see its "vision" decision kind) — a case or stag handle the *text* already confirmed
-// is treated as settled, not re-litigated against vision's own (less reliable) photo read. Without
-// this, a title that plainly says "stag horn"/"antler handle" could still be rejected as
-// not_stag_handle_vision just because vision's photo-based guess didn't independently agree — the
-// single biggest source of false-positive rejections found in production.
-export function evaluateCarvingSetVision(group: CarvingSetGroup, vision: CarvingSetVisionResult, confidenceThreshold: number, textConfirmed: { hasCase: boolean; stag: boolean }): CarvingSetVisionDecision {
+// to vision (see its "vision" decision kind) — a case or handle material the *text* already
+// confirmed is treated as settled, not re-litigated against vision's own (less reliable) photo
+// read. Without this, a title that plainly says "stag horn"/"antler handle" could still be
+// rejected as not_stag_handle_vision just because vision's photo-based guess didn't independently
+// agree — the single biggest source of false-positive rejections found in production.
+export function evaluateCarvingSetVision(group: CarvingSetGroup, vision: CarvingSetVisionResult, confidenceThreshold: number, textConfirmed: { hasCase: boolean; handleMaterial: "stag" | "ivory" | null }): CarvingSetVisionDecision {
   const confident = vision.confidence >= confidenceThreshold;
   const ceiling = carvingSetCeiling(group, group !== "sheffield" ? vision.pieceCount : null);
   // Sheffield only, and only an unconditional "stainless_steel" reading rejects — a confident
@@ -325,17 +336,20 @@ export function evaluateCarvingSetVision(group: CarvingSetGroup, vision: Carving
   // ignore vision.material entirely, exactly as they ignore the text-based material check today.
   const stainlessConfirmed = group === "sheffield" && vision.material === "stainless_steel";
   const hasCase = textConfirmed.hasCase || vision.hasCase;
-  // Every group: this is a positive requirement, so only a confirmed "stag" passes — but that
-  // confirmation can come from the text (already trusted at discovery) just as validly as from a
-  // confident vision reading. "indeterminate"/"other" from vision doesn't override a text "stag".
-  const stagConfirmed = textConfirmed.stag || vision.handleMaterial === "stag";
+  // Every group: this is a positive requirement, so only a confirmed "stag" (or, Sheffield only,
+  // "ivory") passes — but that confirmation can come from the text (already trusted at discovery)
+  // just as validly as from a confident vision reading. "indeterminate"/"other" from vision doesn't
+  // override a text-confirmed material.
+  const visionAcceptable = vision.handleMaterial === "stag" || (group === "sheffield" && vision.handleMaterial === "ivory");
+  const handleMaterial: "stag" | "ivory" | "other" = textConfirmed.handleMaterial ?? (visionAcceptable ? vision.handleMaterial as "stag" | "ivory" : "other");
+  const handleConfirmed = handleMaterial !== "other";
   const reason = !confident ? (vision.uncertaintyReason || "low_confidence")
     : stainlessConfirmed ? "stainless_steel_vision"
-    : !stagConfirmed ? "not_stag_handle_vision"
+    : !handleConfirmed ? "not_stag_handle_vision"
     : !hasCase ? "no_case"
     : ceiling == null ? "invalid_count"
     : null;
-  return { confident, ceiling, hasCase, stagConfirmed, reason };
+  return { confident, ceiling, hasCase, handleMaterial, reason };
 }
 
 export type CarvingSetItem = {
@@ -382,7 +396,7 @@ export type CarvingSetExistingRow = {
   carving_piece_count: number | null;
   carving_has_case: boolean | null;
   carving_carbon_steel: boolean | null;
-  carving_stag_handle: boolean | null;
+  carving_handle_material: "stag" | "ivory" | "other" | null;
   shipping_cost: number | string | null;
   shipping_source: string | null;
 };
@@ -391,10 +405,10 @@ export type CarvingSetTextDecision =
   | { kind: "reject"; reason: string; pieceCount: number | null }
   | { kind: "resolved"; qualifies: boolean; reason: string | null; pieceCount: number | null; totalCost: number }
   | { kind: "needs-shipping"; ceiling: number; pieceCount: number | null }
-  // caseConfirmed/stagConfirmed carry whatever text already established even though it wasn't
+  // caseConfirmed/handleConfirmed carry whatever text already established even though it wasn't
   // enough to fully resolve the row — evaluateCarvingSetVision treats these as already-settled
   // facts rather than asking vision to independently reconfirm them (see that function's comment).
-  | { kind: "vision"; pieceCount: number | null; caseConfirmed: boolean; stagConfirmed: boolean };
+  | { kind: "vision"; pieceCount: number | null; caseConfirmed: boolean; handleConfirmed: "stag" | "ivory" | null };
 
 // The text-only qualification decision, independent of the item's currency/price/end-date and of
 // whether a photo is available — shared by initialCarvingSetRow (discovery, during the scan) and
@@ -437,25 +451,29 @@ export function decideCarvingSetFromText(title: string, description: string, gro
     if (fauxHandlePattern.test(fullText)) return { kind: "reject", reason: "faux_handle", pieceCount: text.pieceCount };
   }
 
-  // A positive requirement (only stag/antler-handle sets qualify), so an explicit competing
-  // handle material rejects outright — "ambiguous" (neither mentioned) is handled further down,
-  // by routing to vision instead of letting the fast text-resolve path below finalize the row.
-  // Checked after the Sheffield-only block above so a Sheffield "faux stag" listing keeps
-  // rejecting with the more specific faux_handle reason rather than this more generic one.
-  if (text.stagHandle === "other") return { kind: "reject", reason: "not_stag_handle", pieceCount: text.pieceCount };
+  // A positive requirement (only stag/antler-handle sets qualify, plus genuine ivory for Sheffield
+  // only), so an explicit competing handle material rejects outright, and so does a text-confirmed
+  // ivory handle on a non-Sheffield set (ivory is never acceptable for German/generic) —
+  // "ambiguous" (neither mentioned) is handled further down, by routing to vision instead of
+  // letting the fast text-resolve path below finalize the row. Checked after the Sheffield-only
+  // block above so a Sheffield "faux stag"/"faux ivory" listing keeps rejecting with the more
+  // specific faux_handle reason rather than this more generic one.
+  if (text.handleMaterial === "other") return { kind: "reject", reason: "not_stag_handle", pieceCount: text.pieceCount };
+  if (text.handleMaterial === "ivory" && group !== "sheffield") return { kind: "reject", reason: "not_stag_handle", pieceCount: text.pieceCount };
 
   const ceiling = carvingSetCeiling(group, text.pieceCount);
 
   // German and generic only: case, a usable piece count, AND a confirmed (not merely
   // not-yet-disproven) stag handle are enough to fully resolve from text alone, since neither has
-  // a material requirement. An ambiguous handle (text.stagHandle === "ambiguous") is deliberately
-  // excluded from this fast path — unlike case/material, stag is a positive requirement, so
-  // "nothing said" must fall to vision rather than resolve as qualified. Sheffield never finalizes
-  // here even once text confirms case — the checks above only ever *reject* on a negative material
-  // signal, they never *confirm* carbon steel, so a surviving Sheffield candidate still needs a
-  // vision material check (below) before it can qualify, even though its case/ceiling are already
-  // known.
-  if (group !== "sheffield" && text.hasCase && ceiling != null && text.stagHandle === "stag") {
+  // a material requirement. An ambiguous handle (text.handleMaterial === "ambiguous") is
+  // deliberately excluded from this fast path — unlike case/material, handle material is a
+  // positive requirement, so "nothing said" must fall to vision rather than resolve as qualified.
+  // Sheffield never finalizes here even once text confirms case — the checks above only ever
+  // *reject* on a negative material signal, they never *confirm* carbon steel, so a surviving
+  // Sheffield candidate still needs a vision material check (below) before it can qualify, even
+  // though its case/ceiling are already known. (text.handleMaterial can only be "stag" here, never
+  // "ivory" — a non-Sheffield "ivory" read already rejected above.)
+  if (group !== "sheffield" && text.hasCase && ceiling != null && text.handleMaterial === "stag") {
     const deal = dealAgainstCeiling(itemPrice, shippingCost, ceiling);
     if (!deal.resolved) {
       if (deal.overBudgetOnPriceAlone) return { kind: "reject", reason: "over_budget", pieceCount: text.pieceCount };
@@ -471,16 +489,19 @@ export function decideCarvingSetFromText(title: string, description: string, gro
   if (group === "sheffield" && ceiling != null && itemPrice > ceiling) return { kind: "reject", reason: "over_budget", pieceCount: text.pieceCount };
 
   // Text alone couldn't finalize this row: German/generic still need vision to confirm case, a
-  // usable piece count, and/or (whenever text.stagHandle is "ambiguous") the stag handle itself,
-  // and Sheffield — whose case/ceiling may already be fully known from text — still needs a vision
-  // material check and, same as every group, a stag-handle confirmation (see
+  // usable piece count, and/or (whenever text.handleMaterial is "ambiguous") the stag handle
+  // itself, and Sheffield — whose case/ceiling may already be fully known from text — still needs
+  // a vision material check and, same as every group, a stag/ivory-handle confirmation (see
   // analyzeCarvingSetWithGemini/evaluateCarvingSetVision) before it can qualify, since the checks
   // above only ever rule material out, never confirm it. Same text-first/vision-fallback shape as
   // the pocket-knife pipeline, but via analyzeCarvingSetWithGemini instead of countKnivesWithGemini.
-  // caseConfirmed/stagConfirmed carry forward whatever text DID establish (even though it wasn't
+  // caseConfirmed/handleConfirmed carry forward whatever text DID establish (even though it wasn't
   // enough on its own to resolve the row) so evaluateCarvingSetVision doesn't ask vision to
-  // re-decide a fact the seller's own text already settled.
-  return { kind: "vision", pieceCount: text.pieceCount, caseConfirmed: text.hasCase, stagConfirmed: text.stagHandle === "stag" };
+  // re-decide a fact the seller's own text already settled. handleConfirmed can only be "stag" or
+  // "ivory" here (never "other") — both rejecting handleMaterial values already returned above, and
+  // a non-Sheffield "ivory" read already rejected too.
+  const handleConfirmed = text.handleMaterial === "stag" || text.handleMaterial === "ivory" ? text.handleMaterial : null;
+  return { kind: "vision", pieceCount: text.pieceCount, caseConfirmed: text.hasCase, handleConfirmed };
 }
 
 // Mirrors initialRow's contract in lib/finder-service.ts (same base fields, same status/pending
@@ -501,23 +522,24 @@ export function initialCarvingSetRow(item: CarvingSetItem, keywordPhrases: strin
   if (decision.kind === "reject") return { ...base, ...categoryFields, status: "rejected", reason: decision.reason, processed_at: new Date().toISOString() };
 
   // Both branches below are only ever reached when decideCarvingSetFromText's fast path already
-  // required text.stagHandle === "stag" (see that function), so carving_stag_handle is always
-  // confirmed true here, never merely assumed like carving_carbon_steel below.
+  // required text.handleMaterial === "stag" (see that function — it's German/generic-only, and
+  // ivory is never acceptable for those groups), so carving_handle_material is always confirmed
+  // "stag" here, never merely assumed like carving_carbon_steel below.
   if (decision.kind === "resolved") {
-    const knownFields = { ...categoryFields, knife_count: 1 as const, contains_folding_knife: false as const, confidence: 0.95, detection_source: "text" as const, carving_has_case: true, carving_carbon_steel: null, carving_stag_handle: true };
+    const knownFields = { ...categoryFields, knife_count: 1 as const, contains_folding_knife: false as const, confidence: 0.95, detection_source: "text" as const, carving_has_case: true, carving_carbon_steel: null, carving_handle_material: "stag" as const };
     return { ...base, ...knownFields, status: decision.qualifies ? "qualified" : "rejected", reason: decision.reason, total_cost: decision.totalCost, cost_per_knife: decision.totalCost, processed_at: new Date().toISOString() };
   }
 
   if (decision.kind === "needs-shipping") {
-    const knownFields = { ...categoryFields, knife_count: 1 as const, contains_folding_knife: false as const, confidence: 0.95, detection_source: "text" as const, carving_has_case: true, carving_carbon_steel: null, carving_stag_handle: true };
+    const knownFields = { ...categoryFields, knife_count: 1 as const, contains_folding_knife: false as const, confidence: 0.95, detection_source: "text" as const, carving_has_case: true, carving_carbon_steel: null, carving_handle_material: "stag" as const };
     return { ...base, ...knownFields, status: "pending", reason: null, next_attempt_at: new Date().toISOString() };
   }
 
   const carvingCarbonSteel = group === "sheffield" ? true : null;
-  // Unlike carbon steel (Sheffield-only, default-accept), stag handle has no "assume yes" default
-  // for any group — it stays unconfirmed (null) until vision actually answers it.
-  if (!item.imageUrl) return { ...base, ...categoryFields, carving_carbon_steel: carvingCarbonSteel, carving_stag_handle: null, status: "rejected", reason: "missing_image", processed_at: new Date().toISOString() };
-  return { ...base, ...categoryFields, carving_carbon_steel: carvingCarbonSteel, carving_stag_handle: null, status: "pending", reason: null, next_attempt_at: new Date().toISOString() };
+  // Unlike carbon steel (Sheffield-only, default-accept), handle material has no "assume yes"
+  // default for any group — it stays unconfirmed (null) until vision actually answers it.
+  if (!item.imageUrl) return { ...base, ...categoryFields, carving_carbon_steel: carvingCarbonSteel, carving_handle_material: null, status: "rejected", reason: "missing_image", processed_at: new Date().toISOString() };
+  return { ...base, ...categoryFields, carving_carbon_steel: carvingCarbonSteel, carving_handle_material: null, status: "pending", reason: null, next_attempt_at: new Date().toISOString() };
 }
 
 export function refreshedCarvingSetRow(item: CarvingSetItem, keywordPhrases: string[], runId: string, existing: CarvingSetExistingRow | undefined, group: CarvingSetGroup) {
@@ -536,17 +558,17 @@ export function refreshedCarvingSetRow(item: CarvingSetItem, keywordPhrases: str
   // this is what lets an already-fixed parser bug self-correct for free on the next scan.
   if (!existing || existing.detection_source !== "vision" || existing.knife_count == null || freshRow.knife_count != null) return freshRow;
 
-  // A prior vision call ran, but if it never actually asked about the stag handle at all
-  // (carving_stag_handle: null, not an explicit true/false — only possible for a row discovered
-  // before that column/question existed), that dimension isn't "confirmed false," it's simply
-  // unresolved under today's logic. Rejecting it from this stale, incomplete data would trap every
-  // such legacy row in a permanent false rejection: it still needs vision for case/piece count
-  // (that's the only reason this stale-reuse path was reached at all), so it can never re-resolve
-  // from text alone and reach the fresh-derivation return above — the exact bug that let hundreds
-  // of genuinely stag-handled listings (title explicitly said "stag horn"/"antler") sit rejected as
-  // not_stag_handle_vision in production even after evaluateCarvingSetVision was fixed to trust a
-  // text-confirmed stag handle. Send it back to a real, fresh vision call instead, which will
-  // persist a definitive true/false and make this row's future rescans behave normally.
+  // A prior vision call ran, but if it never actually asked about handle material at all
+  // (carving_handle_material: null — only possible for a row discovered before that column/question
+  // existed), that dimension isn't "confirmed unacceptable," it's simply unresolved under today's
+  // logic. Rejecting it from this stale, incomplete data would trap every such legacy row in a
+  // permanent false rejection: it still needs vision for case/piece count (that's the only reason
+  // this stale-reuse path was reached at all), so it can never re-resolve from text alone and reach
+  // the fresh-derivation return above — the exact bug that let hundreds of genuinely stag-handled
+  // listings (title explicitly said "stag horn"/"antler") sit rejected as not_stag_handle_vision in
+  // production even after evaluateCarvingSetVision was fixed to trust a text-confirmed stag handle.
+  // Send it back to a real, fresh vision call instead, which will persist a definitive verdict and
+  // make this row's future rescans behave normally.
   //
   // knife_count must be explicitly nulled out here, not just omitted: freshRow's "vision" branch
   // never sets it (a brand-new row simply has no value yet), but this is an UPDATE to an EXISTING
@@ -555,7 +577,7 @@ export function refreshedCarvingSetRow(item: CarvingSetItem, keywordPhrases: str
   // the stale knife_count: 1 in place. processCarvingSetRow treats knife_count != null as "already
   // fully resolved, only shipping is missing" and skips straight to a shipping lookup — exactly
   // the bug that let this fix's own fresh-vision-call intent get silently bypassed in testing.
-  if (existing.carving_stag_handle == null) return { ...freshRow, knife_count: null };
+  if (existing.carving_handle_material == null) return { ...freshRow, knife_count: null };
 
   const pieceCount = existing.carving_piece_count;
   const ceiling = carvingSetCeiling(group, pieceCount);
@@ -568,14 +590,16 @@ export function refreshedCarvingSetRow(item: CarvingSetItem, keywordPhrases: str
     carving_piece_count: pieceCount,
     carving_has_case: existing.carving_has_case,
     carving_carbon_steel: existing.carving_carbon_steel,
-    carving_stag_handle: existing.carving_stag_handle,
+    carving_handle_material: existing.carving_handle_material,
   };
-  // Every group: stag handle is a positive requirement (unlike material/case, nothing here ever
-  // defaults to true), so a stale row only stays qualifiable if a previous vision call actually
-  // confirmed "stag" — not merely failed to confirm "not stag". This also covers rows persisted by
-  // a pre-fix build that predates this column entirely (carving_stag_handle: null): those must
-  // re-reject here rather than silently qualify on stale case/ceiling data alone.
-  if (existing.carving_stag_handle !== true) return { ...freshRow, ...knownFields, status: "rejected" as const, reason: "not_stag_handle_vision", processed_at: new Date().toISOString() };
+  // Every group: handle material is a positive requirement (unlike carbon steel/case, nothing here
+  // ever defaults to an accepted value), so a stale row only stays qualifiable if a previous vision
+  // call actually confirmed "stag" (any group) or "ivory" (Sheffield only) — not merely failed to
+  // confirm "other". This also covers rows persisted by a pre-fix build that predates this column
+  // entirely (carving_handle_material: null): those must re-reject here rather than silently
+  // qualify on stale case/ceiling data alone.
+  const handleAccepted = existing.carving_handle_material === "stag" || (group === "sheffield" && existing.carving_handle_material === "ivory");
+  if (!handleAccepted) return { ...freshRow, ...knownFields, status: "rejected" as const, reason: "not_stag_handle_vision", processed_at: new Date().toISOString() };
   // Sheffield only: a previous vision call may have confirmed stainless steel (persisted as
   // carving_carbon_steel: false in processCarvingSetRow) even though text alone never asks vision
   // about material at initial discovery — that stale verdict must keep rejecting the item on a

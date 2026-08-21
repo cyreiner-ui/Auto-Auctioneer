@@ -5,7 +5,7 @@ import { usePersistedState } from "../../../lib/use-persisted-state";
 
 export type FinderResult = {
   ebay_item_id: string; title: string; ebay_url: string; image_url: string | null; item_price: number; shipping_cost: number; total_cost: number; cost_per_knife: number; knife_count: number; detection_source: string; discovered_at: string; gixen_status?: string | null; gixen_message?: string | null; buying_options: string[]; max_bid: number | null;
-  carving_piece_count?: number | null; carving_has_case?: boolean | null; carving_carbon_steel?: boolean | null; carving_stag_handle?: boolean | null;
+  carving_piece_count?: number | null; carving_has_case?: boolean | null; carving_carbon_steel?: boolean | null; carving_handle_material?: "stag" | "ivory" | "other" | null;
   gaucho_match_confidence?: number | null; gaucho_maker_match?: boolean | null; gaucho_match_notes?: string | null;
   reason?: string | null;
 };
@@ -48,7 +48,6 @@ const REJECTION_REASON_LABEL: Record<string, string> = {
   ended: "Listing had already ended",
   missing_image: "No photo to analyze",
   low_confidence: "Photo analysis wasn't confident enough",
-  low_volume_skip_vision: "Skipped photo analysis — too few qualifying Sheffield sets today to justify the cost",
   no_case: "No case/box shown or mentioned",
   not_carving_set: "Listing text never actually says \"carving set\"",
   stainless_steel: "Stated or implied stainless steel, not carbon steel",
@@ -57,8 +56,8 @@ const REJECTION_REASON_LABEL: Record<string, string> = {
   faux_handle: "Imitation (faux) handle material, typical of later stainless sets",
   modern_origin: "Modern (USA/Japan-made) manufacture, not antique English/German",
   wood_carving_tool: "Wood-carving/whittling tool kit, not table-carving cutlery",
-  not_stag_handle: "Handle material isn't stag/antler",
-  not_stag_handle_vision: "Photo didn't confirm a stag/antler handle",
+  not_stag_handle: "Handle material isn't stag/antler (or, for Sheffield, ivory)",
+  not_stag_handle_vision: "Photo didn't confirm a stag/antler (or, for Sheffield, ivory) handle",
   negative_keyword_match: "Matched a negative keyword before any photo analysis",
 };
 
@@ -136,7 +135,8 @@ export default function FinderResultsGrid({ results, busy, emptyMessage, actions
                   <span>{result.carving_piece_count ?? 1} piece{(result.carving_piece_count ?? 1) === 1 ? "" : "s"}</span>
                   {result.carving_has_case && <span>Cased</span>}
                   {result.carving_carbon_steel && <span>Carbon steel</span>}
-                  {result.carving_stag_handle && <span>Stag handle</span>}
+                  {result.carving_handle_material === "stag" && <span>Stag handle</span>}
+                  {result.carving_handle_material === "ivory" && <span>Ivory handle</span>}
                 </>
               : variant === "gaucho_knife"
               ? <>

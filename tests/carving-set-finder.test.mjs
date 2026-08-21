@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import nodemailer from "nodemailer";
-import { analyzeCarvingSetText, carvingSetCeiling, carvingSetGroupForPhrases, CARVING_SET_CATEGORY_BROWSE_PHRASE, CARVING_SET_PHRASES, decideCarvingSetFromText, evaluateCarvingSetVision, initialCarvingSetRow, sheffieldVisionEligible } from "../lib/carving-set-finder.ts";
+import { analyzeCarvingSetText, carvingSetCeiling, carvingSetGroupForPhrases, CARVING_SET_CATEGORY_BROWSE_PHRASE, CARVING_SET_PHRASES, decideCarvingSetFromText, evaluateCarvingSetVision, initialCarvingSetRow } from "../lib/carving-set-finder.ts";
 import { processPendingFinderItems, startFinderRun } from "../lib/finder-service.ts";
 import { supabaseAdmin } from "../lib/supabase-admin.ts";
 import { createFakeSupabase } from "./helpers/fake-supabase.mjs";
@@ -60,20 +60,29 @@ test("decideCarvingSetFromText: \"no deep gouges\"/other cutlery condition-repor
   }
 });
 
-test("analyzeCarvingSetText: stagHandle is \"stag\" only for a genuine (non-faux) stag/antler mention", () => {
-  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, Stag Horn Handle, cased").stagHandle, "stag");
-  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, Antler Handle, cased").stagHandle, "stag");
-  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, Faux Stag Horn Handle, cased").stagHandle, "other", "\"faux\" stag is not a genuine stag handle");
+test("analyzeCarvingSetText: handleMaterial is \"stag\" only for a genuine (non-faux) stag/antler mention", () => {
+  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, Stag Horn Handle, cased").handleMaterial, "stag");
+  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, Antler Handle, cased").handleMaterial, "stag");
+  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, Faux Stag Horn Handle, cased").handleMaterial, "other", "\"faux\" stag is not a genuine stag handle");
 });
 
-test("analyzeCarvingSetText: stagHandle is \"other\" for an explicit competing handle material", () => {
-  for (const material of ["bone handle", "ivory handle", "mother of pearl handle", "pearl handle", "celluloid handle", "bakelite handle", "plastic handle", "wood handle", "wooden handle", "delrin handle", "micarta handle", "g10 handle", "synthetic handle"]) {
-    assert.equal(analyzeCarvingSetText(`Sheffield Carving Set, ${material}, cased`).stagHandle, "other", `"${material}" should reject as a competing material`);
+test("analyzeCarvingSetText: handleMaterial is \"ivory\" only for a genuine (non-faux) ivory mention", () => {
+  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, Ivory Handle, cased").handleMaterial, "ivory");
+  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, Faux Ivory Handle, cased").handleMaterial, "other", "\"faux\" ivory is not a genuine ivory handle");
+});
+
+test("analyzeCarvingSetText: handleMaterial is \"other\" for a contradictory stag+ivory mention", () => {
+  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, stag or ivory handle, cased").handleMaterial, "other");
+});
+
+test("analyzeCarvingSetText: handleMaterial is \"other\" for an explicit competing handle material", () => {
+  for (const material of ["bone handle", "mother of pearl handle", "pearl handle", "celluloid handle", "bakelite handle", "plastic handle", "wood handle", "wooden handle", "delrin handle", "micarta handle", "g10 handle", "synthetic handle"]) {
+    assert.equal(analyzeCarvingSetText(`Sheffield Carving Set, ${material}, cased`).handleMaterial, "other", `"${material}" should reject as a competing material`);
   }
 });
 
-test("analyzeCarvingSetText: stagHandle is \"ambiguous\" when the text says nothing about handle material", () => {
-  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, cased").stagHandle, "ambiguous");
+test("analyzeCarvingSetText: handleMaterial is \"ambiguous\" when the text says nothing about handle material", () => {
+  assert.equal(analyzeCarvingSetText("Sheffield Carving Set, cased").handleMaterial, "ambiguous");
 });
 
 test("carvingSetGroupForPhrases: a brand-specific generic phrase resolves to \"generic\", and the disabled legacy bare phrase still resolves too", () => {
@@ -115,20 +124,31 @@ test("decideCarvingSetFromText rejects an explicit non-stag handle, for every gr
   }
 });
 
+test("decideCarvingSetFromText: a text-confirmed ivory handle rejects for German/generic, but falls to vision for Sheffield", () => {
+  for (const group of ["german", "generic"]) {
+    const decision = decideCarvingSetFromText("Elkington Carving Set, Ivory Handle, cased", "", group, 50, 0);
+    assert.equal(decision.kind, "reject", `${group}: ivory is never acceptable outside Sheffield`);
+    assert.equal(decision.reason, "not_stag_handle");
+  }
+  const sheffield = decideCarvingSetFromText("Sheffield Carving Set, Ivory Handle, cased", "", "sheffield", 150, 0);
+  assert.equal(sheffield.kind, "vision", "Sheffield never finalizes from text alone, even once ivory is confirmed");
+  assert.equal(sheffield.handleConfirmed, "ivory");
+});
+
 test("decideCarvingSetFromText: falling back to vision still carries forward whatever text already confirmed, for every group", () => {
   for (const group of ["sheffield", "german", "generic"]) {
     // Stag confirmed by text, case not mentioned at all — matches the production titles that were
     // wrongly rejected as not_stag_handle_vision (e.g. "Joseph Rodgers ... stag horn ... carving set").
     const stagOnly = decideCarvingSetFromText("Joseph Rodgers and Sons stag horn Victorian Era four piece carving set", "", group, 150, 0);
     assert.equal(stagOnly.kind, "vision");
-    assert.equal(stagOnly.stagConfirmed, true);
+    assert.equal(stagOnly.handleConfirmed, "stag");
     assert.equal(stagOnly.caseConfirmed, false);
 
     // Case confirmed by text, stag not mentioned — the symmetric case.
     const caseOnly = decideCarvingSetFromText("Elkington Carving Set, cased", "", group, 150, 0);
     assert.equal(caseOnly.kind, "vision");
     assert.equal(caseOnly.caseConfirmed, true);
-    assert.equal(caseOnly.stagConfirmed, false);
+    assert.equal(caseOnly.handleConfirmed, null);
   }
 });
 
@@ -175,19 +195,13 @@ test("carvingSetCeiling: German returns null when the piece count isn't resolvab
   assert.equal(carvingSetCeiling("german", 1), null, "a single piece isn't a genuine carving set");
 });
 
-test("sheffieldVisionEligible: only more than 30 qualified results unlock vision", () => {
-  assert.equal(sheffieldVisionEligible(0), false);
-  assert.equal(sheffieldVisionEligible(30), false, "exactly 30 is not \"more than\" 30");
-  assert.equal(sheffieldVisionEligible(31), true);
-});
-
 function visionResult(overrides = {}) {
   return { hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel", handleMaterial: "stag", ...overrides };
 }
 
-// Text confirmed neither case nor stag — isolates vision's own decision logic, same as every test
-// below except the ones specifically about the text-confirmed-overrides-vision behavior.
-const NOTHING_FROM_TEXT = { hasCase: false, stag: false };
+// Text confirmed neither case nor handle material — isolates vision's own decision logic, same as
+// every test below except the ones specifically about the text-confirmed-overrides-vision behavior.
+const NOTHING_FROM_TEXT = { hasCase: false, handleMaterial: null };
 
 test("evaluateCarvingSetVision: a confident stainless_steel reading rejects a Sheffield item", () => {
   const decision = evaluateCarvingSetVision("sheffield", visionResult({ material: "stainless_steel" }), 0.9, NOTHING_FROM_TEXT);
@@ -218,19 +232,38 @@ test("evaluateCarvingSetVision: only a confident \"stag\" handleMaterial reading
   }
 });
 
+test("evaluateCarvingSetVision: a confident \"ivory\" handleMaterial reading passes only for Sheffield", () => {
+  const sheffield = evaluateCarvingSetVision("sheffield", visionResult({ handleMaterial: "ivory" }), 0.9, NOTHING_FROM_TEXT);
+  assert.equal(sheffield.reason, null, "Sheffield accepts a confident ivory reading");
+  assert.equal(sheffield.handleMaterial, "ivory");
+  for (const group of ["german", "generic"]) {
+    const decision = evaluateCarvingSetVision(group, visionResult({ handleMaterial: "ivory" }), 0.9, NOTHING_FROM_TEXT);
+    assert.equal(decision.reason, "not_stag_handle_vision", `${group}: ivory is never acceptable outside Sheffield`);
+    assert.equal(decision.handleMaterial, "other");
+  }
+});
+
 test("evaluateCarvingSetVision: a text-confirmed stag handle survives even when vision's own photo read disagrees or is unsure", () => {
   for (const group of ["sheffield", "german", "generic"]) {
     for (const handleMaterial of ["other", "indeterminate", "stag"]) {
-      const decision = evaluateCarvingSetVision(group, visionResult({ handleMaterial }), 0.9, { hasCase: false, stag: true });
+      const decision = evaluateCarvingSetVision(group, visionResult({ handleMaterial }), 0.9, { hasCase: false, handleMaterial: "stag" });
       assert.notEqual(decision.reason, "not_stag_handle_vision", `${group}/${handleMaterial}: text already confirmed stag, vision must not override it`);
-      assert.equal(decision.stagConfirmed, true);
+      assert.equal(decision.handleMaterial, "stag");
     }
+  }
+});
+
+test("evaluateCarvingSetVision: a text-confirmed ivory handle survives on Sheffield even when vision's own photo read disagrees or is unsure", () => {
+  for (const handleMaterial of ["other", "indeterminate", "stag", "ivory"]) {
+    const decision = evaluateCarvingSetVision("sheffield", visionResult({ handleMaterial }), 0.9, { hasCase: false, handleMaterial: "ivory" });
+    assert.notEqual(decision.reason, "not_stag_handle_vision", `${handleMaterial}: text already confirmed ivory, vision must not override it`);
+    assert.equal(decision.handleMaterial, "ivory");
   }
 });
 
 test("evaluateCarvingSetVision: a text-confirmed case survives even when vision says no case", () => {
   for (const group of ["sheffield", "german", "generic"]) {
-    const decision = evaluateCarvingSetVision(group, visionResult({ hasCase: false }), 0.9, { hasCase: true, stag: true });
+    const decision = evaluateCarvingSetVision(group, visionResult({ hasCase: false }), 0.9, { hasCase: true, handleMaterial: "stag" });
     assert.notEqual(decision.reason, "no_case", `${group}: text already confirmed a case, vision must not override it`);
     assert.equal(decision.hasCase, true);
   }
@@ -508,7 +541,7 @@ test("era/style wording never rejects a German carving set (no material restrict
         const [item] = fake.tables.finder_items;
         assert.equal(item.status, "qualified");
         assert.equal(item.carving_carbon_steel, null);
-        assert.equal(item.carving_stag_handle, true);
+        assert.equal(item.carving_handle_material, "stag");
       });
     });
   });
@@ -593,35 +626,10 @@ function shefCasedItem(index) {
 }
 
 // Every Sheffield candidate that passes the text checks now needs a vision material check (see
-// initialCarvingSetRow), so a text-cased item and a case-ambiguous one are treated identically by
-// the volume gate below — both land in status "pending" with knife_count unset. The gate's "how
-// many good leads did this run find" signal is now the count of those pending rows (see
-// lib/finder-service.ts's startFinderRun), not a literal "qualified" count.
-test("startFinderRun rejects every Sheffield candidate without spending a vision call when this run's pending-for-vision count is 30 or fewer", async (t) => {
-  await withEnv(ENV, async () => {
-    mockMailer(t, []);
-    let geminiCalled = false;
-    const casedItems = Array.from({ length: 30 }, (_, index) => shefCasedItem(index));
-    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
-      await withFetch([
-        tokenRoute,
-        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: casedItems }) },
-        { test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => { geminiCalled = true; return jsonResponse({}); } },
-      ], async () => {
-        const { run } = await startFinderRun("manual", "run-carving-low-volume");
-        assert.equal(run.qualified, 0, "exactly 30 pending-for-vision candidates is not \"more than\" 30");
-        assert.equal(fake.tables.finder_items.length, 30);
-        for (const row of fake.tables.finder_items) {
-          assert.equal(row.status, "rejected");
-          assert.equal(row.reason, "low_volume_skip_vision");
-        }
-        assert.equal(geminiCalled, false, "Gemini must never be spent when this run's pending-for-vision count doesn't exceed 30");
-      });
-    });
-  });
-});
-
-test("startFinderRun leaves every Sheffield candidate pending for vision once this run's pending-for-vision count exceeds 30, and vision then confirms carbon steel to qualify them", async (t) => {
+// initialCarvingSetRow), so a text-cased item and a case-ambiguous one are treated identically —
+// both land in status "pending" with knife_count unset, regardless of how many other Sheffield
+// candidates this run found.
+test("startFinderRun leaves every Sheffield candidate pending for vision, and vision then confirms carbon steel to qualify them", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
     const casedItems = Array.from({ length: 31 }, (_, index) => shefCasedItem(index));
@@ -631,9 +639,9 @@ test("startFinderRun leaves every Sheffield candidate pending for vision once th
         { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: casedItems }) },
       ], async () => {
         const { run } = await startFinderRun("manual", "run-carving-high-volume");
-        assert.equal(run.qualified, 0, "text alone never finalizes a Sheffield row anymore, even once the volume gate opens");
+        assert.equal(run.qualified, 0, "text alone never finalizes a Sheffield row anymore");
         assert.equal(fake.tables.finder_items.length, 31);
-        for (const row of fake.tables.finder_items) assert.equal(row.status, "pending", "more than 30 pending-for-vision candidates leaves every one of them eligible for vision");
+        for (const row of fake.tables.finder_items) assert.equal(row.status, "pending", "every Sheffield candidate is eligible for vision");
       });
       await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel", handleMaterial: "stag" })], async () => {
         const { processed } = await processPendingFinderItems(40);
@@ -642,8 +650,45 @@ test("startFinderRun leaves every Sheffield candidate pending for vision once th
           assert.equal(row.status, "qualified");
           assert.equal(row.detection_source, "vision");
           assert.equal(row.carving_carbon_steel, true);
-          assert.equal(row.carving_stag_handle, true);
+          assert.equal(row.carving_handle_material, "stag");
         }
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems qualifies a Sheffield set via vision when the photo confirms a genuine ivory handle, unlike German which vision still rejects on the same ivory reading", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [
+        {
+          ebay_item_id: "v1|vision-ivory-sheffield|0", run_id: null, keyword_phrases: ["sheffield carving set"],
+          title: "Antique Sheffield Carving Set, with fitted case", short_description: "",
+          carving_carbon_steel: true, carving_has_case: true,
+          image_url: "https://i.ebayimg.com/vision-ivory-sheffield.jpg", item_price: 150, shipping_cost: 10, buying_options: ["FIXED_PRICE"],
+          status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+        },
+        {
+          ebay_item_id: "v1|vision-ivory-german|0", run_id: null, keyword_phrases: ["german carving set"],
+          title: "Antique German Carving Set, with fitted case, 2 piece", short_description: "",
+          carving_piece_count: 2, carving_has_case: true,
+          image_url: "https://i.ebayimg.com/vision-ivory-german.jpg", item_price: 30, shipping_cost: 0, buying_options: ["FIXED_PRICE"],
+          status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+        },
+      ],
+    }, async (fake) => {
+      await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel", handleMaterial: "ivory" })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 2);
+        const sheffieldItem = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|vision-ivory-sheffield|0");
+        assert.equal(sheffieldItem.status, "qualified", "Sheffield accepts a confidently-confirmed ivory handle");
+        assert.equal(sheffieldItem.carving_handle_material, "ivory");
+        const germanItem = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|vision-ivory-german|0");
+        assert.equal(germanItem.status, "rejected", "ivory is never acceptable for German");
+        assert.equal(germanItem.reason, "not_stag_handle_vision");
+        assert.equal(germanItem.carving_handle_material, "other");
       });
     });
   });
@@ -747,7 +792,7 @@ test("processPendingFinderItems qualifies a Sheffield set via vision once case i
         assert.equal(item.total_cost, 160);
         assert.equal(item.carving_has_case, true);
         assert.equal(item.carving_carbon_steel, true, "a confident carbon_steel vision reading doesn't overturn the row's already-resolved material");
-        assert.equal(item.carving_stag_handle, true);
+        assert.equal(item.carving_handle_material, "stag");
       });
     });
   });
@@ -805,7 +850,7 @@ test("processPendingFinderItems fetches the full description first and qualifies
         assert.equal(item.detection_source, "text");
         assert.equal(item.carving_piece_count, 3);
         assert.equal(item.total_cost, 40);
-        assert.equal(item.carving_stag_handle, true);
+        assert.equal(item.carving_handle_material, "stag");
       });
     });
   });
@@ -825,7 +870,7 @@ test("startFinderRun does not spend a fresh Gemini call on refresh once a carvin
         detection_source: "vision", item_category: "carving_set", reason: "no_case",
         // Stag handle was already confirmed by a prior vision call — this test is about the case
         // requirement specifically, not stag, so stag must not be what re-rejects it here.
-        carving_piece_count: 2, carving_has_case: false, carving_carbon_steel: true, carving_stag_handle: true, discovered_at: "2026-01-01",
+        carving_piece_count: 2, carving_has_case: false, carving_carbon_steel: true, carving_handle_material: "stag", discovered_at: "2026-01-01",
       }],
     }, async (fake) => {
       await withFetch([
@@ -859,7 +904,7 @@ test("startFinderRun does not spend a fresh Gemini call on refresh once a carvin
         detection_source: "vision", item_category: "carving_set", reason: "stainless_steel_vision",
         // A prior vision call confirmed hasCase and stag handle but overturned the text-default
         // material to stainless — carving_carbon_steel: false is what makes that verdict stick.
-        carving_piece_count: 2, carving_has_case: true, carving_carbon_steel: false, carving_stag_handle: true, discovered_at: "2026-01-01",
+        carving_piece_count: 2, carving_has_case: true, carving_carbon_steel: false, carving_handle_material: "stag", discovered_at: "2026-01-01",
       }],
     }, async (fake) => {
       await withFetch([
@@ -890,16 +935,16 @@ test("startFinderRun sends a stale German set back for a fresh vision call when 
         ebay_url: "https://www.ebay.com/itm/stale-no-stag", image_url: "https://i.ebayimg.com/stale-no-stag.jpg",
         item_price: 30, shipping_cost: 0, currency: "USD", buying_options: ["FIXED_PRICE"],
         // Case and material were confirmed by a prior vision call (predating the stag-handle
-        // requirement), so it currently sits qualified — but carving_stag_handle was never asked
-        // about back then, so it's null, not true or false. That's genuinely unresolved, not
-        // "confirmed not stag" — rejecting it outright from this stale, incomplete data would trap
+        // requirement), so it currently sits qualified — but carving_handle_material was never
+        // asked about back then, so it's null, not "stag" or "other". That's genuinely unresolved,
+        // not "confirmed not stag" — rejecting it outright from this stale, incomplete data would trap
         // it in a permanent false rejection (this title has no case/piece-count wording either, so
         // it can never resolve from text alone and reach the fresh-derivation path). It must
         // instead get a real fresh vision call, which is the only thing that can properly answer
         // the stag question under the current logic.
         status: "qualified", knife_count: 1, contains_folding_knife: false, confidence: 0.95,
         detection_source: "vision", item_category: "carving_set", reason: null,
-        carving_piece_count: 2, carving_has_case: true, carving_carbon_steel: null, carving_stag_handle: null, discovered_at: "2026-01-01",
+        carving_piece_count: 2, carving_has_case: true, carving_carbon_steel: null, carving_handle_material: null, discovered_at: "2026-01-01",
       }],
     }, async (fake) => {
       await withFetch([
@@ -932,7 +977,7 @@ test("end to end: a legacy stale row with an unresolved stag handle gets a fresh
         item_price: 30, shipping_cost: 0, currency: "USD", buying_options: ["FIXED_PRICE"],
         status: "qualified", knife_count: 1, contains_folding_knife: false, confidence: 0.95,
         detection_source: "vision", item_category: "carving_set", reason: null,
-        carving_piece_count: 2, carving_has_case: true, carving_carbon_steel: null, carving_stag_handle: null, discovered_at: "2026-01-01",
+        carving_piece_count: 2, carving_has_case: true, carving_carbon_steel: null, carving_handle_material: null, discovered_at: "2026-01-01",
       }],
     }, async (fake) => {
       await withFetch([
@@ -951,7 +996,7 @@ test("end to end: a legacy stale row with an unresolved stag handle gets a fresh
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
         assert.equal(item.status, "qualified", "the fresh vision call confirms stag, so this genuinely-good listing now qualifies instead of being stuck rejected");
-        assert.equal(item.carving_stag_handle, true);
+        assert.equal(item.carving_handle_material, "stag");
       });
     });
   });

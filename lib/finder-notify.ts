@@ -15,7 +15,7 @@ export type NotifiableFinderItem = {
   carving_piece_count?: number | null;
   carving_has_case?: boolean | null;
   carving_carbon_steel?: boolean | null;
-  carving_stag_handle?: boolean | null;
+  carving_handle_material?: "stag" | "ivory" | "other" | null;
   gaucho_match_confidence?: number | null;
   gaucho_maker_match?: boolean | null;
   gaucho_match_notes?: string | null;
@@ -31,7 +31,8 @@ function itemDetailLine(item: NotifiableFinderItem, kind: NotifyKind) {
     const parts = [`${pieces} piece${pieces === 1 ? "" : "s"}`];
     if (item.carving_has_case) parts.push("cased");
     if (item.carving_carbon_steel) parts.push("carbon steel");
-    if (item.carving_stag_handle) parts.push("stag handle");
+    if (item.carving_handle_material === "stag") parts.push("stag handle");
+    else if (item.carving_handle_material === "ivory") parts.push("ivory handle");
     parts.push(`${usd(item.total_cost)} total`);
     return parts.join(" · ");
   }
