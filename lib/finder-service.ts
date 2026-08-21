@@ -772,6 +772,14 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   // didn't contain.
   async function processGauchoKnifeRow(row: FinderRow) {
     if (row.run_id) runIds.add(row.run_id);
+    // Nothing to compare a candidate against yet — defer without spending an eBay/Gemini call or
+    // counting against the row's attempts (so it never hits the 3-attempt "error" cutoff over
+    // this alone); it'll pick back up on its own once staff upload a reference photo.
+    if (!gauchoReferenceImages.length) {
+      await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: "No reference images are configured for the gaucho-knife finder yet." }).eq("ebay_item_id", row.ebay_item_id);
+      deferred++;
+      return;
+    }
     try {
       const description = await getItemDescription(row.ebay_item_id, await tokenForLookup());
       const negativeMatch = matchesNegativeKeyword(row.title, description, gauchoNegativePhrases);
