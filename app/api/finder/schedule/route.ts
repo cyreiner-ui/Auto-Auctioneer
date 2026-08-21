@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { updateScheduleSettings, type FinderCategory } from "@/lib/finder-service";
+import { isFinderCategory, updateScheduleSettings, type FinderCategory } from "@/lib/finder-service";
 import { requireStaff } from "@/lib/staff-auth";
 
 function parseCategory(value: unknown): FinderCategory | null {
-  return value === "pocket_knife" || value === "carving_set" ? value : null;
+  return isFinderCategory(value) ? value : null;
 }
 
 export async function PATCH(request: Request) {

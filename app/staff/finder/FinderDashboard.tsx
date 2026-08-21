@@ -5,7 +5,7 @@ import Link from "next/link";
 import FinderResultsGrid, { type FinderResult } from "./FinderResultsGrid";
 import { usePersistedState } from "../../../lib/use-persisted-state";
 
-type FinderKind = "pocket_knife" | "carving_set";
+type FinderKind = "pocket_knife" | "carving_set" | "gaucho_knife";
 
 type Run = { id: string; trigger: string; status: string; keywords_scanned: number; current_keyword: string | null; items_seen: number; items_added: number; qualified: number; new_qualified: number; rejected: number; errors: string[]; started_at: string };
 type Overview = { results: FinderResult[]; runs: Run[]; keywords: { id: string; phrase: string; enabled: boolean }[]; counts: { pending: number; rejected: number; qualified: number }; settings: { zip: string; maxCostPerKnife: number } };
@@ -13,10 +13,10 @@ type Overview = { results: FinderResult[]; runs: Run[]; keywords: { id: string; 
 const usd = (value: number) => Number(value || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 const RUN_STATUS_LABEL: Record<string, string> = { running: "Working…", completed: "Done", failed: "Had a problem" };
 
-const KIND_LABEL: Record<FinderKind, string> = { pocket_knife: "Pocket Knife Finder", carving_set: "Carving Set Finder" };
-const KIND_SETTINGS_HREF: Record<FinderKind, string> = { pocket_knife: "/staff/finder/settings", carving_set: "/staff/finder/carving-sets/settings" };
-const KIND_ARCHIVED_HREF: Record<FinderKind, string> = { pocket_knife: "/staff/finder/archived", carving_set: "/staff/finder/carving-sets/archived" };
-const KIND_REJECTED_HREF: Record<FinderKind, string> = { pocket_knife: "/staff/finder/rejected", carving_set: "/staff/finder/carving-sets/rejected" };
+const KIND_LABEL: Record<FinderKind, string> = { pocket_knife: "Pocket Knife Finder", carving_set: "Carving Set Finder", gaucho_knife: "Gaucho Knife Finder" };
+const KIND_SETTINGS_HREF: Record<FinderKind, string> = { pocket_knife: "/staff/finder/settings", carving_set: "/staff/finder/carving-sets/settings", gaucho_knife: "/staff/finder/gaucho-knives/settings" };
+const KIND_ARCHIVED_HREF: Record<FinderKind, string> = { pocket_knife: "/staff/finder/archived", carving_set: "/staff/finder/carving-sets/archived", gaucho_knife: "/staff/finder/gaucho-knives/archived" };
+const KIND_REJECTED_HREF: Record<FinderKind, string> = { pocket_knife: "/staff/finder/rejected", carving_set: "/staff/finder/carving-sets/rejected", gaucho_knife: "/staff/finder/gaucho-knives/rejected" };
 
 export default function FinderDashboard() {
   const [kind, setKind] = usePersistedState<FinderKind>("knife-auctions:finder-kind", "pocket_knife");
@@ -91,13 +91,16 @@ export default function FinderDashboard() {
           <select id="finder-kind-select" value={kind} onChange={(event) => setKind(event.target.value as FinderKind)}>
             <option value="pocket_knife">{KIND_LABEL.pocket_knife}</option>
             <option value="carving_set">{KIND_LABEL.carving_set}</option>
+            <option value="gaucho_knife">{KIND_LABEL.gaucho_knife}</option>
           </select>
         </div>
         <h1>{KIND_LABEL[kind]}</h1>
         <p className="muted">
           {kind === "pocket_knife"
             ? <>Daily snapshots delivered to {data?.settings.zip ?? "—"} · maximum {usd(data?.settings.maxCostPerKnife ?? 0)} per knife including shipping</>
-            : <>Sheffield/English sets: $200 flat, carbon steel only. German and other cased sets: $10 × piece count + $15. A case is required for all three.</>}
+            : kind === "carving_set"
+            ? <>Sheffield/English sets: $200 flat, carbon steel only. German and other cased sets: $10 × piece count + $15. A case is required for all three.</>
+            : <>Discovered by visual match against your reference photos (plus a keyword-search supplement) — no price cap yet, review every match yourself.</>}
         </p>
         <div className="finder-header-links">
           <Link className="back finder-settings-link" href={KIND_SETTINGS_HREF[kind]}>Search settings</Link>

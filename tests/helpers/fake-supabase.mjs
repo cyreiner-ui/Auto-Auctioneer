@@ -140,12 +140,44 @@ class RpcCall {
   then(onFulfilled, onRejected) { return Promise.resolve(this.result).then(onFulfilled, onRejected); }
 }
 
+// Minimal in-memory stand-in for supabase-js's Storage API — only the calls
+// lib/gemini-vision.ts's referenceImagePart and the gaucho-reference-images route actually use.
+function createFakeStorage(files) {
+  return {
+    from(bucket) {
+      const key = (path) => `${bucket}/${path}`;
+      return {
+        async download(path) {
+          const file = files.get(key(path));
+          if (!file) return { data: null, error: { message: `Not found: ${key(path)}` } };
+          return { data: { size: file.data.length, type: file.contentType, arrayBuffer: async () => file.data.buffer.slice(file.data.byteOffset, file.data.byteOffset + file.data.byteLength) }, error: null };
+        },
+        async upload(path, data, opts) {
+          if (files.has(key(path)) && !opts?.upsert) return { data: null, error: { message: "The resource already exists" } };
+          const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
+          files.set(key(path), { data: bytes, contentType: opts?.contentType || "application/octet-stream" });
+          return { data: { path }, error: null };
+        },
+        async remove(paths) {
+          for (const path of paths) files.delete(key(path));
+          return { data: paths.map((path) => ({ name: path })), error: null };
+        },
+        async createSignedUrl(path) {
+          if (!files.has(key(path))) return { data: null, error: { message: `Not found: ${key(path)}` } };
+          return { data: { signedUrl: `https://fake-storage.test/${key(path)}` }, error: null };
+        },
+      };
+    },
+  };
+}
+
 export function createFakeSupabase(seed = {}) {
   const store = {
     tables: Object.fromEntries(Object.entries(seed).map(([name, rows]) => [name, rows.map((row) => ({ ...row }))])),
     _table(name) { if (!this.tables[name]) this.tables[name] = []; return this.tables[name]; },
   };
   const rpcHandlers = new Map();
+  const files = new Map();
 
   return {
     tables: store.tables,
@@ -156,5 +188,8 @@ export function createFakeSupabase(seed = {}) {
       return new RpcCall(handler(params));
     },
     setRpc(name, handler) { rpcHandlers.set(name, handler); },
+    storage: createFakeStorage(files),
+    // Test-only helper: seed a fake storage file directly, bypassing upload().
+    setFile(bucket, path, data, contentType = "image/jpeg") { files.set(`${bucket}/${path}`, { data: data instanceof Uint8Array ? data : new Uint8Array(data), contentType }); },
   };
 }
