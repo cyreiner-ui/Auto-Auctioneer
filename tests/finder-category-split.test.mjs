@@ -115,6 +115,7 @@ test("editing a carving-set keyword via the shared keywords route never touches 
 test("startFinderRun(category) only scans that category's enabled keywords", async () => {
   await withEnv(ENV, async () => {
     const searchedPhrases = [];
+    const categoryBrowses = [];
     await withFakeBackend({
       finder_keywords: [
         { id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" },
@@ -124,13 +125,26 @@ test("startFinderRun(category) only scans that category's enabled keywords", asy
     }, async () => {
       await withFetch([
         tokenRoute,
-        { test: (url) => url.startsWith(SEARCH_URL), respond: (url) => { searchedPhrases.push(new URL(url).searchParams.get("q")); return jsonResponse({ itemSummaries: [] }); } },
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: (url) => {
+            const params = new URL(url).searchParams;
+            const categoryIds = params.get("category_ids");
+            if (categoryIds) categoryBrowses.push(categoryIds);
+            else searchedPhrases.push(params.get("q"));
+            return jsonResponse({ itemSummaries: [] });
+          },
+        },
       ], async () => {
         await startFinderRun("manual", "run-carving-only", "carving_set");
         // searchEbayKeyword appends exclusion terms (see FINDER_DEFAULTS.excludeTerms) to every
         // query, so match on the keyword being searched, not the exact resulting query string.
         assert.equal(searchedPhrases.length, 2);
         assert.ok(searchedPhrases.every((phrase) => phrase.startsWith("sheffield carving set") || phrase.startsWith("german carving set")), "a carving-set-scoped run must never search the pocket-knife keyword");
+        // A carving-set-scoped run also browses the "Flatware Sets" category directly (see
+        // CARVING_SET_CATEGORY_ID) — a separate lead source alongside the phrase searches above,
+        // not gated by any finder_keywords row.
+        assert.deepEqual(categoryBrowses, ["131608"]);
       });
     });
     searchedPhrases.length = 0;
@@ -147,6 +161,51 @@ test("startFinderRun(category) only scans that category's enabled keywords", asy
         await startFinderRun("manual", "run-pocket-only", "pocket_knife");
         assert.equal(searchedPhrases.length, 1);
         assert.ok(searchedPhrases[0].startsWith("knife lot"), "a pocket-knife-scoped run must never search the carving-set keywords");
+      });
+    });
+  });
+});
+
+function fakeItemPage(count, offset) {
+  return Array.from({ length: count }, (_, i) => ({
+    itemId: `v1|browse-${offset + i}|0`,
+    title: `Flatware set ${offset + i}`,
+    itemWebUrl: `https://www.ebay.com/itm/${offset + i}`,
+  }));
+}
+
+test("the Flatware Sets category browse stays capped at 500 even when EBAY_FINDER_RESULTS_PER_KEYWORD is tuned for keyword searches", async () => {
+  await withEnv({ ...ENV, EBAY_FINDER_RESULTS_PER_KEYWORD: "50" }, async () => {
+    const keywordLimits = [];
+    const categoryBrowseLimits = [];
+    await withFakeBackend({
+      finder_keywords: [{ id: "k2", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-02" }],
+    }, async () => {
+      await withFetch([
+        tokenRoute,
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: (url) => {
+            const params = new URL(url).searchParams;
+            const limit = Number(params.get("limit"));
+            if (params.get("category_ids")) {
+              categoryBrowseLimits.push(limit);
+              // Return a full page every time so the category browse's own pagination keeps
+              // going through all of its planned pages instead of stopping early — otherwise this
+              // test couldn't tell "capped at 500" apart from "stopped after the first page".
+              return jsonResponse({ itemSummaries: fakeItemPage(limit, Number(params.get("offset"))) });
+            }
+            keywordLimits.push(limit);
+            return jsonResponse({ itemSummaries: [] });
+          },
+        },
+      ], async () => {
+        await startFinderRun("manual", "run-carving-budget-check", "carving_set");
+        // The overridden env var does shrink the keyword search's own page size...
+        assert.deepEqual(keywordLimits, [50]);
+        // ...but the category browse pages in fixed 200-per-request chunks up to its own
+        // independent 500 cap (see CARVING_SET_CATEGORY_BROWSE_LIMIT), unaffected either way.
+        assert.deepEqual(categoryBrowseLimits, [200, 200, 100]);
       });
     });
   });

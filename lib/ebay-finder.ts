@@ -106,11 +106,43 @@ export async function getItemDescription(itemId: string, token?: string) {
   return htmlToText(payload.description).slice(0, 4000);
 }
 
+function parseItemSummaries(summaries: Array<Record<string, unknown>>): EbayFinderItem[] {
+  const result: EbayFinderItem[] = [];
+  for (const raw of summaries) {
+    const item = raw as {
+      itemId?: string; title?: string; shortDescription?: string; itemWebUrl?: string;
+      image?: { imageUrl?: string }; price?: { value?: string; currency?: string };
+      shippingOptions?: Array<{ shippingCost?: { value?: string; currency?: string } }>;
+      buyingOptions?: string[]; itemEndDate?: string;
+    };
+    if (!item.itemId || !item.title || !item.itemWebUrl) continue;
+    const shipping = shippingCost(item);
+    result.push({
+      itemId: item.itemId,
+      title: item.title,
+      shortDescription: item.shortDescription || "",
+      itemWebUrl: item.itemWebUrl,
+      imageUrl: item.image?.imageUrl || null,
+      itemPrice: Number(item.price?.value),
+      shippingCost: shipping.value,
+      shippingCurrency: shipping.currency,
+      currency: item.price?.currency || "",
+      buyingOptions: item.buyingOptions || [],
+      itemEndDate: item.itemEndDate || null,
+    });
+  }
+  return result;
+}
+
 // Pass a pre-fetched `token` when calling this once per keyword in a loop (e.g. startFinderRun's
 // scan across every enabled keyword) so the run doesn't pay for a fresh OAuth round trip per
 // keyword — with 35+ keywords that's dozens of avoidable network calls stacked inside one
 // request's time budget.
-export async function searchEbayKeyword(keyword: string, requested: number = FINDER_DEFAULTS.resultsPerKeyword, token?: string, extraExcludeTerms: string[] = []) {
+//
+// conditionId, when passed, restricts results to that eBay condition ID (e.g. "3000" for Used —
+// see CARVING_SET_USED_CONDITION_ID in lib/carving-set-finder.ts). Left undefined by every
+// pocket-knife-pipeline caller, which keeps searching every condition unchanged.
+export async function searchEbayKeyword(keyword: string, requested: number = FINDER_DEFAULTS.resultsPerKeyword, token?: string, extraExcludeTerms: string[] = [], conditionId?: string) {
   const authToken = token || await appToken();
   const marketplace = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
   const zip = process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip;
@@ -128,7 +160,9 @@ export async function searchEbayKeyword(keyword: string, requested: number = FIN
     url.searchParams.set("limit", String(limit));
     url.searchParams.set("offset", String(offset));
     url.searchParams.set("fieldgroups", "EXTENDED");
-    url.searchParams.set("filter", "deliveryCountry:US");
+    const filterParts = ["deliveryCountry:US"];
+    if (conditionId) filterParts.push(`conditionIds:{${conditionId}}`);
+    url.searchParams.set("filter", filterParts.join(","));
     const response = await fetch(url, {
       headers: {
         Authorization: `Bearer ${authToken}`,
@@ -140,29 +174,43 @@ export async function searchEbayKeyword(keyword: string, requested: number = FIN
     if (!response.ok) throw new Error(`eBay search for “${keyword}” failed (${response.status}).`);
     const payload = await response.json() as { itemSummaries?: Array<Record<string, unknown>> };
     const summaries = payload.itemSummaries || [];
-    for (const raw of summaries) {
-      const item = raw as {
-        itemId?: string; title?: string; shortDescription?: string; itemWebUrl?: string;
-        image?: { imageUrl?: string }; price?: { value?: string; currency?: string };
-        shippingOptions?: Array<{ shippingCost?: { value?: string; currency?: string } }>;
-        buyingOptions?: string[]; itemEndDate?: string;
-      };
-      if (!item.itemId || !item.title || !item.itemWebUrl) continue;
-      const shipping = shippingCost(item);
-      result.push({
-        itemId: item.itemId,
-        title: item.title,
-        shortDescription: item.shortDescription || "",
-        itemWebUrl: item.itemWebUrl,
-        imageUrl: item.image?.imageUrl || null,
-        itemPrice: Number(item.price?.value),
-        shippingCost: shipping.value,
-        shippingCurrency: shipping.currency,
-        currency: item.price?.currency || "",
-        buyingOptions: item.buyingOptions || [],
-        itemEndDate: item.itemEndDate || null,
-      });
-    }
+    result.push(...parseItemSummaries(summaries));
+    if (summaries.length < limit) break;
+  }
+  return result;
+}
+
+// A pure category browse — no q= text search at all — for the carving-set pipeline's daily scan.
+// See CARVING_SET_CATEGORY_ID in lib/carving-set-finder.ts for why: antique carving/fish-knife sets
+// are routinely listed under eBay's own "Flatware Sets" category without ever using the words
+// "carving set" in the title or description, so no phrase-based searchEbayKeyword call above can
+// find them. Sorted newest-first and run once per carving-set scan, independent of any
+// finder_keywords row.
+export async function searchEbayCategoryNewlyListed(categoryId: string, requested: number, token: string | undefined, conditionId: string) {
+  const authToken = token || await appToken();
+  const marketplace = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
+  const zip = process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip;
+  const result: EbayFinderItem[] = [];
+  for (const { offset, limit } of finderPages(requested)) {
+    const url = new URL(`${ebayApiBaseUrl()}/buy/browse/v1/item_summary/search`);
+    url.searchParams.set("category_ids", categoryId);
+    url.searchParams.set("sort", "newlyListed");
+    url.searchParams.set("limit", String(limit));
+    url.searchParams.set("offset", String(offset));
+    url.searchParams.set("fieldgroups", "EXTENDED");
+    url.searchParams.set("filter", `deliveryCountry:US,conditionIds:{${conditionId}}`);
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+        "X-EBAY-C-MARKETPLACE-ID": marketplace,
+        "X-EBAY-C-ENDUSERCTX": `contextualLocation=country%3DUS%2Czip%3D${encodeURIComponent(zip)}`,
+      },
+      signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`eBay category browse for "${categoryId}" failed (${response.status}).`);
+    const payload = await response.json() as { itemSummaries?: Array<Record<string, unknown>> };
+    const summaries = payload.itemSummaries || [];
+    result.push(...parseItemSummaries(summaries));
     if (summaries.length < limit) break;
   }
   return result;
