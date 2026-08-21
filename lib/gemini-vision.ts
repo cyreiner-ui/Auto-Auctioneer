@@ -68,6 +68,18 @@ export async function imagePart(url: string) {
   return { inlineData: { mimeType: contentType, data: Buffer.from(bytes).toString("base64") } };
 }
 
+// For a staff-uploaded reference photo living in a private Supabase Storage bucket (see
+// lib/gaucho-knife-finder.ts) — downloads directly via the already-authenticated service-role
+// client rather than minting a signed URL and making a second network round trip back to
+// Supabase's storage CDN.
+export async function referenceImagePart(bucket: string, storagePath: string) {
+  const { data, error } = await supabaseAdmin.storage.from(bucket).download(storagePath);
+  if (error || !data) throw new Error(`Could not download reference image "${storagePath}": ${error?.message || "not found"}.`);
+  if (data.size > 5_000_000) throw new Error("Reference image is too large to analyze.");
+  const bytes = await data.arrayBuffer();
+  return { inlineData: { mimeType: data.type || "image/jpeg", data: Buffer.from(bytes).toString("base64") } };
+}
+
 export async function countKnivesWithGemini(input: { title: string; description: string; imageUrl: string }): Promise<VisionCount> {
   const key = process.env.GEMINI_API_KEY?.trim();
   if (!key) throw new Error("GEMINI_API_KEY is not configured.");

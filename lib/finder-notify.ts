@@ -1,6 +1,6 @@
 import nodemailer from "nodemailer";
 
-export type NotifyKind = "pocket_knife" | "carving_set";
+export type NotifyKind = "pocket_knife" | "carving_set" | "gaucho_knife";
 
 export type NotifiableFinderItem = {
   ebay_item_id: string;
@@ -16,11 +16,14 @@ export type NotifiableFinderItem = {
   carving_has_case?: boolean | null;
   carving_carbon_steel?: boolean | null;
   carving_stag_handle?: boolean | null;
+  gaucho_match_confidence?: number | null;
+  gaucho_maker_match?: boolean | null;
+  gaucho_match_notes?: string | null;
 };
 
 const usd = (value: number | null) => (value == null ? "—" : Number(value).toLocaleString("en-US", { style: "currency", currency: "USD" }));
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char] as string));
-const dealLabel = (kind: NotifyKind) => (kind === "carving_set" ? "carving set" : "pocket knife");
+const dealLabel = (kind: NotifyKind) => (kind === "carving_set" ? "carving set" : kind === "gaucho_knife" ? "gaucho knife" : "pocket knife");
 
 function itemDetailLine(item: NotifiableFinderItem, kind: NotifyKind) {
   if (kind === "carving_set") {
@@ -29,6 +32,14 @@ function itemDetailLine(item: NotifiableFinderItem, kind: NotifyKind) {
     if (item.carving_has_case) parts.push("cased");
     if (item.carving_carbon_steel) parts.push("carbon steel");
     if (item.carving_stag_handle) parts.push("stag handle");
+    parts.push(`${usd(item.total_cost)} total`);
+    return parts.join(" · ");
+  }
+  if (kind === "gaucho_knife") {
+    const confidence = item.gaucho_match_confidence != null ? `${Math.round(Number(item.gaucho_match_confidence) * 100)}% match confidence` : "match confidence unknown";
+    const parts = [confidence];
+    if (item.gaucho_maker_match === true) parts.push("maker markings match");
+    else if (item.gaucho_maker_match === false) parts.push("maker markings don't match");
     parts.push(`${usd(item.total_cost)} total`);
     return parts.join(" · ");
   }

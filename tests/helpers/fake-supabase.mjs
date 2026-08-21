@@ -25,6 +25,7 @@ function matchesFilters(row, filters) {
     if (filter.type === "lte") return value != null && value <= filter.val;
     if (filter.type === "gte") return value != null && value >= filter.val;
     if (filter.type === "overlaps") return Array.isArray(value) && value.some((v) => filter.val.includes(v));
+    if (filter.type === "neq") return value !== filter.val;
     if (filter.type === "or") return filter.clauses.some((clause) => matchesFilters(row, [clause]));
     return true;
   });
@@ -63,6 +64,7 @@ class Builder {
       const [col, op, rawVal] = clause.split(".");
       if (op === "is") return { type: "is", col, val: rawVal === "null" ? null : rawVal };
       if (op === "eq") return { type: "eq", col, val: rawVal };
+      if (op === "neq") return { type: "neq", col, val: rawVal };
       throw new Error(`Unsupported .or() clause in fake-supabase: "${clause}"`);
     });
     this.filters.push({ type: "or", clauses });

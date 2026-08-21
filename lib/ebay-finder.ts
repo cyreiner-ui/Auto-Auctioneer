@@ -140,29 +140,70 @@ export async function searchEbayKeyword(keyword: string, requested: number = FIN
     if (!response.ok) throw new Error(`eBay search for “${keyword}” failed (${response.status}).`);
     const payload = await response.json() as { itemSummaries?: Array<Record<string, unknown>> };
     const summaries = payload.itemSummaries || [];
-    for (const raw of summaries) {
-      const item = raw as {
-        itemId?: string; title?: string; shortDescription?: string; itemWebUrl?: string;
-        image?: { imageUrl?: string }; price?: { value?: string; currency?: string };
-        shippingOptions?: Array<{ shippingCost?: { value?: string; currency?: string } }>;
-        buyingOptions?: string[]; itemEndDate?: string;
-      };
-      if (!item.itemId || !item.title || !item.itemWebUrl) continue;
-      const shipping = shippingCost(item);
-      result.push({
-        itemId: item.itemId,
-        title: item.title,
-        shortDescription: item.shortDescription || "",
-        itemWebUrl: item.itemWebUrl,
-        imageUrl: item.image?.imageUrl || null,
-        itemPrice: Number(item.price?.value),
-        shippingCost: shipping.value,
-        shippingCurrency: shipping.currency,
-        currency: item.price?.currency || "",
-        buyingOptions: item.buyingOptions || [],
-        itemEndDate: item.itemEndDate || null,
-      });
-    }
+    result.push(...parseItemSummaries(summaries));
+    if (summaries.length < limit) break;
+  }
+  return result;
+}
+
+// Shared between searchEbayKeyword and searchEbayByImage — both eBay Browse API search methods
+// return the same itemSummaries shape.
+function parseItemSummaries(summaries: Array<Record<string, unknown>>): EbayFinderItem[] {
+  const result: EbayFinderItem[] = [];
+  for (const raw of summaries) {
+    const item = raw as {
+      itemId?: string; title?: string; shortDescription?: string; itemWebUrl?: string;
+      image?: { imageUrl?: string }; price?: { value?: string; currency?: string };
+      shippingOptions?: Array<{ shippingCost?: { value?: string; currency?: string } }>;
+      buyingOptions?: string[]; itemEndDate?: string;
+    };
+    if (!item.itemId || !item.title || !item.itemWebUrl) continue;
+    const shipping = shippingCost(item);
+    result.push({
+      itemId: item.itemId,
+      title: item.title,
+      shortDescription: item.shortDescription || "",
+      itemWebUrl: item.itemWebUrl,
+      imageUrl: item.image?.imageUrl || null,
+      itemPrice: Number(item.price?.value),
+      shippingCost: shipping.value,
+      shippingCurrency: shipping.currency,
+      currency: item.price?.currency || "",
+      buyingOptions: item.buyingOptions || [],
+      itemEndDate: item.itemEndDate || null,
+    });
+  }
+  return result;
+}
+
+// eBay's searchByImage Browse API method — a limited-release endpoint requiring separate
+// business-unit approval from eBay (confirmed working for this app's credentials via a one-off
+// production probe; see PR history). Not supported in eBay's Sandbox at all, so this always hits
+// the production host regardless of EBAY_ENVIRONMENT. Used by the gaucho-knife finder
+// (lib/gaucho-knife-finder.ts) to discover candidates by visual similarity to staff-uploaded
+// reference photos, rather than by keyword — real gaucho knives are frequently mislabeled by
+// sellers who don't recognize what they have, so a text-based search alone would miss them.
+// `requested` is deliberately expected to be small (one page, not deep pagination): the response's
+// own `total` field is documented by eBay as unreliable for pagination use, and this shares the
+// same app-wide 5,000-calls/day Browse API budget as every other eBay call this app makes.
+export async function searchEbayByImage(imageBase64: string, requested: number, token?: string): Promise<EbayFinderItem[]> {
+  const authToken = token || await appToken();
+  const marketplace = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
+  const result: EbayFinderItem[] = [];
+  for (const { offset, limit } of finderPages(requested)) {
+    const url = new URL(`${ebayApiBaseUrl("production")}/buy/browse/v1/item_summary/search_by_image`);
+    url.searchParams.set("limit", String(limit));
+    url.searchParams.set("offset", String(offset));
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${authToken}`, "X-EBAY-C-MARKETPLACE-ID": marketplace, "Content-Type": "application/json" },
+      body: JSON.stringify({ image: imageBase64 }),
+      signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`eBay image search failed (${response.status}).`);
+    const payload = await response.json() as { itemSummaries?: Array<Record<string, unknown>> };
+    const summaries = payload.itemSummaries || [];
+    result.push(...parseItemSummaries(summaries));
     if (summaries.length < limit) break;
   }
   return result;

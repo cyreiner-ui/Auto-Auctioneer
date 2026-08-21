@@ -3,6 +3,14 @@ export const FINDER_DEFAULTS = {
   maxCostPerKnife: 3.5,
   confidence: 0.9,
   resultsPerKeyword: 500,
+  // Deliberately much smaller than resultsPerKeyword: eBay's searchByImage total field is
+  // documented as unreliable for pagination use, so paginating deeply has little value, and every
+  // page costs a call against the same app-wide 5,000-calls/day Browse API budget every other
+  // eBay call (keyword search, shipping/description lookups) already draws from. One page per
+  // staff-uploaded reference photo per run (see lib/finder-service.ts's startFinderRun) is enough
+  // to catch the closest visual matches without spending the budget on a long tail unlikely to be
+  // genuine gaucho knives anyway.
+  imageSearchResultsPerReference: 50,
   // Sized so the app's own conservative $0.001/analysis accounting (see finderOverview's
   // projectedMaximum) lands at a $10/month ceiling. This is a hard backstop, not a pacing
   // mechanism — see dailyLimit in gemini-vision.ts/finder-service.ts for what actually spreads
