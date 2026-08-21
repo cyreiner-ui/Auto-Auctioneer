@@ -204,19 +204,6 @@ export function carvingSetCeiling(group: CarvingSetGroup, pieceCount: number | n
   return pieceCount != null && pieceCount >= 2 ? pieceCount * 10 + 15 : null;
 }
 
-// Sheffield-only: a Gemini vision call only pays for itself once a run's text pass already found a
-// genuinely large crop of leads to narrow down. Below this, every Sheffield item still pending on
-// vision (case-ambiguous, or case/ceiling already known from text but material unconfirmed — see
-// initialCarvingSetRow) is rejected outright instead of spending a vision call (see
-// lib/finder-service.ts's startFinderRun, which counts candidates that passed every text check and
-// are within the flat $200 ceiling as this run's "how many good leads" signal, since text alone
-// rarely marks a Sheffield row "qualified" outright anymore). German has no equivalent gate — every
-// case/piece-ambiguous German item still falls to vision regardless of run volume.
-export const SHEFFIELD_VISION_MIN_QUALIFIED = 30;
-export function sheffieldVisionEligible(eligibleCount: number): boolean {
-  return eligibleCount > SHEFFIELD_VISION_MIN_QUALIFIED;
-}
-
 export type CarvingSetVisionResult = {
   hasCase: boolean;
   pieceCount: number;

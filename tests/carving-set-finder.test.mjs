@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import nodemailer from "nodemailer";
-import { analyzeCarvingSetText, carvingSetCeiling, carvingSetGroupForPhrases, CARVING_SET_CATEGORY_BROWSE_PHRASE, CARVING_SET_PHRASES, decideCarvingSetFromText, evaluateCarvingSetVision, initialCarvingSetRow, sheffieldVisionEligible } from "../lib/carving-set-finder.ts";
+import { analyzeCarvingSetText, carvingSetCeiling, carvingSetGroupForPhrases, CARVING_SET_CATEGORY_BROWSE_PHRASE, CARVING_SET_PHRASES, decideCarvingSetFromText, evaluateCarvingSetVision, initialCarvingSetRow } from "../lib/carving-set-finder.ts";
 import { processPendingFinderItems, startFinderRun } from "../lib/finder-service.ts";
 import { supabaseAdmin } from "../lib/supabase-admin.ts";
 import { createFakeSupabase } from "./helpers/fake-supabase.mjs";
@@ -173,12 +173,6 @@ test("carvingSetCeiling: German is tiered by piece count at $10/piece + $15", ()
 test("carvingSetCeiling: German returns null when the piece count isn't resolvable", () => {
   assert.equal(carvingSetCeiling("german", null), null);
   assert.equal(carvingSetCeiling("german", 1), null, "a single piece isn't a genuine carving set");
-});
-
-test("sheffieldVisionEligible: only more than 30 qualified results unlock vision", () => {
-  assert.equal(sheffieldVisionEligible(0), false);
-  assert.equal(sheffieldVisionEligible(30), false, "exactly 30 is not \"more than\" 30");
-  assert.equal(sheffieldVisionEligible(31), true);
 });
 
 function visionResult(overrides = {}) {
@@ -593,35 +587,10 @@ function shefCasedItem(index) {
 }
 
 // Every Sheffield candidate that passes the text checks now needs a vision material check (see
-// initialCarvingSetRow), so a text-cased item and a case-ambiguous one are treated identically by
-// the volume gate below — both land in status "pending" with knife_count unset. The gate's "how
-// many good leads did this run find" signal is now the count of those pending rows (see
-// lib/finder-service.ts's startFinderRun), not a literal "qualified" count.
-test("startFinderRun rejects every Sheffield candidate without spending a vision call when this run's pending-for-vision count is 30 or fewer", async (t) => {
-  await withEnv(ENV, async () => {
-    mockMailer(t, []);
-    let geminiCalled = false;
-    const casedItems = Array.from({ length: 30 }, (_, index) => shefCasedItem(index));
-    await withFakeBackend({ finder_keywords: [{ id: "k1", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-01" }] }, async (fake) => {
-      await withFetch([
-        tokenRoute,
-        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: casedItems }) },
-        { test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => { geminiCalled = true; return jsonResponse({}); } },
-      ], async () => {
-        const { run } = await startFinderRun("manual", "run-carving-low-volume");
-        assert.equal(run.qualified, 0, "exactly 30 pending-for-vision candidates is not \"more than\" 30");
-        assert.equal(fake.tables.finder_items.length, 30);
-        for (const row of fake.tables.finder_items) {
-          assert.equal(row.status, "rejected");
-          assert.equal(row.reason, "low_volume_skip_vision");
-        }
-        assert.equal(geminiCalled, false, "Gemini must never be spent when this run's pending-for-vision count doesn't exceed 30");
-      });
-    });
-  });
-});
-
-test("startFinderRun leaves every Sheffield candidate pending for vision once this run's pending-for-vision count exceeds 30, and vision then confirms carbon steel to qualify them", async (t) => {
+// initialCarvingSetRow), so a text-cased item and a case-ambiguous one are treated identically —
+// both land in status "pending" with knife_count unset, regardless of how many other Sheffield
+// candidates this run found.
+test("startFinderRun leaves every Sheffield candidate pending for vision, and vision then confirms carbon steel to qualify them", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
     const casedItems = Array.from({ length: 31 }, (_, index) => shefCasedItem(index));
@@ -631,9 +600,9 @@ test("startFinderRun leaves every Sheffield candidate pending for vision once th
         { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: casedItems }) },
       ], async () => {
         const { run } = await startFinderRun("manual", "run-carving-high-volume");
-        assert.equal(run.qualified, 0, "text alone never finalizes a Sheffield row anymore, even once the volume gate opens");
+        assert.equal(run.qualified, 0, "text alone never finalizes a Sheffield row anymore");
         assert.equal(fake.tables.finder_items.length, 31);
-        for (const row of fake.tables.finder_items) assert.equal(row.status, "pending", "more than 30 pending-for-vision candidates leaves every one of them eligible for vision");
+        for (const row of fake.tables.finder_items) assert.equal(row.status, "pending", "every Sheffield candidate is eligible for vision");
       });
       await withFetch([tokenRoute, imageRoute, descriptionRoute, geminiRoute({ hasCase: true, pieceCount: 2, confidence: 0.95, uncertaintyReason: "", material: "carbon_steel", handleMaterial: "stag" })], async () => {
         const { processed } = await processPendingFinderItems(40);
