@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import nodemailer from "nodemailer";
-import { analyzeCarvingSetText, carvingSetCeiling, carvingSetGroupForPhrases, decideCarvingSetFromText, evaluateCarvingSetVision, initialCarvingSetRow, sheffieldVisionEligible } from "../lib/carving-set-finder.ts";
+import { analyzeCarvingSetText, carvingSetCeiling, carvingSetGroupForPhrases, CARVING_SET_CATEGORY_BROWSE_PHRASE, CARVING_SET_PHRASES, decideCarvingSetFromText, evaluateCarvingSetVision, initialCarvingSetRow, sheffieldVisionEligible } from "../lib/carving-set-finder.ts";
 import { processPendingFinderItems, startFinderRun } from "../lib/finder-service.ts";
 import { supabaseAdmin } from "../lib/supabase-admin.ts";
 import { createFakeSupabase } from "./helpers/fake-supabase.mjs";
@@ -83,6 +83,8 @@ test("carvingSetGroupForPhrases: a brand-specific generic phrase resolves to \"g
   assert.equal(carvingSetGroupForPhrases(["sheffield carving set"]), "sheffield");
   assert.equal(carvingSetGroupForPhrases(["german carving set"]), "german");
   assert.equal(carvingSetGroupForPhrases(["old timer knife lot"]), null);
+  assert.equal(carvingSetGroupForPhrases([CARVING_SET_CATEGORY_BROWSE_PHRASE]), "generic", "an item found via the Flatware Sets category browse (no text search at all) must still resolve to the carving-set pipeline");
+  assert.ok(CARVING_SET_PHRASES.includes(CARVING_SET_CATEGORY_BROWSE_PHRASE), "the category-browse phrase must be included so keyword_phrases-overlap queries (results/rejected/archived lists, qualification emails) still find it");
 });
 
 test("decideCarvingSetFromText rejects modern-manufacture wording, for every group", () => {

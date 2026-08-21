@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getItemDescription, getItemShippingCost, searchEbayKeyword } from "../lib/ebay-finder.ts";
+import { getItemDescription, getItemShippingCost, searchEbayCategoryNewlyListed, searchEbayKeyword } from "../lib/ebay-finder.ts";
 import { jsonResponse, textResponse, withEnv, withFetch } from "./helpers/fake-fetch.mjs";
 
 const EBAY_ENV = { EBAY_CLIENT_ID: "client-id", EBAY_CLIENT_SECRET: "client-secret", EBAY_ENVIRONMENT: "sandbox" };
@@ -110,6 +110,58 @@ test("omitting extraExcludeTerms leaves the query unchanged from the default exc
     ], async () => {
       await searchEbayKeyword("knife lot", 10);
       assert.equal(seenQuery, "knife lot -throwing -keychain -multitool -leatherman");
+    });
+  });
+});
+
+test("passing a conditionId adds it to the filter param", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    let seenFilter;
+    await withFetch([
+      tokenRoute,
+      {
+        test: (url) => url.startsWith(SEARCH_URL),
+        respond: (url) => { seenFilter = new URL(url).searchParams.get("filter"); return jsonResponse({ itemSummaries: [] }); },
+      },
+    ], async () => {
+      await searchEbayKeyword("sheffield carving set", 10, undefined, [], "3000");
+      assert.equal(seenFilter, "deliveryCountry:US,conditionIds:{3000}");
+    });
+  });
+});
+
+test("omitting conditionId leaves the filter as deliveryCountry:US alone", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    let seenFilter;
+    await withFetch([
+      tokenRoute,
+      {
+        test: (url) => url.startsWith(SEARCH_URL),
+        respond: (url) => { seenFilter = new URL(url).searchParams.get("filter"); return jsonResponse({ itemSummaries: [] }); },
+      },
+    ], async () => {
+      await searchEbayKeyword("knife lot", 10);
+      assert.equal(seenFilter, "deliveryCountry:US");
+    });
+  });
+});
+
+test("searchEbayCategoryNewlyListed searches by category_ids, sorted newest-first, with no q param", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    let seenParams;
+    await withFetch([
+      tokenRoute,
+      {
+        test: (url) => url.startsWith(SEARCH_URL),
+        respond: (url) => { seenParams = new URL(url).searchParams; return jsonResponse({ itemSummaries: [item()] }); },
+      },
+    ], async () => {
+      const results = await searchEbayCategoryNewlyListed("131608", 10, undefined, "3000");
+      assert.equal(seenParams.get("category_ids"), "131608");
+      assert.equal(seenParams.get("sort"), "newlyListed");
+      assert.equal(seenParams.get("filter"), "deliveryCountry:US,conditionIds:{3000}");
+      assert.equal(seenParams.get("q"), null);
+      assert.equal(results.length, 1);
     });
   });
 });

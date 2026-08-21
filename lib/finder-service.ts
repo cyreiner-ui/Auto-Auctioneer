@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { appToken, getItemDescription, getItemShippingCost, searchEbayByImage, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
+import { appToken, getItemDescription, getItemShippingCost, searchEbayByImage, searchEbayCategoryNewlyListed, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
 import { analyzeListingText, calculateDeal, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isScheduledRunTime, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife, type FinderScheduleSettings } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
 import {
   analyzeCarvingSetWithGemini,
   carvingSetCeiling,
   carvingSetGroupForPhrases,
+  CARVING_SET_CATEGORY_BROWSE_LIMIT,
+  CARVING_SET_CATEGORY_BROWSE_PHRASE,
+  CARVING_SET_CATEGORY_ID,
   CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS,
   CARVING_SET_PHRASES,
+  CARVING_SET_USED_CONDITION_ID,
   decideCarvingSetFromText,
   evaluateCarvingSetVision,
   refreshedCarvingSetRow,
@@ -469,8 +473,13 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const PROGRESS_WRITE_EVERY = 5;
     async function scanKeyword(keyword: { phrase: string; max_cost_per_knife?: number | null }) {
       try {
-        const extraExcludeTerms = carvingSetGroupForPhrases([keyword.phrase]) ? CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS : [];
-        for (const item of await searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms)) {
+        const carvingGroup = carvingSetGroupForPhrases([keyword.phrase]);
+        const extraExcludeTerms = carvingGroup ? CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS : [];
+        // Carving-set keywords are restricted to Used listings only (see
+        // CARVING_SET_USED_CONDITION_ID) — this buyer wants antique cutlery, never new-made
+        // reissues. Left unset for pocket-knife keywords, which keep searching every condition.
+        const conditionId = carvingGroup ? CARVING_SET_USED_CONDITION_ID : undefined;
+        for (const item of await searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms, conditionId)) {
           const current = found.get(item.itemId);
           if (current) current.phrases.push(keyword.phrase);
           else found.set(item.itemId, { item, phrases: [keyword.phrase] });
@@ -509,6 +518,18 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
         } catch (error) { errors.push(error instanceof Error ? error.message : `Image search failed for reference ${reference.id}.`); }
       }
       await mapWithConcurrency(referenceImages || [], config().scanConcurrency, scanReferenceImage);
+    }
+    // The carving-set pipeline's "Flatware Sets" category browse (see CARVING_SET_CATEGORY_ID) is
+    // not a text search, so it doesn't belong in scanKeyword's per-finder_keywords-row loop above —
+    // it runs once per carving-set-scoped scan instead, independent of any keyword row.
+    if (category === "carving_set") {
+      try {
+        for (const item of await searchEbayCategoryNewlyListed(CARVING_SET_CATEGORY_ID, CARVING_SET_CATEGORY_BROWSE_LIMIT, token || undefined, CARVING_SET_USED_CONDITION_ID)) {
+          const current = found.get(item.itemId);
+          if (current) current.phrases.push(CARVING_SET_CATEGORY_BROWSE_PHRASE);
+          else found.set(item.itemId, { item, phrases: [CARVING_SET_CATEGORY_BROWSE_PHRASE] });
+        }
+      } catch (error) { errors.push(error instanceof Error ? error.message : "Flatware Sets category browse failed."); }
     }
     // Carving-set items' full eBay description used to be fetched here, eagerly, for every item
     // found — one network call per item, hundreds per run for a broad keyword like "carving set".
@@ -591,8 +612,10 @@ export async function debugFindItemAcrossKeywords(itemId: string): Promise<Finde
   const token = keywords.length ? await appToken() : null;
   async function probeKeyword(keyword: { phrase: string }): Promise<FinderKeywordProbe> {
     try {
-      const extraExcludeTerms = carvingSetGroupForPhrases([keyword.phrase]) ? CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS : [];
-      const items = await searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms);
+      const carvingGroup = carvingSetGroupForPhrases([keyword.phrase]);
+      const extraExcludeTerms = carvingGroup ? CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS : [];
+      const conditionId = carvingGroup ? CARVING_SET_USED_CONDITION_ID : undefined;
+      const items = await searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms, conditionId);
       const match = items.find((item) => item.itemId.includes(itemId));
       return { phrase: keyword.phrase, itemsReturned: items.length, hitResultsCap: items.length >= config().searchDepth, found: Boolean(match), matchedTitle: match?.title ?? null, error: null };
     } catch (error) {
