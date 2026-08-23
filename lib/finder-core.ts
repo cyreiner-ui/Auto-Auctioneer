@@ -131,7 +131,13 @@ const catalogReferencePattern = /\bno\.?\s*\d+(?:\s*(?:&|,|and)\s*\d+)+\b/gi;
 // bare shared brand name (several of which — Case, Winchester, Colt, Remington, Camillus, Old
 // Timer, Browning, Imperial — are just as common on vintage kitchen/carving cutlery and flatware
 // as on pocket knives) no longer overrides the rejection on its own.
-const nonFoldingCutleryPattern = /\b(?:kitchen|steak|butter|bread|cheese|carving|chef'?s?|paring|butcher|flatware|silverware|silverplate|letter\s+opener)\b|\bserv(?:e|ing)\b|\bcutlery\s+set\b/i;
+//
+// "spoons?"/"forks?" were added after production data showed dinner-flatware lots (e.g. "Mixed
+// Lot of 10 pcs Oneida Silver Carlton Stainless Knife Forks Spoons") sailing past this pattern
+// entirely — they never say "flatware"/"silverware"/"kitchen", just "fork"/"spoon" alongside
+// "knife" — and then getting misclassified by Gemini vision as containing a folding knife, with
+// the whole place-setting piece count (forks and spoons included) counted as the knife count.
+const nonFoldingCutleryPattern = /\b(?:kitchen|steak|butter|bread|cheese|carving|chef'?s?|paring|butcher|flatware|silverware|silverplate|letter\s+opener|spoons?|forks?)\b|\bserv(?:e|ing)\b|\bcutlery\s+set\b/i;
 // Weight-priced/randomized "grab bag" style lots (common for TSA-confiscated bulk resellers): the
 // buyer receives a random weight-based selection, not a stated piece count, so any number found
 // elsewhere in the text (an inventory-pool size, a catalog total) — or a photo of the seller's

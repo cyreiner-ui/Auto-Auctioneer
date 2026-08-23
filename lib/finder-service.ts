@@ -201,7 +201,13 @@ type FinderRow = {
 // Categories that never qualify, at any price, regardless of which stage (text or vision)
 // classified them. swiss_army_multi_tool is deliberately absent — it's allowed through at the
 // stricter cap enforced by effectiveMaxCostPerKnife instead of being rejected outright.
-const GARBAGE_CATEGORIES = new Set(["multi_tool", "plain_blade", "credit_card_knife", "coin_knife", "box_cutter", "throwing_knife", "keychain_knife"]);
+// table_cutlery guards against a real Gemini vision failure mode: flatware/silverware lots
+// (table knife + fork + spoon place settings) were being confirmed as containsFoldingKnife: true
+// with itemCategory "other" — which isn't a garbage category — so they qualified with the whole
+// piece count (forks and spoons included) counted as the knife count. Keeping this as an explicit
+// category-based reject means a future vision misfire on containsFoldingKnife can't alone
+// re-open this hole, as long as the category call itself lands correctly.
+const GARBAGE_CATEGORIES = new Set(["multi_tool", "plain_blade", "credit_card_knife", "coin_knife", "box_cutter", "throwing_knife", "keychain_knife", "table_cutlery"]);
 
 const config = () => {
   const monthlyLimit = Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyAnalysisLimit);
