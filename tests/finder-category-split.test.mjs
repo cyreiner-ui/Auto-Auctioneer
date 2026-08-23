@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import nodemailer from "nodemailer";
 import { PATCH as keywordsPatch } from "../app/api/finder/keywords/route.ts";
-import { archivedFinderItems, finderOverview, processPendingFinderItems, startFinderRun } from "../lib/finder-service.ts";
+import { archivedFinderItems, finderOverview, keywordCategory, processPendingFinderItems, startFinderRun } from "../lib/finder-service.ts";
+import { CARVING_SET_PHRASES } from "../lib/carving-set-finder.ts";
+import { GAUCHO_KNIFE_PHRASES, imageSearchPhrase } from "../lib/gaucho-knife-finder.ts";
 import { COOKIE_NAME, staffSessionToken } from "../lib/staff-auth.ts";
 import { supabaseAdmin } from "../lib/supabase-admin.ts";
 import { createFakeSupabase } from "./helpers/fake-supabase.mjs";
@@ -305,6 +307,205 @@ test("a single run that qualifies both a pocket-knife and a carving-set item sen
       assert.doesNotMatch(carvingEmail.html, /Smith &amp; Wesson/);
       assert.match(pocketEmail.html, /Smith &amp; Wesson/);
       assert.doesNotMatch(pocketEmail.html, /Sheffield Carving Set/);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-finder isolation contract
+//
+// The three finder tracks (pocket_knife, carving_set, gaucho_knife) share one
+// finder_keywords/finder_items table by design (see the FinderCategory comment in
+// lib/finder-service.ts) — isolation is entirely a matter of app-level bookkeeping getting each
+// item's category classification right, and keeping it stable. The tests below exist to catch a
+// regression found in production: a carving-set (or gaucho-knife) item's classification could
+// flip to plain pocket-knife whenever a *different* category's scoped run's keyword search
+// happened to also match that same eBay listing, because startFinderRun overwrote keyword_phrases
+// with only the current scan's own matches instead of merging with what was already stored.
+//
+// Whenever a new feature touches keyword classification, finder_items writes, or the
+// pocket_knife/carving_set/gaucho_knife dispatch logic, extend this section with a test that
+// pins down the isolation guarantee the change relies on — don't just eyeball it.
+test("keywordCategory (the single canonical phrase classifier) agrees with each category's own phrase list — every other call site must reuse this function, never re-implement the test inline", () => {
+  for (const phrase of CARVING_SET_PHRASES) assert.equal(keywordCategory(phrase), "carving_set", `"${phrase}" must classify as carving_set`);
+  for (const phrase of GAUCHO_KNIFE_PHRASES) assert.equal(keywordCategory(phrase), "gaucho_knife", `"${phrase}" must classify as gaucho_knife`);
+  assert.equal(keywordCategory("knife lot"), "pocket_knife");
+  assert.equal(keywordCategory("smith and wesson knives"), "pocket_knife");
+});
+
+function sharedCarvingSetRow(overrides = {}) {
+  return {
+    ebay_item_id: "v1|shared-cs|0",
+    run_id: "prior-run",
+    keyword_phrases: ["german carving set"],
+    title: "Antique German Carving Set, Stag Horn Handle, 3 pcs, with fitted case",
+    short_description: "",
+    ebay_url: "https://www.ebay.com/itm/shared-cs",
+    image_url: null,
+    item_price: 40,
+    shipping_cost: 0,
+    currency: "USD",
+    buying_options: ["FIXED_PRICE"],
+    item_end_date: null,
+    knife_count: 1,
+    contains_folding_knife: false,
+    confidence: 0.95,
+    detection_source: "text",
+    item_category: "carving_set",
+    carving_piece_count: 3,
+    carving_has_case: true,
+    carving_carbon_steel: null,
+    carving_handle_material: "stag",
+    status: "qualified",
+    reason: null,
+    attempts: 0,
+    total_cost: 40,
+    cost_per_knife: 40,
+    discovered_at: "2026-01-01",
+    first_seen_run_id: "prior-run",
+    ...overrides,
+  };
+}
+
+test("REGRESSION: a carving-set item's classification survives a later pocket-knife-scoped run whose keyword search also matches it, and never leaks into the pocket-knife dashboard", async () => {
+  await withEnv(ENV, async () => {
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
+      finder_items: [sharedCarvingSetRow()],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: () => jsonResponse({ itemSummaries: [{
+            itemId: "v1|shared-cs|0",
+            title: "Antique German Carving Set, Stag Horn Handle, 3 pcs, with fitted case",
+            shortDescription: "",
+            itemWebUrl: "https://www.ebay.com/itm/shared-cs",
+            image: { imageUrl: null },
+            price: { value: "40.00", currency: "USD" },
+            shippingOptions: [{ shippingCost: { value: "0.00", currency: "USD" } }],
+            buyingOptions: ["FIXED_PRICE"],
+          }] }),
+        },
+      ], async () => { await startFinderRun("manual", "run-pocket-remix", "pocket_knife"); });
+
+      const row = fake.tables.finder_items.find((r) => r.ebay_item_id === "v1|shared-cs|0");
+      assert.equal(row.item_category, "carving_set", "a pocket-knife-scoped run must never strip an already-established carving-set classification");
+      assert.ok(row.keyword_phrases.includes("german carving set"), "the item's original carving-set phrase must survive, not be replaced by just this run's own pocket-knife phrase");
+      assert.equal(row.status, "qualified", "re-evaluating under the (correctly preserved) carving-set pipeline must still qualify this item");
+
+      const pocketOverview = await finderOverview("pocket_knife");
+      assert.ok(!pocketOverview.results.some((r) => r.ebay_item_id === "v1|shared-cs|0"), "the carving-set item must never appear on the pocket-knife dashboard");
+      const carvingOverview = await finderOverview("carving_set");
+      assert.ok(carvingOverview.results.some((r) => r.ebay_item_id === "v1|shared-cs|0"), "it must still appear under carving-set, its original category");
+    });
+  });
+});
+
+function sharedGauchoKnifeRow(overrides = {}) {
+  return {
+    ebay_item_id: "v1|shared-gaucho|0",
+    run_id: "prior-run",
+    keyword_phrases: [imageSearchPhrase("ref1")],
+    title: "Ornate Silver Dagger with Sheath",
+    short_description: "",
+    ebay_url: "https://www.ebay.com/itm/shared-gaucho",
+    image_url: "https://i.ebayimg.com/gaucho.jpg",
+    item_price: 120,
+    shipping_cost: 10,
+    currency: "USD",
+    buying_options: ["FIXED_PRICE"],
+    item_end_date: null,
+    knife_count: 1,
+    contains_folding_knife: false,
+    confidence: 0.9,
+    detection_source: "vision",
+    item_category: "gaucho_knife",
+    gaucho_match_confidence: 0.9,
+    gaucho_maker_match: true,
+    gaucho_matched_reference_id: "ref1",
+    gaucho_match_notes: "Matches reference 1 closely.",
+    status: "qualified",
+    reason: null,
+    attempts: 1,
+    total_cost: 130,
+    cost_per_knife: 130,
+    discovered_at: "2026-01-01",
+    first_seen_run_id: "prior-run",
+    ...overrides,
+  };
+}
+
+test("REGRESSION: a gaucho-knife item (discovered via image search, no finder_keywords phrase at all) keeps its classification after a later pocket-knife-scoped run's keyword search also matches it", async () => {
+  await withEnv(ENV, async () => {
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
+      finder_items: [sharedGauchoKnifeRow()],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: () => jsonResponse({ itemSummaries: [{
+            itemId: "v1|shared-gaucho|0",
+            title: "Ornate Silver Dagger with Sheath",
+            shortDescription: "",
+            itemWebUrl: "https://www.ebay.com/itm/shared-gaucho",
+            image: { imageUrl: "https://i.ebayimg.com/gaucho.jpg" },
+            price: { value: "120.00", currency: "USD" },
+            shippingOptions: [{ shippingCost: { value: "10.00", currency: "USD" } }],
+            buyingOptions: ["FIXED_PRICE"],
+          }] }),
+        },
+      ], async () => { await startFinderRun("manual", "run-pocket-remix-2", "pocket_knife"); });
+
+      const row = fake.tables.finder_items.find((r) => r.ebay_item_id === "v1|shared-gaucho|0");
+      assert.equal(row.item_category, "gaucho_knife", "a pocket-knife-scoped run must never strip an already-established gaucho-knife classification");
+      assert.ok(row.keyword_phrases.includes(imageSearchPhrase("ref1")), "the item's synthetic image-search marker must survive so it's still recognized as a gaucho-knife row on every future scan");
+      assert.equal(row.status, "qualified", "the prior vision verdict must still be honored, not discarded");
+
+      const pocketOverview = await finderOverview("pocket_knife");
+      assert.ok(!pocketOverview.results.some((r) => r.ebay_item_id === "v1|shared-gaucho|0"), "the gaucho-knife item must never appear on the pocket-knife dashboard");
+      const gauchoOverview = await finderOverview("gaucho_knife");
+      assert.ok(gauchoOverview.results.some((r) => r.ebay_item_id === "v1|shared-gaucho|0"), "it must still appear under gaucho-knife, its original category");
+    });
+  });
+});
+
+test("within a single unscoped scan, an eBay listing matched by both a carving-set keyword and a pocket-knife keyword resolves to exactly one category, never both", async () => {
+  await withEnv(ENV, async () => {
+    await withFakeBackend({
+      finder_keywords: [
+        { id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" },
+        { id: "k2", phrase: "sheffield carving set", enabled: true, created_at: "2026-01-02" },
+      ],
+    }, async () => {
+      await withFetch([
+        tokenRoute,
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: () => jsonResponse({ itemSummaries: [{
+            itemId: "v1|dual-match|0",
+            title: "Antique Sheffield Carving Set, carbon steel blade, stag horn handle, with fitted case",
+            shortDescription: "",
+            itemWebUrl: "https://www.ebay.com/itm/dual-match",
+            image: { imageUrl: "https://i.ebayimg.com/dual-match.jpg" },
+            price: { value: "150.00", currency: "USD" },
+            shippingOptions: [{ shippingCost: { value: "0.00", currency: "USD" } }],
+            buyingOptions: ["FIXED_PRICE"],
+          }] }),
+        },
+      ], async () => { await startFinderRun("manual", "run-dual-match"); });
+
+      // A Sheffield candidate always needs a vision material check before it can qualify (see
+      // lib/carving-set-finder.ts's initialCarvingSetRow), so this listing is left "pending" by
+      // the text pass rather than "qualified" — check the category-scoped counts (which cover
+      // every status) instead of `results` (which only ever lists qualified items).
+      const pocketOverview = await finderOverview("pocket_knife");
+      const carvingOverview = await finderOverview("carving_set");
+      assert.deepEqual(pocketOverview.counts, { pending: 0, rejected: 0, qualified: 0 }, "the listing must not be counted anywhere in the pocket-knife track");
+      assert.deepEqual(carvingOverview.counts, { pending: 1, rejected: 0, qualified: 0 }, "it must be counted exactly once, under carving-set — its only correct category");
     });
   });
 });

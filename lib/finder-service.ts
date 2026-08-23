@@ -43,6 +43,18 @@ export function isFinderCategory(value: unknown): value is FinderCategory {
   return typeof value === "string" && (FINDER_CATEGORIES as readonly string[]).includes(value);
 }
 
+// The single canonical classifier for "which of the three tracks does this finder_keywords phrase
+// belong to" — every other definition of this test (startFinderRun's scoped-keyword filter,
+// finderOverview's per-category keyword list, debugFindItemAcrossKeywords) must call this rather
+// than re-implementing the carving-then-gaucho-else-pocket precedence inline, so a future edit to
+// one category's phrase detection can't silently drift out of sync with another's and reopen a
+// cross-finder mixing bug.
+export function keywordCategory(phrase: string): FinderCategory {
+  if (carvingSetGroupForPhrases([phrase])) return "carving_set";
+  if (gauchoKnifeGroupForPhrases([phrase])) return "gaucho_knife";
+  return "pocket_knife";
+}
+
 // Postgres array-literal elements containing whitespace (both our carving-set phrases do) must be
 // double-quoted, or the server rejects the value outright ("malformed array literal"). supabase-js's
 // own `.overlaps(col, array)` skips this quoting (`ov.{${array.join(",")}}`), and its generic
@@ -333,6 +345,7 @@ function initialRow(item: EbayFinderItem, keywordPhrases: string[], runId: strin
 
 type ExistingFinderRow = {
   ebay_item_id: string;
+  keyword_phrases?: string[] | null;
   status?: string;
   reason?: string | null;
   knife_count: number | null;
@@ -444,8 +457,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     if (keywordError) throw new Error(keywordError.message);
     // No category column on finder_keywords — a scoped run filters in JS by whether each phrase
     // resolves to the carving-set/gaucho-knife algorithm, the same test the per-item dispatch
-    // already uses.
-    const keywordCategory = (phrase: string): FinderCategory => carvingSetGroupForPhrases([phrase]) ? "carving_set" : gauchoKnifeGroupForPhrases([phrase]) ? "gaucho_knife" : "pocket_knife";
+    // already uses (see keywordCategory above).
     // Fetched up front (not just inside the image-search block below) because it also gates the
     // gaucho keyword *supplement*: with zero reference photos configured, there's nothing for
     // Gemini to compare a candidate against, so this run should discover nothing at all for this
@@ -551,7 +563,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const ids = [...found.keys()];
     const existingById = new Map<string, ExistingFinderRow>();
     for (let index = 0; index < ids.length; index += 200) {
-      const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id, status, reason, knife_count, contains_folding_knife, confidence, detection_source, item_category, shipping_cost, shipping_source, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, gaucho_match_confidence, gaucho_maker_match, gaucho_matched_reference_id, gaucho_match_notes").in("ebay_item_id", ids.slice(index, index + 200));
+      const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id, keyword_phrases, status, reason, knife_count, contains_folding_knife, confidence, detection_source, item_category, shipping_cost, shipping_source, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, gaucho_match_confidence, gaucho_maker_match, gaucho_matched_reference_id, gaucho_match_notes").in("ebay_item_id", ids.slice(index, index + 200));
       if (error) throw new Error(error.message);
       for (const row of data || []) existingById.set(row.ebay_item_id, row);
     }
@@ -559,10 +571,21 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     if (negativeKeywordError) throw new Error(negativeKeywordError.message);
     const negativePhrases = (negativeKeywordRows || []).map((row) => row.phrase);
     const textRows = [...found.values()].map(({ item, phrases }) => {
-      const carvingGroup = carvingSetGroupForPhrases(phrases);
-      if (carvingGroup) return refreshedCarvingSetRow(item, phrases, run.id, existingById.get(item.itemId) as CarvingSetExistingRow | undefined, carvingGroup);
-      if (gauchoKnifeGroupForPhrases(phrases)) return refreshedGauchoKnifeRow(item, phrases, run.id, existingById.get(item.itemId) as GauchoKnifeExistingRow | undefined, negativePhrases);
-      return refreshedRow(item, phrases, run.id, existingById.get(item.itemId), resolveMaxCostPerKnife(phrases, keywordMaxCost, config().maxCost), config().swissArmyMaxCost);
+      const existing = existingById.get(item.itemId);
+      // A category-scoped run only ever searches its own keyword set (see the keywords filter
+      // above), so `phrases` here is just what THIS scan matched — never the full history of what
+      // every category's runs have matched over this item's lifetime. Merging in whatever was
+      // already stored (rather than overwriting keyword_phrases outright) is what keeps a listing's
+      // category classification stable once established: without this, an item first discovered
+      // as a carving-set (or gaucho-knife) match could get silently reclassified as a plain pocket
+      // knife the next time a differently-scoped run's keyword search happens to also match its
+      // title/description — flipping which finder's dashboard, counts, and qualification emails it
+      // shows up under. This is exactly the cross-finder "mixing" bug reported in production.
+      const mergedPhrases = existing?.keyword_phrases?.length ? [...new Set([...existing.keyword_phrases, ...phrases])] : phrases;
+      const carvingGroup = carvingSetGroupForPhrases(mergedPhrases);
+      if (carvingGroup) return refreshedCarvingSetRow(item, mergedPhrases, run.id, existing as CarvingSetExistingRow | undefined, carvingGroup);
+      if (gauchoKnifeGroupForPhrases(mergedPhrases)) return refreshedGauchoKnifeRow(item, mergedPhrases, run.id, existing as GauchoKnifeExistingRow | undefined, negativePhrases);
+      return refreshedRow(item, mergedPhrases, run.id, existing, resolveMaxCostPerKnife(mergedPhrases, keywordMaxCost, config().maxCost), config().swissArmyMaxCost);
     });
     const added = ids.filter((id) => !existingById.has(id)).length;
     // Stamped only for genuinely new items (existingById already distinguishes new vs. re-touched,
@@ -972,8 +995,8 @@ export async function finderOverview(category?: FinderCategory) {
   const firstError = [allKeywords.error, results.error, runs.error, pending.error, rejected.error, qualified.error, usage.error, dailyUsage.error, notifySettingsRow.error, notifyRecipientRows.error].find(Boolean);
   if (firstError) throw new Error(firstError.message);
   // No category column on finder_keywords — filter in JS with the same phrase test the run-scan
-  // and per-item dispatch both use, so each settings page only ever sees its own keyword rows.
-  const keywordCategory = (phrase: string): FinderCategory => carvingSetGroupForPhrases([phrase]) ? "carving_set" : gauchoKnifeGroupForPhrases([phrase]) ? "gaucho_knife" : "pocket_knife";
+  // and per-item dispatch both use (see keywordCategory above), so each settings page only ever
+  // sees its own keyword rows.
   const keywords = category
     ? (allKeywords.data || []).filter((keyword) => keywordCategory(keyword.phrase) === category)
     : (allKeywords.data || []);
