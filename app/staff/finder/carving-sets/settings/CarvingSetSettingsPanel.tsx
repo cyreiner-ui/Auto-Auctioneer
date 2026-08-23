@@ -45,7 +45,7 @@ export default function CarvingSetSettingsPanel() {
   const dailyPercent = data ? Math.min(100, Math.round((data.budget.dailyAnalyses / data.budget.dailyLimit) * 100)) : 0;
 
   return <main className="finder-page">
-    <header className="finder-header"><div><Link className="back" href="/staff/finder">← Back to finder</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Carving-set search settings</h1><p className="muted">These three search terms are tied to fixed pricing rules in code (Sheffield $200 flat/carbon steel only; German $10/piece + $20; the generic &ldquo;carving set&rdquo; catch-all $10/piece + $15; neither German nor generic has a material restriction) — enable or disable them here, but the phrase text and pricing aren&apos;t editable from this page.</p></div></header>
+    <header className="finder-header"><div><Link className="back" href="/staff/finder">← Back to finder</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Carving-set search settings</h1><p className="muted">These three search terms are tied to fixed pricing rules in code (Sheffield $200 flat/carbon steel only; German $10/piece + $10; the generic &ldquo;carving set&rdquo; catch-all $10/piece + $15; neither German nor generic has a material restriction) — enable or disable them here, but the phrase text and pricing aren&apos;t editable from this page.</p></div></header>
     {error && <div className="notice finder-error" role="status" aria-live="polite" aria-atomic="true">{error}</div>}
     {!data && !error && <p className="muted" role="status" aria-live="polite">Loading…</p>}
     {data && <section className="finder-layout">

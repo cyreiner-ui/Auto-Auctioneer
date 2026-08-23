@@ -209,14 +209,14 @@ export function analyzeCarvingSetText(title: string, description = ""): CarvingS
 
 // Sheffield: flat $200 all-in, regardless of piece count (carbon-steel-only is enforced
 // separately, not part of this formula). German: no material restriction, tiered by piece count —
-// $10/piece + $20 (2pc=$40, 3pc=$50, 4pc=$60, 5pc=$70, same slope beyond 5) — raised $5/tier from
-// the original $10/piece + $15. Generic (any cased set that's neither Sheffield/English nor
-// German-branded) keeps the original $10/piece + $15. Returns null when the piece count isn't
+// $10/piece + $10 (2pc=$30, 3pc=$40, 4pc=$50, 5pc=$60, same slope beyond 5) — raised $5/tier from
+// the original $10/piece + $5. Generic (any cased set that's neither Sheffield/English nor
+// German-branded) keeps its own, higher $10/piece + $15. Returns null when the piece count isn't
 // resolvable yet (must fall to vision).
 export function carvingSetCeiling(group: CarvingSetGroup, pieceCount: number | null): number | null {
   if (group === "sheffield") return 200;
   if (pieceCount == null || pieceCount < 2) return null;
-  return pieceCount * 10 + (group === "german" ? 20 : 15);
+  return pieceCount * 10 + (group === "german" ? 10 : 15);
 }
 
 export type CarvingSetVisionResult = {
