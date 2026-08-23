@@ -103,23 +103,35 @@ function renderItemCard(item: NotifiableFinderItem, kind: NotifyKind) {
     </table>`;
 }
 
-function renderDashboardButton(label: string) {
+function renderDashboardButton() {
   return `
-    <div style="text-align:center;margin-top:24px;">
-      <a href="${dashboardUrl()}" style="display:inline-block;padding:12px 26px;background:${COLORS.copper};color:#171513;font:700 13px Georgia,serif;text-decoration:none;">${label}</a>
-    </div>`;
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:24px;">
+      <tr><td align="center">
+        <a href="${dashboardUrl()}" style="display:inline-block;padding:12px 32px;background:${COLORS.copper};color:#171513;font:700 13px Georgia,serif;text-decoration:none;">See more →</a>
+      </td></tr>
+    </table>`;
 }
 
-function renderEmailShell(kind: NotifyKind, heading: string, body: string) {
+// Table-based centering (align="center" on the outer <td>, not just CSS margin:auto) because
+// Outlook and some webmail clients strip margin from block-level divs — this is the standard
+// email-HTML way to reliably center a fixed-width panel. The .eaf-card media-query override
+// collapses the 2-column item grid to one column below 480px, since most staff read this on a
+// phone, not a desktop inbox.
+function renderEmailShell(heading: string, body: string) {
   return `
-    <div style="background:${COLORS.bg};padding:24px 12px;font-family:Arial,Helvetica,sans-serif;">
-      <div style="max-width:640px;margin:0 auto;background:${COLORS.panel};border:1px solid ${COLORS.line};padding:20px;">
-        <p style="margin:0 0 4px;color:${COLORS.muted};font-size:10px;letter-spacing:.16em;text-transform:uppercase;">eBay Discovery</p>
-        <h1 style="margin:0 0 16px;color:${COLORS.ivory};font:600 20px Georgia,serif;">${escapeHtml(heading)}</h1>
-        ${body}
-        ${renderDashboardButton(`Open the ${dealLabel(kind)} finder →`)}
-      </div>
-    </div>`;
+    <style>@media only screen and (max-width:480px){.eaf-panel{width:100% !important;}.eaf-card{display:block !important;width:100% !important;padding:6px 0 !important;}}</style>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${COLORS.bg};font-family:Arial,Helvetica,sans-serif;">
+      <tr><td align="center" style="padding:24px 12px;">
+        <table role="presentation" width="640" cellpadding="0" cellspacing="0" class="eaf-panel" style="width:640px;max-width:640px;background:${COLORS.panel};border:1px solid ${COLORS.line};">
+          <tr><td style="padding:20px;">
+            <p style="margin:0 0 4px;color:${COLORS.muted};font-size:10px;letter-spacing:.16em;text-transform:uppercase;text-align:center;">eBay Discovery</p>
+            <h1 style="margin:0 0 16px;color:${COLORS.ivory};font:600 20px Georgia,serif;text-align:center;">${escapeHtml(heading)}</h1>
+            ${body}
+            ${renderDashboardButton()}
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>`;
 }
 
 function renderEmailHtml(items: NotifiableFinderItem[], kind: NotifyKind) {
@@ -128,8 +140,8 @@ function renderEmailHtml(items: NotifiableFinderItem[], kind: NotifyKind) {
   const cardRows: string[] = [];
   for (let index = 0; index < shown.length; index += 2) {
     const pair = shown.slice(index, index + 2);
-    const cells = pair.map((item) => `<td width="50%" style="padding:6px;vertical-align:top;">${renderItemCard(item, kind)}</td>`).join("");
-    const padding = pair.length < 2 ? `<td width="50%" style="padding:6px;"></td>` : "";
+    const cells = pair.map((item) => `<td class="eaf-card" width="50%" style="padding:6px;vertical-align:top;">${renderItemCard(item, kind)}</td>`).join("");
+    const padding = pair.length < 2 ? `<td class="eaf-card" width="50%" style="padding:6px;"></td>` : "";
     cardRows.push(`<tr>${cells}${padding}</tr>`);
   }
   const grid = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tbody>${cardRows.join("")}</tbody></table>`;
@@ -137,7 +149,7 @@ function renderEmailHtml(items: NotifiableFinderItem[], kind: NotifyKind) {
     ? `<p style="margin:12px 0 0;color:${COLORS.muted};font-size:11px;text-align:center;">+${remaining} more waiting in the finder.</p>`
     : "";
   const heading = `${items.length} new ${dealLabel(kind)} deal${items.length === 1 ? "" : "s"} found`;
-  return renderEmailShell(kind, heading, `${grid}${moreNote}`);
+  return renderEmailShell(heading, `${grid}${moreNote}`);
 }
 
 function transportConfig() {
@@ -217,7 +229,6 @@ export async function sendRunSummaryEmail(counts: FinderRunSummaryCounts, recipi
       to,
       subject: `${counts.total} new ${dealLabel(kind)} deal${counts.total === 1 ? "" : "s"} found`,
       html: renderEmailShell(
-        kind,
         `${counts.total} new ${dealLabel(kind)} deal${counts.total === 1 ? "" : "s"} found`,
         `<p style="margin:0;color:${COLORS.muted};font-size:13px;">${counts.auctionCount} auction${counts.auctionCount === 1 ? "" : "s"}, ${counts.fixedPriceCount} fixed-price listing${counts.fixedPriceCount === 1 ? "" : "s"}.</p>`,
       ),
