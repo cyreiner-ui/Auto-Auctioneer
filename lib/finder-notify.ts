@@ -68,12 +68,26 @@ function transportConfig() {
   return { host, port, secure: port === 465, auth: { user, pass: password } };
 }
 
+// Names only, never values — lets the "not configured" message say exactly which of the three
+// SMTP_* vars this specific deployment doesn't see, instead of leaving staff to guess after
+// Vercel's dashboard shows them as present (a scoping/typo/stale-deployment mismatch that a
+// blanket "not configured" message can't distinguish from actually never having been set).
+function missingSmtpEnvKeys() {
+  return ["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"].filter((key) => !process.env[key]?.trim());
+}
+
+function notConfiguredMessage() {
+  const missing = missingSmtpEnvKeys();
+  const detail = missing.length ? ` Missing/empty on this deployment: ${missing.join(", ")}.` : "";
+  return `Email alerts are not configured (SMTP_HOST/SMTP_USER/SMTP_PASSWORD, and at least one recipient in finder notification settings).${detail}`;
+}
+
 export async function sendQualifiedItemsEmail(items: NotifiableFinderItem[], recipients: string[], kind: NotifyKind = "pocket_knife") {
   if (!items.length) return { ok: true, skipped: true as const };
   const transportOptions = transportConfig();
   const from = process.env.FINDER_ALERT_EMAIL_FROM?.trim() || transportOptions?.auth.user;
   const to = recipients;
-  if (!transportOptions || !from || !to.length) return { ok: false, skipped: true as const, message: "Email alerts are not configured (SMTP_HOST/SMTP_USER/SMTP_PASSWORD, and at least one recipient in finder notification settings)." };
+  if (!transportOptions || !from || !to.length) return { ok: false, skipped: true as const, message: notConfiguredMessage() };
   try {
     const transporter = nodemailer.createTransport(transportOptions);
     await transporter.sendMail({
@@ -92,7 +106,7 @@ export async function sendTestEmail(recipients: string[]) {
   const transportOptions = transportConfig();
   const from = process.env.FINDER_ALERT_EMAIL_FROM?.trim() || transportOptions?.auth.user;
   const to = recipients;
-  if (!transportOptions || !from || !to.length) return { ok: false, skipped: true as const, message: "Email alerts are not configured (SMTP_HOST/SMTP_USER/SMTP_PASSWORD, and at least one recipient in finder notification settings)." };
+  if (!transportOptions || !from || !to.length) return { ok: false, skipped: true as const, message: notConfiguredMessage() };
   try {
     const transporter = nodemailer.createTransport(transportOptions);
     await transporter.sendMail({
@@ -114,7 +128,7 @@ export async function sendRunSummaryEmail(counts: FinderRunSummaryCounts, recipi
   const transportOptions = transportConfig();
   const from = process.env.FINDER_ALERT_EMAIL_FROM?.trim() || transportOptions?.auth.user;
   const to = recipients;
-  if (!transportOptions || !from || !to.length) return { ok: false, skipped: true as const, message: "Email alerts are not configured (SMTP_HOST/SMTP_USER/SMTP_PASSWORD, and at least one recipient in finder notification settings)." };
+  if (!transportOptions || !from || !to.length) return { ok: false, skipped: true as const, message: notConfiguredMessage() };
   try {
     const transporter = nodemailer.createTransport(transportOptions);
     await transporter.sendMail({

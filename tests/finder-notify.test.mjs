@@ -41,6 +41,21 @@ test("skips (without throwing) when SMTP is not configured", async () => {
   });
 });
 
+test("the not-configured message names exactly which SMTP_* env vars this deployment is missing", async () => {
+  await withEnv({ SMTP_HOST: "", SMTP_USER: "alerts@example.test", SMTP_PASSWORD: "" }, async () => {
+    const result = await sendQualifiedItemsEmail([ITEM], RECIPIENTS);
+    assert.match(result.message, /Missing\/empty on this deployment: SMTP_HOST, SMTP_PASSWORD\./);
+    assert.doesNotMatch(result.message, /SMTP_USER,|SMTP_USER\./, "SMTP_USER is set, so it should not be listed as missing");
+  });
+});
+
+test("the not-configured message has no missing-vars detail when recipients (not SMTP) is the gap", async () => {
+  await withEnv(SMTP_ENV, async () => {
+    const result = await sendQualifiedItemsEmail([ITEM], []);
+    assert.doesNotMatch(result.message, /Missing\/empty on this deployment/);
+  });
+});
+
 test("skips (without throwing) when there are no recipients", async () => {
   await withEnv(SMTP_ENV, async () => {
     const result = await sendQualifiedItemsEmail([ITEM], []);
