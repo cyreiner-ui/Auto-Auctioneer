@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mock } from "node:test";
 import test from "node:test";
 import nodemailer from "nodemailer";
-import { sendQualifiedItemsEmail, sendRunSummaryEmail } from "../lib/finder-notify.ts";
+import { sendQualifiedItemsEmail, sendRunSummaryEmail, sendTestEmail } from "../lib/finder-notify.ts";
 import { withEnv } from "./helpers/fake-fetch.mjs";
 
 const ITEM = {
@@ -179,6 +179,36 @@ test("sendQualifiedItemsEmail defaults to the pocket-knife subject/detail line w
     await sendQualifiedItemsEmail([ITEM], RECIPIENTS);
     assert.equal(calls[0].subject, "1 new pocket knife deal found");
     assert.match(calls[0].html, /\/knife/);
+  });
+});
+
+test("sendTestEmail skips (without throwing) when SMTP is not configured", async () => {
+  await withEnv({ SMTP_HOST: "", SMTP_USER: "", SMTP_PASSWORD: "" }, async () => {
+    const result = await sendTestEmail(RECIPIENTS);
+    assert.equal(result.ok, false);
+    assert.equal(result.skipped, true);
+    assert.match(result.message, /not configured/);
+  });
+});
+
+test("sendTestEmail sends a message to every recipient", async (t) => {
+  await withEnv(SMTP_ENV, async () => {
+    const calls = [];
+    t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async (message) => { calls.push(message); } }));
+    const result = await sendTestEmail(RECIPIENTS);
+    assert.deepEqual(result, { ok: true });
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].to, RECIPIENTS);
+    assert.match(calls[0].subject, /test/i);
+  });
+});
+
+test("sendTestEmail reports a send failure without throwing", async (t) => {
+  await withEnv(SMTP_ENV, async () => {
+    t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async () => { throw new Error("SMTP connection refused"); } }));
+    const result = await sendTestEmail(RECIPIENTS);
+    assert.equal(result.ok, false);
+    assert.equal(result.message, "SMTP connection refused");
   });
 });
 

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import nodemailer from "nodemailer";
 import { DELETE as itemsDelete, PATCH as itemsPatch } from "../app/api/finder/items/route.ts";
 import { POST as gixenRetry } from "../app/api/finder/items/gixen/route.ts";
 import { POST as keywordsPost, PATCH as keywordsPatch, DELETE as keywordsDelete } from "../app/api/finder/keywords/route.ts";
 import { POST as notifySettingsPost, PATCH as notifySettingsPatch, DELETE as notifySettingsDelete } from "../app/api/finder/notify-settings/route.ts";
+import { POST as notifyTestPost } from "../app/api/finder/notify-settings/test/route.ts";
 import { PATCH as schedulePatch } from "../app/api/finder/schedule/route.ts";
 import { GET as overviewGet } from "../app/api/finder/route.ts";
 import { POST as runPost } from "../app/api/finder/run/route.ts";
@@ -54,6 +56,7 @@ test("every staff route rejects a request without valid staff auth", async () =>
         () => notifySettingsPatch(unauthed("https://x.test/api/finder/notify-settings", jsonBody({ mode: "auctions_only" }))),
         () => notifySettingsPost(unauthed("https://x.test/api/finder/notify-settings", jsonBody({ email: "a@example.test" }))),
         () => notifySettingsDelete(unauthed("https://x.test/api/finder/notify-settings?id=1", { method: "DELETE" })),
+        () => notifyTestPost(unauthed("https://x.test/api/finder/notify-settings/test", { method: "POST" })),
         () => schedulePatch(unauthed("https://x.test/api/finder/schedule", jsonBody({ category: "pocket_knife", enabled: false }))),
       ];
       for (const call of cases) {
@@ -73,7 +76,7 @@ test("GET /api/finder returns the overview for staff", async () => {
       const body = await response.json();
       assert.deepEqual(body.counts, { pending: 0, rejected: 0, qualified: 0 });
       assert.ok(body.settings);
-      assert.deepEqual(body.notify, { mode: "auctions_only", recipients: [], usingEnvFallback: true });
+      assert.deepEqual(body.notify, { mode: "auctions_only", recipients: [], usingEnvFallback: true, lastAttemptAt: null, lastError: null, lastSuccessAt: null });
     });
   });
 });
@@ -336,6 +339,48 @@ test("recipient CRUD: add and remove", async () => {
       const deleted = await notifySettingsDelete(asStaff(`https://x.test/api/finder/notify-settings?id=${createdBody.id}`, { method: "DELETE" }));
       assert.equal(deleted.status, 200);
       assert.equal(fake.tables.finder_notify_recipients.length, 0);
+    });
+  });
+});
+
+const SMTP_ENV = { SMTP_HOST: "smtp.gmail.com", SMTP_PORT: "587", SMTP_USER: "alerts@example.test", SMTP_PASSWORD: "app-password", FINDER_ALERT_EMAIL_FROM: "alerts@example.test" };
+
+test("POST /api/finder/notify-settings/test sends a test email and records the success", async (t) => {
+  await withEnv({ ...BASE_ENV, ...SMTP_ENV }, async () => {
+    const calls = [];
+    t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async (message) => { calls.push(message); } }));
+    await withRoutesBackend({ finder_notify_recipients: [{ id: "r1", email: "staff@example.test", created_at: "2026-01-01" }], finder_notify_settings: [] }, async (fake) => {
+      const response = await notifyTestPost(asStaff("https://x.test/api/finder/notify-settings/test", { method: "POST" }));
+      assert.equal(response.status, 200);
+      assert.equal(calls.length, 1);
+      assert.deepEqual(calls[0].to, ["staff@example.test"]);
+      assert.equal(fake.tables.finder_notify_settings[0].last_error, null);
+      assert.ok(fake.tables.finder_notify_settings[0].last_success_at, "a successful test send stamps last_success_at");
+    });
+  });
+});
+
+test("POST /api/finder/notify-settings/test surfaces a send failure and records it", async (t) => {
+  await withEnv({ ...BASE_ENV, ...SMTP_ENV }, async () => {
+    t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async () => { throw new Error("SMTP connection refused"); } }));
+    await withRoutesBackend({ finder_notify_recipients: [{ id: "r1", email: "staff@example.test", created_at: "2026-01-01" }], finder_notify_settings: [] }, async (fake) => {
+      const response = await notifyTestPost(asStaff("https://x.test/api/finder/notify-settings/test", { method: "POST" }));
+      assert.equal(response.status, 502);
+      const body = await response.json();
+      assert.equal(body.error, "SMTP connection refused");
+      assert.equal(fake.tables.finder_notify_settings[0].last_error, "SMTP connection refused", "the failure is persisted so staff can see it without waiting on logs");
+    });
+  });
+});
+
+test("POST /api/finder/notify-settings/test reports the not-configured message when SMTP env vars are missing", async () => {
+  await withEnv(BASE_ENV, async () => {
+    await withRoutesBackend({ finder_notify_recipients: [{ id: "r1", email: "staff@example.test", created_at: "2026-01-01" }], finder_notify_settings: [] }, async (fake) => {
+      const response = await notifyTestPost(asStaff("https://x.test/api/finder/notify-settings/test", { method: "POST" }));
+      assert.equal(response.status, 502);
+      const body = await response.json();
+      assert.match(body.error, /not configured/);
+      assert.match(fake.tables.finder_notify_settings[0].last_error, /not configured/);
     });
   });
 });
