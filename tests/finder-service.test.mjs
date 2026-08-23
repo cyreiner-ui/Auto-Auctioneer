@@ -1143,7 +1143,7 @@ test("finderOverview reports counts, results, and the vision budget", async (t) 
       assert.equal(overview.budget.dailyLimit, FINDER_DAILY_LIMIT, "defaults to the monthly limit spread evenly across 30 days");
       assert.equal(overview.budget.dailyRemaining, FINDER_DAILY_LIMIT - 12);
       assert.equal(overview.settings.maxCostPerKnife, 3.5);
-      assert.deepEqual(overview.notify, { mode: "auctions_only", recipients: [], usingEnvFallback: true });
+      assert.deepEqual(overview.notify, { mode: "auctions_only", recipients: [], usingEnvFallback: true, lastAttemptAt: null, lastError: null, lastSuccessAt: null });
     });
   });
 });
