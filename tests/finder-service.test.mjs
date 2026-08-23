@@ -18,7 +18,6 @@ const ENV = {
   EBAY_CLIENT_ID: "client-id",
   EBAY_CLIENT_SECRET: "client-secret",
   EBAY_ENVIRONMENT: "sandbox",
-  EBAY_FINDER_MAX_PER_KNIFE: "3.50",
   GEMINI_API_KEY: "gemini-key",
   GEMINI_CONFIDENCE_THRESHOLD: "0.90",
   GIXEN_USERNAME: "buyer",
@@ -461,7 +460,7 @@ test("startFinderRun corrects a stale vision count via the title's own stated lo
         assert.equal(item.contains_folding_knife, true);
         assert.equal(item.confidence, 0.92);
         assert.equal(item.cost_per_knife, 129 / 15);
-        assert.equal(item.status, "rejected", "$129/15 = $8.60/knife is over the $3.50 default ceiling, unlike the wrongly cheap $129/55");
+        assert.equal(item.status, "rejected", "$129/15 = $8.60/knife is over the $4.00 default ceiling, unlike the wrongly cheap $129/55");
         assert.equal(item.reason, "over_budget");
       });
     });
@@ -486,7 +485,7 @@ test("startFinderRun applies a keyword's per-knife price override instead of the
         const [item] = fake.tables.finder_items;
         assert.equal(item.knife_count, 10);
         assert.equal(item.cost_per_knife, 6.5);
-        assert.equal(item.status, "qualified", "the $8 spyderco override, not the $3.50 global default, should apply");
+        assert.equal(item.status, "qualified", "the $8 spyderco override, not the $4.00 global default, should apply");
       });
     });
   });
@@ -720,7 +719,7 @@ test("processPendingFinderItems rejects a vision-classified flatware/table-cutle
   });
 });
 
-test("a vision-classified Swiss Army multi-tool qualifies under the stricter $1/knife cap but not merely under the normal $3.50 cap", async (t) => {
+test("a vision-classified Swiss Army multi-tool qualifies under the stricter $1/knife cap but not merely under the normal $4.00 cap", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
     const pastAttempt = new Date(Date.now() - 60_000).toISOString();
@@ -736,7 +735,7 @@ test("a vision-classified Swiss Army multi-tool qualifies under the stricter $1/
         assert.equal(cheap.status, "qualified");
         assert.equal(cheap.cost_per_knife, 0.9);
         const pricey = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|pricey|0");
-        assert.equal(pricey.status, "rejected", "$1.50/knife is well under the normal $3.50 cap but over the $1 Swiss Army cap");
+        assert.equal(pricey.status, "rejected", "$1.50/knife is well under the normal $4.00 cap but over the $1 Swiss Army cap");
         assert.equal(pricey.reason, "over_budget");
         assert.equal(pricey.cost_per_knife, 1.5);
       });
@@ -760,7 +759,7 @@ test("processPendingFinderItems applies the stricter Swiss Army cap on the fast 
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [item] = fake.tables.finder_items;
-        assert.equal(item.status, "rejected", "$1.50/knife is under the normal $3.50 cap but over the $1 Swiss Army cap");
+        assert.equal(item.status, "rejected", "$1.50/knife is under the normal $4.00 cap but over the $1 Swiss Army cap");
         assert.equal(item.reason, "over_budget");
         assert.equal(item.cost_per_knife, 1.5);
       });
@@ -1142,7 +1141,7 @@ test("finderOverview reports counts, results, and the vision budget", async (t) 
       assert.equal(overview.budget.dailyAnalyses, 12);
       assert.equal(overview.budget.dailyLimit, FINDER_DAILY_LIMIT, "defaults to the monthly limit spread evenly across 30 days");
       assert.equal(overview.budget.dailyRemaining, FINDER_DAILY_LIMIT - 12);
-      assert.equal(overview.settings.maxCostPerKnife, 3.5);
+      assert.equal(overview.settings.maxCostPerKnife, 4, "falls back to FINDER_DEFAULTS.maxCostPerKnife with no finder_pocket_knife_settings row seeded");
       assert.deepEqual(overview.notify, { mode: "auctions_only", recipients: [], usingEnvFallback: true, lastAttemptAt: null, lastError: null, lastSuccessAt: null });
     });
   });

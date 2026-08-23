@@ -52,14 +52,19 @@ export const CARVING_SET_CATEGORY_ID = "131608";
 // reissues.
 export const CARVING_SET_USED_CONDITION_ID = "3000";
 
-// How many of the category's newest listings to pull per day (staff estimate: roughly this many
-// new Flatware Sets listings appear daily) — kept as its own constant, independent of
-// config().searchDepth (which sizes every phrase search's page depth and is tunable via
-// EBAY_FINDER_RESULTS_PER_KEYWORD), so tuning that keyword-search setting can never silently
-// change this category browse's API budget too, or vice versa. The category holds many thousands
-// of listings total; sorted newest-first (see searchEbayCategoryNewlyListed), this reliably covers
-// a day's worth of new listings without paging through the rest of the catalog.
-export const CARVING_SET_CATEGORY_BROWSE_LIMIT = 500;
+// How many of the category's newest listings to pull per day — kept as its own constant,
+// independent of config().searchDepth (which sizes every phrase search's page depth and is
+// tunable via EBAY_FINDER_RESULTS_PER_KEYWORD), so tuning that keyword-search setting can never
+// silently change this category browse's API budget too, or vice versa. The category holds many
+// thousands of listings total; sorted newest-first (see searchEbayCategoryNewlyListed).
+//
+// Raised from the original 500/day: that figure was a staff estimate of daily new-listing volume,
+// not a measured ceiling, and carving-set qualification isn't price-limited (over_budget rejections
+// are a small fraction of carving-set volume, unlike the pocket-knife pipeline) — so pulling more of
+// the category's newest listings is a straightforward way to surface more candidates. Still well
+// within the shared 5,000-calls/day eBay Browse API budget alongside every other finder category's
+// calls.
+export const CARVING_SET_CATEGORY_BROWSE_LIMIT = 1500;
 
 // Synthetic keyword_phrases entry stamped on finder_items rows discovered via the category browse
 // above instead of any text search, so carvingSetGroupForPhrases below (and every keyword_phrases

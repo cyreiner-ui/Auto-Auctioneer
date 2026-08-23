@@ -7,6 +7,7 @@ import { POST as keywordsPost, PATCH as keywordsPatch, DELETE as keywordsDelete 
 import { POST as notifySettingsPost, PATCH as notifySettingsPatch, DELETE as notifySettingsDelete } from "../app/api/finder/notify-settings/route.ts";
 import { POST as notifyTestPost } from "../app/api/finder/notify-settings/test/route.ts";
 import { PATCH as schedulePatch } from "../app/api/finder/schedule/route.ts";
+import { PATCH as pocketKnifeSettingsPatch } from "../app/api/finder/pocket-knife-settings/route.ts";
 import { GET as overviewGet } from "../app/api/finder/route.ts";
 import { POST as runPost } from "../app/api/finder/run/route.ts";
 import { POST as tickPost } from "../app/api/finder/tick/route.ts";
@@ -58,6 +59,7 @@ test("every staff route rejects a request without valid staff auth", async () =>
         () => notifySettingsDelete(unauthed("https://x.test/api/finder/notify-settings?id=1", { method: "DELETE" })),
         () => notifyTestPost(unauthed("https://x.test/api/finder/notify-settings/test", { method: "POST" })),
         () => schedulePatch(unauthed("https://x.test/api/finder/schedule", jsonBody({ category: "pocket_knife", enabled: false }))),
+        () => pocketKnifeSettingsPatch(unauthed("https://x.test/api/finder/pocket-knife-settings", jsonBody({ max_cost_per_knife: 5 }))),
       ];
       for (const call of cases) {
         const response = await call();
@@ -287,6 +289,25 @@ test("PATCH /api/finder/notify-settings updates the notify mode", async () => {
       assert.equal(changedBack.status, 200);
       assert.equal(fake.tables.finder_notify_settings.length, 1, "the singleton row is updated in place, not duplicated");
       assert.equal(fake.tables.finder_notify_settings[0].notify_mode, "auctions_only");
+    });
+  });
+});
+
+test("PATCH /api/finder/pocket-knife-settings updates the singleton default-price row", async () => {
+  await withEnv(BASE_ENV, async () => {
+    await withRoutesBackend({ finder_pocket_knife_settings: [] }, async (fake) => {
+      const invalid = await pocketKnifeSettingsPatch(asStaff("https://x.test/api/finder/pocket-knife-settings", jsonBody({ max_cost_per_knife: 0 })));
+      assert.equal(invalid.status, 400);
+
+      const updated = await pocketKnifeSettingsPatch(asStaff("https://x.test/api/finder/pocket-knife-settings", jsonBody({ max_cost_per_knife: 5 })));
+      assert.equal(updated.status, 200);
+      assert.equal(fake.tables.finder_pocket_knife_settings.length, 1);
+      assert.equal(fake.tables.finder_pocket_knife_settings[0].max_cost_per_knife, 5);
+
+      const changedAgain = await pocketKnifeSettingsPatch(asStaff("https://x.test/api/finder/pocket-knife-settings", jsonBody({ max_cost_per_knife: "6.25" })));
+      assert.equal(changedAgain.status, 200);
+      assert.equal(fake.tables.finder_pocket_knife_settings.length, 1, "the singleton row is updated in place, not duplicated");
+      assert.equal(fake.tables.finder_pocket_knife_settings[0].max_cost_per_knife, 6.25);
     });
   });
 });

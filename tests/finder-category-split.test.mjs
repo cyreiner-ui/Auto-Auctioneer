@@ -16,7 +16,6 @@ const ENV = {
   EBAY_CLIENT_ID: "client-id",
   EBAY_CLIENT_SECRET: "client-secret",
   EBAY_ENVIRONMENT: "sandbox",
-  EBAY_FINDER_MAX_PER_KNIFE: "3.50",
   GEMINI_API_KEY: "gemini-key",
   SMTP_HOST: "smtp.gmail.com",
   SMTP_PORT: "587",
@@ -176,7 +175,7 @@ function fakeItemPage(count, offset) {
   }));
 }
 
-test("the Flatware Sets category browse stays capped at 500 even when EBAY_FINDER_RESULTS_PER_KEYWORD is tuned for keyword searches", async () => {
+test("the Flatware Sets category browse stays capped at 1500 even when EBAY_FINDER_RESULTS_PER_KEYWORD is tuned for keyword searches", async () => {
   await withEnv({ ...ENV, EBAY_FINDER_RESULTS_PER_KEYWORD: "50" }, async () => {
     const keywordLimits = [];
     const categoryBrowseLimits = [];
@@ -206,8 +205,8 @@ test("the Flatware Sets category browse stays capped at 500 even when EBAY_FINDE
         // The overridden env var does shrink the keyword search's own page size...
         assert.deepEqual(keywordLimits, [50]);
         // ...but the category browse pages in fixed 200-per-request chunks up to its own
-        // independent 500 cap (see CARVING_SET_CATEGORY_BROWSE_LIMIT), unaffected either way.
-        assert.deepEqual(categoryBrowseLimits, [200, 200, 100]);
+        // independent 1500 cap (see CARVING_SET_CATEGORY_BROWSE_LIMIT), unaffected either way.
+        assert.deepEqual(categoryBrowseLimits, [200, 200, 200, 200, 200, 200, 200, 100]);
       });
     });
   });
