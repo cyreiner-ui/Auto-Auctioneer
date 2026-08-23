@@ -226,7 +226,10 @@ export async function searchEbayCategoryNewlyListed(categoryId: string, requeste
 // `requested` is deliberately expected to be small (one page, not deep pagination): the response's
 // own `total` field is documented by eBay as unreliable for pagination use, and this shares the
 // same app-wide 5,000-calls/day Browse API budget as every other eBay call this app makes.
-export async function searchEbayByImage(imageBase64: string, requested: number, token?: string): Promise<EbayFinderItem[]> {
+//
+// conditionId, when passed, restricts results the same way searchEbayKeyword's does (search_by_image
+// supports the same `filter` query param) — e.g. CARVING_SET_USED_CONDITION_ID for Used-only.
+export async function searchEbayByImage(imageBase64: string, requested: number, token?: string, conditionId?: string): Promise<EbayFinderItem[]> {
   const authToken = token || await appToken();
   const marketplace = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
   const result: EbayFinderItem[] = [];
@@ -234,6 +237,7 @@ export async function searchEbayByImage(imageBase64: string, requested: number, 
     const url = new URL(`${ebayApiBaseUrl("production")}/buy/browse/v1/item_summary/search_by_image`);
     url.searchParams.set("limit", String(limit));
     url.searchParams.set("offset", String(offset));
+    if (conditionId) url.searchParams.set("filter", `conditionIds:{${conditionId}}`);
     const response = await fetch(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${authToken}`, "X-EBAY-C-MARKETPLACE-ID": marketplace, "Content-Type": "application/json" },
