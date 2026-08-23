@@ -474,11 +474,10 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
       try {
         const carvingGroup = carvingSetGroupForPhrases([keyword.phrase]);
         const extraExcludeTerms = carvingGroup ? CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS : [];
-        // Carving-set and gaucho-knife keywords are restricted to Used listings only (see
-        // CARVING_SET_USED_CONDITION_ID) — both buyers want antique/vintage cutlery, never
-        // new-made reissues. Left unset for pocket-knife keywords, which keep searching every
-        // condition.
-        const conditionId = carvingGroup || gauchoKnifeGroupForPhrases([keyword.phrase]) ? CARVING_SET_USED_CONDITION_ID : undefined;
+        // Carving-set keywords are restricted to Used listings only (see
+        // CARVING_SET_USED_CONDITION_ID) — this buyer wants antique cutlery, never new-made
+        // reissues. Left unset for pocket-knife keywords, which keep searching every condition.
+        const conditionId = carvingGroup ? CARVING_SET_USED_CONDITION_ID : undefined;
         for (const item of await searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms, conditionId)) {
           const current = found.get(item.itemId);
           if (current) current.phrases.push(keyword.phrase);
@@ -597,7 +596,7 @@ export async function debugFindItemAcrossKeywords(itemId: string): Promise<Finde
     try {
       const carvingGroup = carvingSetGroupForPhrases([keyword.phrase]);
       const extraExcludeTerms = carvingGroup ? CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS : [];
-      const conditionId = carvingGroup || gauchoKnifeGroupForPhrases([keyword.phrase]) ? CARVING_SET_USED_CONDITION_ID : undefined;
+      const conditionId = carvingGroup ? CARVING_SET_USED_CONDITION_ID : undefined;
       const items = await searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms, conditionId);
       const match = items.find((item) => item.itemId.includes(itemId));
       return { phrase: keyword.phrase, itemsReturned: items.length, hitResultsCap: items.length >= config().searchDepth, found: Boolean(match), matchedTitle: match?.title ?? null, error: null };
