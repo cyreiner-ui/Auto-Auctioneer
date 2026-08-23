@@ -261,8 +261,8 @@ test("effectiveMaxCostPerKnife caps Swiss Army items to the stricter ceiling, an
 });
 
 test("calculates shipping-inclusive unit cost at the exact threshold", () => {
-  assert.equal(calculateDeal(31, 4, 10).qualifies, true);
-  assert.equal(calculateDeal(31.01, 4, 10).qualifies, false);
+  assert.equal(calculateDeal(36, 4, 10).qualifies, true);
+  assert.equal(calculateDeal(36.01, 4, 10).qualifies, false);
   assert.equal(calculateDeal(3, null, 1).reason, "missing_shipping");
 });
 

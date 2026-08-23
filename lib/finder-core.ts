@@ -1,6 +1,9 @@
 export const FINDER_DEFAULTS = {
   zip: "32819",
-  maxCostPerKnife: 3.5,
+  // Raised from $3.50: production data showed over_budget rejecting ~19x as many pocket-knife
+  // listings as qualified at that ceiling, by far the single biggest factor limiting how many
+  // items qualify (every text/vision rejection reason combined was an order of magnitude smaller).
+  maxCostPerKnife: 4.0,
   confidence: 0.9,
   resultsPerKeyword: 500,
   // Deliberately capped at a single page rather than paginating deeply: eBay's searchByImage
