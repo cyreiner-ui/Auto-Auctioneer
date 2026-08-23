@@ -125,6 +125,30 @@ export async function updateScheduleSettings(category: FinderCategory, patch: Pa
   if (error) throw new Error(error.message);
 }
 
+type PocketKnifeSettings = { maxCostPerKnife: number };
+
+// Matches FINDER_DEFAULTS.maxCostPerKnife — used only if the singleton row is somehow missing
+// (it's seeded by supabase/migrations/034_finder_pocket_knife_settings.sql).
+const DEFAULT_POCKET_KNIFE_SETTINGS: PocketKnifeSettings = { maxCostPerKnife: FINDER_DEFAULTS.maxCostPerKnife };
+
+// The pocket-knife pipeline's global default max-cost-per-knife ceiling (the fallback used when no
+// matched keyword has its own finder_keywords.max_cost_per_knife override) — a staff-editable app
+// setting (see /staff/finder/settings) rather than an env var, so it can be tuned without a
+// redeploy. Carving-set/gaucho-knife qualification never reads this; each of those has its own,
+// unrelated pricing logic.
+async function getPocketKnifeSettings(): Promise<PocketKnifeSettings> {
+  const { data } = await supabaseAdmin.from("finder_pocket_knife_settings").select("*").eq("id", true).maybeSingle();
+  if (!data) return DEFAULT_POCKET_KNIFE_SETTINGS;
+  return { maxCostPerKnife: Number(data.max_cost_per_knife) };
+}
+
+export async function updatePocketKnifeSettings(patch: Partial<PocketKnifeSettings>) {
+  if (patch.maxCostPerKnife === undefined) return;
+  if (!Number.isFinite(patch.maxCostPerKnife) || patch.maxCostPerKnife <= 0) throw new Error("Enter a valid per-knife price greater than 0.");
+  const { error } = await supabaseAdmin.from("finder_pocket_knife_settings").upsert({ id: true, max_cost_per_knife: patch.maxCostPerKnife, updated_at: new Date().toISOString() }, { onConflict: "id" });
+  if (error) throw new Error(error.message);
+}
+
 type NotifyRow = {
   ebay_item_id: string; title: string; ebay_url: string; image_url: string | null; item_price: number; shipping_cost: number | null;
   total_cost: number | null; cost_per_knife: number | null; knife_count: number | null; notified_at: string | null; gixen_status: string | null;
@@ -224,7 +248,6 @@ const GARBAGE_CATEGORIES = new Set(["multi_tool", "plain_blade", "credit_card_kn
 const config = () => {
   const monthlyLimit = Number(process.env.GEMINI_MONTHLY_ANALYSIS_LIMIT || FINDER_DEFAULTS.monthlyAnalysisLimit);
   return {
-    maxCost: Number(process.env.EBAY_FINDER_MAX_PER_KNIFE || FINDER_DEFAULTS.maxCostPerKnife),
     swissArmyMaxCost: Number(process.env.EBAY_FINDER_SWISS_ARMY_MAX_PER_KNIFE || FINDER_DEFAULTS.swissArmyMaxCostPerKnife),
     confidence: Number(process.env.GEMINI_CONFIDENCE_THRESHOLD || FINDER_DEFAULTS.confidence),
     searchDepth: Number(process.env.EBAY_FINDER_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.resultsPerKeyword),
@@ -455,6 +478,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
   try {
     const { data: allKeywords, error: keywordError } = await supabaseAdmin.from("finder_keywords").select("phrase, max_cost_per_knife").eq("enabled", true).order("created_at");
     if (keywordError) throw new Error(keywordError.message);
+    const pocketKnifeSettings = await getPocketKnifeSettings();
     // No category column on finder_keywords — a scoped run filters in JS by whether each phrase
     // resolves to the carving-set/gaucho-knife algorithm, the same test the per-item dispatch
     // already uses (see keywordCategory above).
@@ -585,7 +609,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
       const carvingGroup = carvingSetGroupForPhrases(mergedPhrases);
       if (carvingGroup) return refreshedCarvingSetRow(item, mergedPhrases, run.id, existing as CarvingSetExistingRow | undefined, carvingGroup);
       if (gauchoKnifeGroupForPhrases(mergedPhrases)) return refreshedGauchoKnifeRow(item, mergedPhrases, run.id, existing as GauchoKnifeExistingRow | undefined, negativePhrases);
-      return refreshedRow(item, mergedPhrases, run.id, existing, resolveMaxCostPerKnife(mergedPhrases, keywordMaxCost, config().maxCost), config().swissArmyMaxCost);
+      return refreshedRow(item, mergedPhrases, run.id, existing, resolveMaxCostPerKnife(mergedPhrases, keywordMaxCost, pocketKnifeSettings.maxCostPerKnife), config().swissArmyMaxCost);
     });
     const added = ids.filter((id) => !existingById.has(id)).length;
     // Stamped only for genuinely new items (existingById already distinguishes new vs. re-touched,
@@ -648,6 +672,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
     if (keywordError) throw new Error(keywordError.message);
     for (const keywordRow of keywordRows || []) keywordMaxCost.set(keywordRow.phrase, keywordRow.max_cost_per_knife);
   }
+  const pocketKnifeSettings = await getPocketKnifeSettings();
   // Fetched once for the whole batch, not per row — only needed at all when this batch actually
   // contains a gaucho-knife row.
   const gauchoNegativePhrases: string[] = [];
@@ -879,7 +904,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
     if (carvingGroup) return processCarvingSetRow(row, carvingGroup);
     if (gauchoKnifeGroupForPhrases(row.keyword_phrases || [])) return processGauchoKnifeRow(row);
     if (row.run_id) runIds.add(row.run_id);
-    const maxCost = resolveMaxCostPerKnife(row.keyword_phrases || [], keywordMaxCost, config().maxCost);
+    const maxCost = resolveMaxCostPerKnife(row.keyword_phrases || [], keywordMaxCost, pocketKnifeSettings.maxCostPerKnife);
     try {
       if (row.knife_count != null) {
         // The text parser already resolved the count (and category, if any) on discovery; this
@@ -1020,6 +1045,7 @@ export async function finderOverview(category?: FinderCategory) {
   const { monthlyLimit, dailyLimit } = config();
   const dailyAnalyses = Number(dailyUsage.data?.analyses || 0);
   const notifyRecipients = notifyRecipientRows.data || [];
+  const pocketKnifeSettings = await getPocketKnifeSettings();
   return {
     keywords, results: results.data || [], runs: runs.data || [],
     negativeKeywords: negativeKeywords.data || [], referenceImages: referenceImagesWithUrls,
@@ -1041,7 +1067,7 @@ export async function finderOverview(category?: FinderCategory) {
       freeAnalyses: free, paidAnalyses: paid, analyses, monthlyLimit, remaining: Math.max(0, monthlyLimit - analyses), projectedMaximum: analyses * 0.001,
       dailyAnalyses, dailyLimit, dailyRemaining: Math.max(0, dailyLimit - dailyAnalyses),
     },
-    settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: config().maxCost },
+    settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: pocketKnifeSettings.maxCostPerKnife },
   };
 }
 

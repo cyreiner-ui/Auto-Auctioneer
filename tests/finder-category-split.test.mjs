@@ -16,7 +16,6 @@ const ENV = {
   EBAY_CLIENT_ID: "client-id",
   EBAY_CLIENT_SECRET: "client-secret",
   EBAY_ENVIRONMENT: "sandbox",
-  EBAY_FINDER_MAX_PER_KNIFE: "3.50",
   GEMINI_API_KEY: "gemini-key",
   SMTP_HOST: "smtp.gmail.com",
   SMTP_PORT: "587",
