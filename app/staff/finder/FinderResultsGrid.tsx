@@ -37,6 +37,7 @@ const REJECTION_REASON_LABEL: Record<string, string> = {
   weight_based_lot: "Sold by weight — quantity isn't stated",
   multi_tool: "Multi-tool (corkscrew/pliers/bottle-opener), not a pocket knife",
   non_folding_cutlery: "Reads as kitchen/table cutlery, not a folding knife",
+  table_cutlery: "Photo confirmed a flatware/silverware set, not a folding knife",
   no_folding_knife: "Photo didn't show a folding pocket knife",
   invalid_price: "Listing had no usable price",
   missing_shipping: "Shipping cost couldn't be determined",

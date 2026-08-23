@@ -173,6 +173,14 @@ test("rejects table/kitchen cutlery wording outright instead of spending a visio
   assert.deepEqual(analyzeListingText("Vintage Wade & Butcher Sheffield England knife Holsons N.Y (lot#13288)"), { kind: "reject", reason: "non_folding_cutlery" });
 });
 
+test("rejects dinner flatware/silverware lots that say 'fork'/'spoon' but never say kitchen/flatware/silverware, confirmed against real listings that had slipped past to vision and gotten misqualified", () => {
+  assert.deepEqual(analyzeListingText("Mixed Lot of 10 pcs Oneida Silver Carlton Stainless Knife Forks Spoons"), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText("29 pc Unknown Pattern Stainless CAMBRIDGE SILVER Mixed Lot Knife Fork Spoon Used"), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText("VTG Rogers Oneida Spirit Of America Stainless Mixed Lot 24 Pc Fork Spoon Knife"), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText("Superior Stainless USA Mixed Lot 9 Pieces Spoons Knife Forks Starburst Atomic"), { kind: "reject", reason: "non_folding_cutlery" });
+  assert.deepEqual(analyzeListingText("Mixed Lot of 11 Mikasa Addison 18/10 Stainless Glossy Knife Forks Spoons"), { kind: "reject", reason: "non_folding_cutlery" });
+});
+
 test("does not reject cutlery wording when a folding signal is also present", () => {
   const result = analyzeListingText("Used folding pocket knife but also comes with a butter knife");
   assert.notEqual(result.kind, "reject");

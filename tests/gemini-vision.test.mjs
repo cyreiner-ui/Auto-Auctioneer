@@ -76,6 +76,17 @@ test("round-trips a garbage item category unchanged", async () => {
   });
 });
 
+test("round-trips the table_cutlery item category unchanged", async () => {
+  await withEnv(GEMINI_ENV, async () => {
+    await withFakeRpc(true, async () => {
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 10, containsFoldingKnife: false, confidence: 1, uncertaintyReason: "", itemCategory: "table_cutlery" })], async () => {
+        const result = await countKnivesWithGemini(INPUT);
+        assert.equal(result.itemCategory, "table_cutlery");
+      });
+    });
+  });
+});
+
 test("throws when Gemini returns an itemCategory outside the allowed set", async () => {
   await withEnv(GEMINI_ENV, async () => {
     await withFakeRpc(true, async () => {

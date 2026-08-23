@@ -693,6 +693,33 @@ test("processPendingFinderItems rejects a vision-classified keychain knife regar
   });
 });
 
+test("processPendingFinderItems rejects a vision-classified flatware/table-cutlery set regardless of a cheap price", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [{
+        ebay_item_id: "v1|9|0", run_id: null, title: "Mixed Lot of 10 pcs Oneida Silver Carlton Stainless Knife Forks Spoons", short_description: "",
+        image_url: "https://i.ebayimg.com/9.jpg", item_price: 20, shipping_cost: 5, buying_options: ["FIXED_PRICE"],
+        status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+      }],
+    }, async (fake) => {
+      // Regression: this reproduces the real production misfire — Gemini reporting
+      // containsFoldingKnife: true for a dinner-flatware lot, with itemCategory "other" (which
+      // isn't a garbage category) and the whole place-setting piece count counted as knifeCount.
+      // That combination used to qualify at $2.50/"knife". table_cutlery now catches it outright.
+      await withFetch([imageRoute, geminiRoute({ knifeCount: 10, containsFoldingKnife: true, confidence: 1, uncertaintyReason: "", itemCategory: "table_cutlery" })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected", "a flatware/table-cutlery set must never qualify, no matter how cheap");
+        assert.equal(item.reason, "table_cutlery");
+        assert.equal(item.item_category, "table_cutlery");
+      });
+    });
+  });
+});
+
 test("a vision-classified Swiss Army multi-tool qualifies under the stricter $1/knife cap but not merely under the normal $3.50 cap", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);

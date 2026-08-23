@@ -14,6 +14,7 @@ export type ItemCategory =
   | "box_cutter"
   | "throwing_knife"
   | "keychain_knife"
+  | "table_cutlery"
   | "other";
 
 export type VisionCount = {
@@ -34,6 +35,7 @@ const ITEM_CATEGORIES: ItemCategory[] = [
   "box_cutter",
   "throwing_knife",
   "keychain_knife",
+  "table_cutlery",
   "other",
 ];
 
@@ -85,7 +87,7 @@ export async function countKnivesWithGemini(input: { title: string; description:
   if (!key) throw new Error("GEMINI_API_KEY is not configured.");
   await reserveUsage();
   const model = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
-  const prompt = `Analyze this eBay listing for a folding pocket-knife buyer. Count every physical knife included in one purchase, including fixed-blade or kitchen knives in a mixed lot, but do not count cases, tools, or repeated views of the same knife. Confirm whether at least one included knife is a folding pocket knife. If this is a choose-one/selection listing, the image is unclear, items overlap too much, or the exact included count cannot be established, lower confidence and explain why. Then classify the primary item into exactly one category: pocket_knife (a normal folding or fixed-blade knife with a handle), swiss_army_multi_tool (a Victorinox/Wenger-style Swiss Army multi-tool with a small blade plus other tools), multi_tool (any other combo-tool, e.g. a Leatherman-style pliers tool, or a blade combined with a corkscrew or bottle opener, that is not Swiss-Army-style), plain_blade (a bare blade with no handle), credit_card_knife (a thin credit-card- or wallet-shaped folding knife), coin_knife (a coin- or medallion-shaped folding knife), box_cutter (a utility/box-cutter/razor knife), throwing_knife (a knife designed/balanced for throwing, often sold in matching sets, not for folding/pocket carry), keychain_knife (a miniature knife attached to or designed as a keychain/keyring fob), or other. Title: ${input.title.slice(0, 300)}. Description: ${input.description.slice(0, 1200)}.`;
+  const prompt = `Analyze this eBay listing for a folding pocket-knife buyer. Count every physical knife included in one purchase, including fixed-blade or kitchen knives in a mixed lot, but do not count cases, tools, or repeated views of the same knife — and never count forks, spoons, or other non-knife utensils, even if they are pictured or listed alongside the knife/knives. Confirm whether at least one included knife is a folding pocket knife: a folding knife's blade pivots/hinges into the handle. A straight, fixed-blade table knife, butter knife, or dinner knife from a flatware/silverware/place-setting set is NOT a folding pocket knife, even if the listing or image also includes forks and spoons — set containsFoldingKnife to false for those. If this is a choose-one/selection listing, the image is unclear, items overlap too much, or the exact included count cannot be established, lower confidence and explain why. Then classify the primary item into exactly one category: pocket_knife (a normal folding or fixed-blade knife with a handle), swiss_army_multi_tool (a Victorinox/Wenger-style Swiss Army multi-tool with a small blade plus other tools), multi_tool (any other combo-tool, e.g. a Leatherman-style pliers tool, or a blade combined with a corkscrew or bottle opener, that is not Swiss-Army-style), plain_blade (a bare blade with no handle), credit_card_knife (a thin credit-card- or wallet-shaped folding knife), coin_knife (a coin- or medallion-shaped folding knife), box_cutter (a utility/box-cutter/razor knife), throwing_knife (a knife designed/balanced for throwing, often sold in matching sets, not for folding/pocket carry), keychain_knife (a miniature knife attached to or designed as a keychain/keyring fob), table_cutlery (a flatware/silverware/place-setting set of table knives, forks, and/or spoons, with no folding pocket knife included), or other. Title: ${input.title.slice(0, 300)}. Description: ${input.description.slice(0, 1200)}.`;
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
