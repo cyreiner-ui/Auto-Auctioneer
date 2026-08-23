@@ -509,7 +509,9 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
         try {
           const imageBase64 = await referenceImageBase64(reference.storage_path);
           const phrase = imageSearchPhrase(reference.id);
-          for (const item of await searchEbayByImage(imageBase64, FINDER_DEFAULTS.imageSearchResultsPerReference, imageToken || undefined)) {
+          // Used-only, same as the keyword-search supplement above — a genuine antique gaucho
+          // knife is never a new-made reissue.
+          for (const item of await searchEbayByImage(imageBase64, FINDER_DEFAULTS.imageSearchResultsPerReference, imageToken || undefined, CARVING_SET_USED_CONDITION_ID)) {
             const current = found.get(item.itemId);
             if (current) current.phrases.push(phrase);
             else found.set(item.itemId, { item, phrases: [phrase] });
