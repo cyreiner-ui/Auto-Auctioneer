@@ -88,6 +88,25 @@ export async function sendQualifiedItemsEmail(items: NotifiableFinderItem[], rec
   }
 }
 
+export async function sendTestEmail(recipients: string[]) {
+  const transportOptions = transportConfig();
+  const from = process.env.FINDER_ALERT_EMAIL_FROM?.trim() || transportOptions?.auth.user;
+  const to = recipients;
+  if (!transportOptions || !from || !to.length) return { ok: false, skipped: true as const, message: "Email alerts are not configured (SMTP_HOST/SMTP_USER/SMTP_PASSWORD, and at least one recipient in finder notification settings)." };
+  try {
+    const transporter = nodemailer.createTransport(transportOptions);
+    await transporter.sendMail({
+      from,
+      to,
+      subject: "Knife Auctions test alert",
+      html: "<p>This is a test email from the eBay deal finder's notification settings. If you received this, alert emails are working.</p>",
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Sending the test email failed." };
+  }
+}
+
 export type FinderRunSummaryCounts = { total: number; auctionCount: number; fixedPriceCount: number };
 
 export async function sendRunSummaryEmail(counts: FinderRunSummaryCounts, recipients: string[], kind: NotifyKind = "pocket_knife") {

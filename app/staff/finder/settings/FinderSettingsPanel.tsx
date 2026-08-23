@@ -5,7 +5,7 @@ import Link from "next/link";
 
 type Keyword = { id: string; phrase: string; enabled: boolean; max_cost_per_knife: number | null };
 type NotifyRecipient = { id: string; email: string; created_at: string };
-type NotifySettings = { mode: "auctions_only" | "all_qualified"; recipients: NotifyRecipient[]; usingEnvFallback: boolean };
+type NotifySettings = { mode: "auctions_only" | "all_qualified"; recipients: NotifyRecipient[]; usingEnvFallback: boolean; lastAttemptAt: string | null; lastError: string | null; lastSuccessAt: string | null };
 type Schedule = { enabled: boolean; frequency: "daily" | "weekly"; hour: number; minute: number; dayOfWeek: number | null };
 type Overview = { keywords: Keyword[]; notify: NotifySettings; schedule: Schedule; budget: { mode: string; freeAnalyses: number; paidAnalyses: number; analyses: number; monthlyLimit: number; remaining: number; projectedMaximum: number; dailyAnalyses: number; dailyLimit: number; dailyRemaining: number }; settings: { zip: string; maxCostPerKnife: number } };
 
@@ -37,6 +37,17 @@ export default function FinderSettingsPanel() {
       if (!response.ok) throw new Error(payload.error || "Request failed.");
       await load(); return payload;
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Request failed."); }
+    finally { setBusy(false); }
+  };
+
+  const sendTestEmail = async () => {
+    setBusy(true); setError("");
+    try {
+      const response = await fetch("/api/finder/notify-settings/test", { method: "POST" });
+      const payload = await response.json();
+      await load();
+      if (!response.ok) throw new Error(payload.error || "Sending the test email failed.");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Sending the test email failed."); }
     finally { setBusy(false); }
   };
 
@@ -97,6 +108,12 @@ export default function FinderSettingsPanel() {
         {data.notify.usingEnvFallback && <p className="muted">No recipients saved yet — falling back to FINDER_ALERT_EMAILS.</p>}
         <div className="keyword-list notify-recipient-list">{data.notify.recipients.map((recipient) => <div className="keyword-row notify-recipient-row" key={recipient.id}><span>{recipient.email}</span><button className="danger" aria-label={`Remove ${recipient.email}`} disabled={busy} onClick={() => { if (window.confirm(`Remove ${recipient.email}?`)) void request(`/api/finder/notify-settings?id=${encodeURIComponent(recipient.id)}`, { method: "DELETE" }); }}>Remove</button></div>)}</div>
         <form className="keyword-add notify-recipient-add" onSubmit={(event) => { event.preventDefault(); if (!newRecipientEmail.trim()) return; void request("/api/finder/notify-settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: newRecipientEmail }) }).then(() => setNewRecipientEmail("")); }}><input aria-label="Add a recipient email" type="email" placeholder="Add a recipient email" value={newRecipientEmail} onChange={(event) => setNewRecipientEmail(event.target.value)} /><button className="primary" disabled={busy}>Add recipient</button></form>
+        <div className="notify-status">
+          {data.notify.lastError && <p className="notice finder-error" role="status">Last alert email attempt failed{data.notify.lastAttemptAt ? ` (${new Date(data.notify.lastAttemptAt).toLocaleString()})` : ""}: {data.notify.lastError}</p>}
+          {!data.notify.lastError && data.notify.lastSuccessAt && <p className="muted">Last alert email sent successfully at {new Date(data.notify.lastSuccessAt).toLocaleString()}.</p>}
+          {!data.notify.lastAttemptAt && <p className="muted">No alert email has been attempted yet.</p>}
+          <button type="button" disabled={busy} onClick={() => void sendTestEmail()}>Send test email</button>
+        </div>
       </div>
     </section>}
   </main>;

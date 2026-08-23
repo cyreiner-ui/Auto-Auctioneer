@@ -85,7 +85,7 @@ function scopeToCategory<Q extends { overlaps: (col: string, val: string) => any
 
 type FinderNotifyMode = "auctions_only" | "all_qualified";
 
-async function getNotifySettings(): Promise<{ mode: FinderNotifyMode; recipients: string[] }> {
+export async function getNotifySettings(): Promise<{ mode: FinderNotifyMode; recipients: string[] }> {
   const [settingsResult, recipientsResult] = await Promise.all([
     supabaseAdmin.from("finder_notify_settings").select("notify_mode").eq("id", true).maybeSingle(),
     supabaseAdmin.from("finder_notify_recipients").select("email").order("created_at"),
@@ -96,6 +96,17 @@ async function getNotifySettings(): Promise<{ mode: FinderNotifyMode; recipients
     ? dbRecipients
     : (process.env.FINDER_ALERT_EMAILS || "").split(",").map((address) => address.trim()).filter(Boolean);
   return { mode, recipients };
+}
+
+// Records the outcome of every real alert-email send attempt (not the "nothing to send"
+// early-outs in notifyBucket) so a total SMTP failure is visible on /staff/finder/settings
+// and in logs instead of silently leaving every qualified item unnotified forever, which is
+// exactly what happened undetected for weeks before this existed.
+export async function recordNotifyAttempt(result: { ok: boolean; message?: string }) {
+  const now = new Date().toISOString();
+  const patch: Record<string, unknown> = { id: true, last_attempt_at: now, last_error: result.ok ? null : result.message || "Sending the alert email failed.", updated_at: now };
+  if (result.ok) patch.last_success_at = now;
+  await supabaseAdmin.from("finder_notify_settings").upsert(patch, { onConflict: "id" });
 }
 
 // Matches today's hardcoded default (daily at 6am America/New_York) — used only if a category's
@@ -169,16 +180,22 @@ async function notifyBucket(rows: NotifyRow[], mode: FinderNotifyMode, recipient
       recipients,
       kind,
     );
+    await recordNotifyAttempt(emailResult);
     if (emailResult.ok) {
       await supabaseAdmin.from("finder_items").update({ notified_at: new Date().toISOString() }).in("ebay_item_id", unnotified.map((row) => row.ebay_item_id));
+    } else {
+      console.error(`[finder-notify] Failed to send ${kind} summary email for ${unnotified.length} item(s): ${emailResult.message}`);
     }
     return;
   }
   const unnotifiedAuctions = unnotified.filter((row) => isAuctionFormat(row.buying_options));
   if (!unnotifiedAuctions.length) return;
   const emailResult = await sendQualifiedItemsEmail(unnotifiedAuctions, recipients, kind);
+  await recordNotifyAttempt(emailResult);
   if (emailResult.ok) {
     await supabaseAdmin.from("finder_items").update({ notified_at: new Date().toISOString() }).in("ebay_item_id", unnotifiedAuctions.map((row) => row.ebay_item_id));
+  } else {
+    console.error(`[finder-notify] Failed to send ${kind} qualified-item email for ${unnotifiedAuctions.length} item(s): ${emailResult.message}`);
   }
 }
 
@@ -1013,7 +1030,7 @@ export async function finderOverview(category?: FinderCategory) {
     scopeToCategory(supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).eq("status", "qualified").is("dismissed_at", null), category),
     supabaseAdmin.from("finder_vision_usage").select("*").eq("month", monthKey()).maybeSingle(),
     supabaseAdmin.from("finder_vision_usage_daily").select("*").eq("day", dayKey()).maybeSingle(),
-    supabaseAdmin.from("finder_notify_settings").select("notify_mode").eq("id", true).maybeSingle(),
+    supabaseAdmin.from("finder_notify_settings").select("notify_mode, last_attempt_at, last_error, last_success_at").eq("id", true).maybeSingle(),
     supabaseAdmin.from("finder_notify_recipients").select("*").order("created_at"),
     category ? getScheduleSettings(category) : Promise.resolve(null),
   ]);
@@ -1054,6 +1071,9 @@ export async function finderOverview(category?: FinderCategory) {
       mode: notifySettingsRow.data?.notify_mode === "all_qualified" ? "all_qualified" : "auctions_only",
       recipients: notifyRecipients,
       usingEnvFallback: !notifyRecipients.length,
+      lastAttemptAt: notifySettingsRow.data?.last_attempt_at ?? null,
+      lastError: notifySettingsRow.data?.last_error ?? null,
+      lastSuccessAt: notifySettingsRow.data?.last_success_at ?? null,
     },
     schedule,
     // The monthly cap (reserve_finder_vision_usage) counts free + paid analyses together and
