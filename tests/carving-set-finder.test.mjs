@@ -182,12 +182,20 @@ test("carvingSetCeiling: Sheffield is always $200 regardless of piece count", ()
   assert.equal(carvingSetCeiling("sheffield", 5), 200);
 });
 
-test("carvingSetCeiling: German is tiered by piece count at $10/piece + $15", () => {
-  assert.equal(carvingSetCeiling("german", 2), 35);
-  assert.equal(carvingSetCeiling("german", 3), 45);
-  assert.equal(carvingSetCeiling("german", 4), 55);
-  assert.equal(carvingSetCeiling("german", 5), 65);
-  assert.equal(carvingSetCeiling("german", 6), 75);
+test("carvingSetCeiling: German is tiered by piece count at $10/piece + $20", () => {
+  assert.equal(carvingSetCeiling("german", 2), 40);
+  assert.equal(carvingSetCeiling("german", 3), 50);
+  assert.equal(carvingSetCeiling("german", 4), 60);
+  assert.equal(carvingSetCeiling("german", 5), 70);
+  assert.equal(carvingSetCeiling("german", 6), 80);
+});
+
+test("carvingSetCeiling: generic is tiered by piece count at $10/piece + $15, unchanged from German's old pricing", () => {
+  assert.equal(carvingSetCeiling("generic", 2), 35);
+  assert.equal(carvingSetCeiling("generic", 3), 45);
+  assert.equal(carvingSetCeiling("generic", 4), 55);
+  assert.equal(carvingSetCeiling("generic", 5), 65);
+  assert.equal(carvingSetCeiling("generic", 6), 75);
 });
 
 test("carvingSetCeiling: German returns null when the piece count isn't resolvable", () => {
