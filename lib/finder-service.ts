@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { appToken, getItemDescription, getItemShippingCost, searchEbayByImage, searchEbayCategoryNewlyListed, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
 import { analyzeListingText, calculateDeal, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isScheduledRunTime, isShippingLookupWorthwhile, matchesNegativeKeyword, monthKey, resolveMaxCostPerKnife, type FinderScheduleSettings } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
+import { getEbayApiCallsToday } from "./ebay-call-tracker";
 import {
   analyzeCarvingSetWithGemini,
   carvingSetCeiling,
@@ -1113,7 +1114,7 @@ export async function finderTick(date = new Date()) {
 }
 
 export async function finderOverview(category?: FinderCategory) {
-  const [allKeywords, results, runs, pending, rejected, qualified, usage, dailyUsage, notifySettingsRow, notifyRecipientRows, schedule] = await Promise.all([
+  const [allKeywords, results, runs, pending, rejected, qualified, usage, dailyUsage, notifySettingsRow, notifyRecipientRows, schedule, ebayCallsToday] = await Promise.all([
     supabaseAdmin.from("finder_keywords").select("*").order("created_at"),
     scopeToCategory(supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").is("dismissed_at", null).order("discovered_at", { ascending: false }).limit(500), category),
     category ? supabaseAdmin.from("finder_runs").select("*").or(`category.is.null,category.eq.${category}`).order("started_at", { ascending: false }).limit(10) : supabaseAdmin.from("finder_runs").select("*").order("started_at", { ascending: false }).limit(10),
@@ -1125,6 +1126,7 @@ export async function finderOverview(category?: FinderCategory) {
     supabaseAdmin.from("finder_notify_settings").select("notify_mode, last_attempt_at, last_error, last_success_at").eq("id", true).maybeSingle(),
     supabaseAdmin.from("finder_notify_recipients").select("*").order("created_at"),
     category ? getScheduleSettings(category) : Promise.resolve(null),
+    getEbayApiCallsToday(),
   ]);
   const firstError = [allKeywords.error, results.error, runs.error, pending.error, rejected.error, qualified.error, usage.error, dailyUsage.error, notifySettingsRow.error, notifyRecipientRows.error].find(Boolean);
   if (firstError) throw new Error(firstError.message);
@@ -1163,6 +1165,9 @@ export async function finderOverview(category?: FinderCategory) {
     keywords, results: results.data || [], runs: runs.data || [],
     negativeKeywords: negativeKeywords.data || [], referenceImages: referenceImagesWithUrls,
     counts: { pending: pending.count || 0, rejected: rejected.count || 0, qualified: qualified.count || 0 },
+    // App-wide (not scoped to `category`) — every eBay call this app makes, across all three
+    // finder pipelines plus bidding and the manual listing importer, shares one daily quota.
+    ebayCallsToday,
     notify: {
       mode: notifySettingsRow.data?.notify_mode === "all_qualified" ? "all_qualified" : "auctions_only",
       recipients: notifyRecipients,

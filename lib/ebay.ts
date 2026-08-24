@@ -1,5 +1,6 @@
 import { parseEbayItemId } from "./validation";
 import { ebayApiBaseUrl } from "./ebay-endpoints";
+import { recordEbayApiCall } from "./ebay-call-tracker";
 
 const browserHeaders = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
@@ -92,6 +93,7 @@ export async function getEbayListing(url: string) {
       },
       body: "grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope"
     });
+    await recordEbayApiCall();
     if (!tokenResponse.ok) return getPublicEbayListing(resolved.url, itemId);
     const { access_token } = await tokenResponse.json();
     const response = await fetch(`${apiBase}/buy/browse/v1/item/v1|${itemId}|0`, {
@@ -100,6 +102,7 @@ export async function getEbayListing(url: string) {
         "X-EBAY-C-MARKETPLACE-ID": process.env.EBAY_MARKETPLACE_ID || "EBAY_US"
       }
     });
+    await recordEbayApiCall();
     if (!response.ok) return getPublicEbayListing(resolved.url, itemId);
     const item = await response.json();
     return {

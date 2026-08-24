@@ -1,5 +1,6 @@
 import { ebayApiBaseUrl } from "./ebay-endpoints";
 import { FINDER_DEFAULTS, finderPages } from "./finder-core";
+import { recordEbayApiCall } from "./ebay-call-tracker";
 
 // Every fetch below carries this timeout. Without one, a single stalled eBay response left
 // startFinderRun's per-item description-fetch mapWithConcurrency batch (hundreds of individual
@@ -36,6 +37,7 @@ export async function appToken() {
     body: "grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope",
     signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS),
   });
+  await recordEbayApiCall();
   if (!response.ok) throw new Error(`eBay token request failed (${response.status}).`);
   const payload = await response.json() as { access_token?: string };
   if (!payload.access_token) throw new Error("eBay did not return an application token.");
@@ -67,6 +69,7 @@ async function browseHeaders(token?: string) {
 export async function getItemShippingCost(itemId: string, token?: string) {
   const url = `${ebayApiBaseUrl()}/buy/browse/v1/item/${encodeURIComponent(itemId)}`;
   const response = await fetch(url, { headers: await browseHeaders(token), signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS) });
+  await recordEbayApiCall();
   if (!response.ok) throw new Error(`eBay item lookup for "${itemId}" failed (${response.status}).`);
   const payload = await response.json() as { shippingOptions?: Array<{ shippingCost?: { value?: string; currency?: string } }> };
   return shippingCost(payload);
@@ -100,6 +103,7 @@ function htmlToText(html: string) {
 export async function getItemDescription(itemId: string, token?: string) {
   const url = `${ebayApiBaseUrl()}/buy/browse/v1/item/${encodeURIComponent(itemId)}`;
   const response = await fetch(url, { headers: await browseHeaders(token), signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS) });
+  await recordEbayApiCall();
   if (!response.ok) throw new Error(`eBay item lookup for "${itemId}" failed (${response.status}).`);
   const payload = await response.json() as { description?: string };
   if (!payload.description) return "";
@@ -171,6 +175,7 @@ export async function searchEbayKeyword(keyword: string, requested: number = FIN
       },
       signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS),
     });
+    await recordEbayApiCall();
     if (!response.ok) throw new Error(`eBay search for “${keyword}” failed (${response.status}).`);
     const payload = await response.json() as { itemSummaries?: Array<Record<string, unknown>> };
     const summaries = payload.itemSummaries || [];
@@ -207,6 +212,7 @@ export async function searchEbayCategoryNewlyListed(categoryId: string, requeste
       },
       signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS),
     });
+    await recordEbayApiCall();
     if (!response.ok) throw new Error(`eBay category browse for "${categoryId}" failed (${response.status}).`);
     const payload = await response.json() as { itemSummaries?: Array<Record<string, unknown>> };
     const summaries = payload.itemSummaries || [];
@@ -244,6 +250,7 @@ export async function searchEbayByImage(imageBase64: string, requested: number, 
       body: JSON.stringify({ image: imageBase64 }),
       signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS),
     });
+    await recordEbayApiCall();
     if (!response.ok) throw new Error(`eBay image search failed (${response.status}).`);
     const payload = await response.json() as { itemSummaries?: Array<Record<string, unknown>> };
     const summaries = payload.itemSummaries || [];

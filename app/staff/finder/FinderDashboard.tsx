@@ -8,7 +8,7 @@ import { usePersistedState } from "../../../lib/use-persisted-state";
 type FinderKind = "pocket_knife" | "carving_set" | "gaucho_knife";
 
 type Run = { id: string; trigger: string; status: string; keywords_scanned: number; current_keyword: string | null; items_seen: number; items_added: number; qualified: number; new_qualified: number; rejected: number; errors: string[]; started_at: string };
-type Overview = { results: FinderResult[]; runs: Run[]; keywords: { id: string; phrase: string; enabled: boolean }[]; counts: { pending: number; rejected: number; qualified: number }; settings: { zip: string; maxCostPerKnife: number } };
+type Overview = { results: FinderResult[]; runs: Run[]; keywords: { id: string; phrase: string; enabled: boolean }[]; counts: { pending: number; rejected: number; qualified: number }; ebayCallsToday: number; settings: { zip: string; maxCostPerKnife: number } };
 
 const usd = (value: number) => Number(value || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 const RUN_STATUS_LABEL: Record<string, string> = { running: "Working…", completed: "Done", failed: "Had a problem" };
@@ -116,7 +116,7 @@ export default function FinderDashboard() {
     {!data && !error && <p className="muted" role="status" aria-live="polite">Loading…</p>}
     {data && <>
       <section className="finder-stats">
-        <div><small>GOOD DEALS FOUND</small><strong>{data.counts.qualified}</strong></div><div><small>STILL CHECKING</small><strong>{data.counts.pending}</strong></div><div><small>NOT A MATCH</small><strong>{data.counts.rejected}</strong></div>
+        <div><small>GOOD DEALS FOUND</small><strong>{data.counts.qualified}</strong></div><div><small>STILL CHECKING</small><strong>{data.counts.pending}</strong></div><div><small>NOT A MATCH</small><strong>{data.counts.rejected}</strong></div><div><small>EBAY API CALLS TODAY</small><strong>{data.ebayCallsToday}</strong></div>
       </section>
       <section className="finder-runs"><div className="section-title"><div><p className="eyebrow">LATEST SEARCH</p><h2>{latest ? new Date(latest.started_at).toLocaleString() : "Not run yet"}</h2></div>{latest && <span className={`run-status ${latest.status}`}>{RUN_STATUS_LABEL[latest.status] || latest.status}</span>}</div>
         {latest?.status === "running" && <div className="finder-progress"><div className="budget-meter" role="progressbar" aria-valuenow={progressPercent} aria-valuemin={0} aria-valuemax={100} aria-label="Search progress"><span style={{ width: `${progressPercent}%` }} /></div><p className="muted">Searching {latest.keywords_scanned}/{totalKeywords || "…"}{latest.current_keyword ? `: “${latest.current_keyword}”` : ""}</p></div>}
