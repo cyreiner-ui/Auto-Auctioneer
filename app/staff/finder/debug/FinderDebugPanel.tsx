@@ -3,7 +3,17 @@
 import { useState } from "react";
 import Link from "next/link";
 
-type Result = { itemId: string; found: boolean; keyword?: string; matchedTitle?: string | null; failedKeywords: string[] };
+type Result = {
+  itemId: string;
+  found: boolean;
+  keyword?: string | null;
+  matchedTitle?: string | null;
+  failedKeywords: string[];
+  foundVia?: "keyword" | "image_search";
+  imageSearchConfigured: boolean;
+  imageSearchesRun: number;
+  failedImageSearches: number;
+};
 
 export default function FinderDebugPanel() {
   const [input, setInput] = useState("");
@@ -24,7 +34,7 @@ export default function FinderDebugPanel() {
   };
 
   return <main className="finder-page">
-    <header className="finder-header"><div><Link className="back" href="/staff/finder">← Back to deal finder</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Finder debugger</h1><p className="muted">Check whether a specific eBay listing shows up in a live search for any enabled keyword — useful when a listing you expected the finder to catch never appeared.</p></div></header>
+    <header className="finder-header"><div><Link className="back" href="/staff/finder">← Back to deal finder</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Finder debugger</h1><p className="muted">Check whether a specific eBay listing shows up in a live search for any enabled keyword, or (for gaucho knives) the reference-photo image search — useful when a listing you expected the finder to catch never appeared.</p></div></header>
     <section className="panel">
       <form className="keyword-add" onSubmit={(event) => { event.preventDefault(); void check(); }}>
         <input aria-label="eBay item id or listing URL" placeholder="eBay item id or listing URL (e.g. 287535686773)" value={input} onChange={(event) => setInput(event.target.value)} />
@@ -34,9 +44,13 @@ export default function FinderDebugPanel() {
       {result && <p className="muted">
         Item <strong>{result.itemId}</strong>{" "}
         {result.found
-          ? <>was found under keyword “{result.keyword}” — “{result.matchedTitle}”.</>
-          : <>was not in results for any enabled keyword.</>}
+          ? result.foundVia === "image_search"
+            ? <>was found via gaucho-knife image search — “{result.matchedTitle}”.</>
+            : <>was found under keyword “{result.keyword}” — “{result.matchedTitle}”.</>
+          : <>was not in results for any enabled keyword{result.imageSearchConfigured ? " or the gaucho-knife image search" : ""}.</>}
         {result.failedKeywords.length > 0 && <> ({result.failedKeywords.length} keyword search{result.failedKeywords.length === 1 ? "" : "es"} failed and couldn&apos;t be checked: {result.failedKeywords.join(", ")})</>}
+        {result.failedImageSearches > 0 && <> ({result.failedImageSearches} of {result.imageSearchesRun} gaucho-knife image search{result.imageSearchesRun === 1 ? "" : "es"} failed and couldn&apos;t be checked)</>}
+        {!result.imageSearchConfigured && <> No gaucho-knife reference photos are configured, so image search wasn&apos;t checked — <Link href="/staff/finder/gaucho-knives/settings">add one</Link> if this listing should be caught that way.</>}
       </p>}
     </section>
   </main>;

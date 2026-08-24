@@ -714,6 +714,35 @@ export async function debugFindItemAcrossKeywords(itemId: string): Promise<Finde
   return mapWithConcurrency(keywords, config().scanConcurrency, probeKeyword);
 }
 
+export type FinderImageSearchProbe = { referenceImageId: string; itemsReturned: number; hitResultsCap: boolean; found: boolean; matchedTitle: string | null; error: string | null };
+
+// Companion to debugFindItemAcrossKeywords, specifically for the gaucho-knife category: that
+// function only re-runs keyword searches, but real gaucho knives are routinely mislabeled by
+// sellers (see lib/gaucho-knife-finder.ts's module comment) and are expected to surface mainly
+// through startFinderRun's searchByImage supplement instead — so a "not found"/keyword-only
+// result from debugFindItemAcrossKeywords alone would wrongly read as the image search being
+// broken. This re-runs searchEbayByImage against every configured reference photo, the same way
+// startFinderRun's scanReferenceImage does, so staff can see whether image search would (or did)
+// catch a given listing.
+export async function debugFindItemViaGauchoImageSearch(itemId: string): Promise<FinderImageSearchProbe[]> {
+  const { data: referenceRows, error } = await supabaseAdmin.from("finder_reference_images").select("id, storage_path").eq("category", "gaucho_knife").order("created_at");
+  if (error) throw new Error(error.message);
+  const references = referenceRows || [];
+  if (!references.length) return [];
+  const token = await appToken();
+  async function probeReference(reference: { id: string; storage_path: string }): Promise<FinderImageSearchProbe> {
+    try {
+      const imageBase64 = await referenceImageBase64(reference.storage_path);
+      const items = await searchEbayByImage(imageBase64, FINDER_DEFAULTS.imageSearchResultsPerReference, token || undefined, CARVING_SET_USED_CONDITION_ID);
+      const match = items.find((item) => item.itemId.includes(itemId));
+      return { referenceImageId: reference.id, itemsReturned: items.length, hitResultsCap: items.length >= FINDER_DEFAULTS.imageSearchResultsPerReference, found: Boolean(match), matchedTitle: match?.title ?? null, error: null };
+    } catch (err) {
+      return { referenceImageId: reference.id, itemsReturned: 0, hitResultsCap: false, found: false, matchedTitle: null, error: err instanceof Error ? err.message : "Image search failed." };
+    }
+  }
+  return mapWithConcurrency(references, config().scanConcurrency, probeReference);
+}
+
 export async function processPendingFinderItems(limit = config().batchSize) {
   const now = new Date().toISOString();
   const { data, error } = await supabaseAdmin.from("finder_items").select("*").eq("status", "pending").lte("next_attempt_at", now).order("discovered_at").limit(limit);
