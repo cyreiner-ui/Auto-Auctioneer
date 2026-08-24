@@ -182,6 +182,23 @@ export async function updateGauchoSettings(patch: Partial<GauchoSettings>) {
   if (error) throw new Error(error.message);
 }
 
+// A per-category pause on processPendingFinderItems's vision/classification work — wired
+// separately for each of the three finder tracks (see the finder_processing_settings check
+// constraint) rather than one shared on/off switch, since staff want to (for example) pause
+// gaucho-knife processing while swapping reference photos without also stalling the unrelated
+// pocket-knife/carving-set queues. Discovery (startFinderRun) is untouched either way — new
+// candidates keep arriving and simply wait as "pending" until unpaused. Same singleton-per-row
+// shape as finder_schedule_settings, just keyed on "paused" instead of a schedule.
+async function getProcessingPaused(category: FinderCategory): Promise<boolean> {
+  const { data } = await supabaseAdmin.from("finder_processing_settings").select("paused").eq("category", category).maybeSingle();
+  return Boolean(data?.paused);
+}
+
+export async function updateProcessingPaused(category: FinderCategory, paused: boolean) {
+  const { error } = await supabaseAdmin.from("finder_processing_settings").upsert({ category, paused, updated_at: new Date().toISOString() }, { onConflict: "category" });
+  if (error) throw new Error(error.message);
+}
+
 type NotifyRow = {
   ebay_item_id: string; title: string; ebay_url: string; image_url: string | null; item_price: number; shipping_cost: number | null;
   total_cost: number | null; cost_per_knife: number | null; knife_count: number | null; notified_at: string | null; gixen_status: string | null;
@@ -784,6 +801,12 @@ export async function processPendingFinderItems(limit = config().batchSize) {
     for (const keywordRow of keywordRows || []) keywordMaxCost.set(keywordRow.phrase, keywordRow.max_cost_per_knife);
   }
   const pocketKnifeSettings = await getPocketKnifeSettings();
+  // One cheap query for all three tracks' pause state (see updateProcessingPaused) rather than
+  // conditionally fetching per category like the negative-keyword/reference-image blocks below —
+  // every batch potentially mixes all three, and this table only ever has 3 rows.
+  const { data: pausedRows, error: pausedError } = await supabaseAdmin.from("finder_processing_settings").select("category, paused");
+  if (pausedError) throw new Error(pausedError.message);
+  const pausedByCategory = new Map((pausedRows || []).map((row) => [row.category as FinderCategory, Boolean(row.paused)]));
   // Fetched once for the whole batch, not per row — only needed at all when this batch actually
   // contains a gaucho-knife row.
   const gauchoNegativePhrases: string[] = [];
@@ -836,6 +859,13 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   // the shipping-lookup token cache and the cross-algorithm Gemini budget-exhaustion flag.
   async function processCarvingSetRow(row: FinderRow, group: CarvingSetGroup) {
     if (row.run_id) runIds.add(row.run_id);
+    // Staff-paused (see updateProcessingPaused) — defer without spending an eBay/Gemini call or
+    // counting against the row's attempts, so a long pause never pushes a row into "error".
+    if (pausedByCategory.get("carving_set")) {
+      await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: "Carving-set processing is paused by staff." }).eq("ebay_item_id", row.ebay_item_id);
+      deferred++;
+      return;
+    }
     try {
       if (row.knife_count != null) {
         // Text already confirmed case/material/a usable ceiling on discovery; this row is only
@@ -970,6 +1000,15 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   // didn't contain.
   async function processGauchoKnifeRow(row: FinderRow) {
     if (row.run_id) runIds.add(row.run_id);
+    // Staff-paused (see updateProcessingPaused) — defer without spending an eBay/Gemini call or
+    // counting against the row's attempts, same shape as the no-reference-images defer below, so a
+    // long pause (e.g. while uploading several new reference photos) never pushes a row into
+    // "error". Checked before the reference-image guard so pausing doesn't need photos removed too.
+    if (pausedByCategory.get("gaucho_knife")) {
+      await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: "Gaucho-knife vision processing is paused by staff." }).eq("ebay_item_id", row.ebay_item_id);
+      deferred++;
+      return;
+    }
     // Nothing to compare a candidate against yet — defer without spending an eBay/Gemini call or
     // counting against the row's attempts (so it never hits the 3-attempt "error" cutoff over
     // this alone); it'll pick back up on its own once staff upload a reference photo.
@@ -1030,6 +1069,13 @@ export async function processPendingFinderItems(limit = config().batchSize) {
     if (carvingGroup) return processCarvingSetRow(row, carvingGroup);
     if (gauchoKnifeGroupForPhrases(row.keyword_phrases || [])) return processGauchoKnifeRow(row);
     if (row.run_id) runIds.add(row.run_id);
+    // Staff-paused (see updateProcessingPaused) — defer without spending an eBay/Gemini call or
+    // counting against the row's attempts, same shape as the carving-set/gaucho-knife pause checks.
+    if (pausedByCategory.get("pocket_knife")) {
+      await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: "Pocket-knife processing is paused by staff." }).eq("ebay_item_id", row.ebay_item_id);
+      deferred++;
+      return;
+    }
     const maxCost = resolveMaxCostPerKnife(row.keyword_phrases || [], keywordMaxCost, pocketKnifeSettings.maxCostPerKnife);
     try {
       // A negative keyword added after this row was first queued must still win outright, whether
@@ -1156,6 +1202,7 @@ export async function finderOverview(category?: FinderCategory) {
     category ? getScheduleSettings(category) : Promise.resolve(null),
     getEbayApiCallsToday(),
   ]);
+  const processingPaused = category ? await getProcessingPaused(category) : null;
   const firstError = [allKeywords.error, results.error, runs.error, pending.error, rejected.error, qualified.error, usage.error, dailyUsage.error, notifySettingsRow.error, notifyRecipientRows.error].find(Boolean);
   if (firstError) throw new Error(firstError.message);
   // No category column on finder_keywords — filter in JS with the same phrase test the run-scan
@@ -1206,6 +1253,9 @@ export async function finderOverview(category?: FinderCategory) {
       lastSuccessAt: notifySettingsRow.data?.last_success_at ?? null,
     },
     schedule,
+    // Per-category vision/classification pause (see updateProcessingPaused) — null when this
+    // overview isn't scoped to one category (schedule follows the same null-when-unscoped shape).
+    processingPaused,
     // The monthly cap (reserve_finder_vision_usage) counts free + paid analyses together and
     // applies regardless of mode, so the budget the UI shows must match that, not just the
     // paid-mode count — free-mode analyses aren't actually free once Google's own free-tier

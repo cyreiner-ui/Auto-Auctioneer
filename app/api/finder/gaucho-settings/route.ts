@@ -3,7 +3,8 @@ import { requireStaff } from "@/lib/staff-auth";
 import { updateGauchoSettings } from "@/lib/finder-service";
 
 // Mirrors app/api/finder/pocket-knife-settings/route.ts, but for the gaucho-knife pipeline's
-// keyword-search-supplement toggle (see updateGauchoSettings).
+// keyword-search-supplement toggle (see updateGauchoSettings). The separate per-category
+// processing pause lives at app/api/finder/processing-paused/route.ts.
 export async function PATCH(request: Request) {
   if (!(await requireStaff(request))) return NextResponse.json({ error: "Staff access required." }, { status: 403 });
   const body = await request.json().catch(() => ({}));

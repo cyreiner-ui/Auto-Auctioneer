@@ -10,7 +10,7 @@ type NotifySettings = { mode: "auctions_only" | "all_qualified"; recipients: Not
 type Schedule = { enabled: boolean; frequency: "daily" | "weekly"; hour: number; minute: number; dayOfWeek: number | null };
 type Overview = {
   keywords: Keyword[]; negativeKeywords: Keyword[]; referenceImages: ReferenceImage[];
-  notify: NotifySettings; schedule: Schedule;
+  notify: NotifySettings; schedule: Schedule; processingPaused: boolean;
   budget: { mode: string; analyses: number; monthlyLimit: number; remaining: number; projectedMaximum: number; dailyAnalyses: number; dailyLimit: number };
   settings: { gauchoKeywordSearchEnabled: boolean };
 };
@@ -52,6 +52,7 @@ export default function GauchoKnifeSettingsPanel() {
   const saveMode = (mode: string) => request("/api/finder/notify-settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) });
   const saveSchedule = (patch: Partial<Schedule>) => request("/api/finder/schedule", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: "gaucho_knife", ...patch }) });
   const setKeywordSearchEnabled = (enabled: boolean) => request("/api/finder/gaucho-settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keyword_search_enabled: enabled }) });
+  const setProcessingPaused = (paused: boolean) => request("/api/finder/processing-paused", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: "gaucho_knife", paused }) });
 
   const uploadReferenceImage = async (file: File) => {
     setUploading(true); setError("");
@@ -81,6 +82,8 @@ export default function GauchoKnifeSettingsPanel() {
         <div className="panel-heading"><div><p className="eyebrow">REFERENCE PHOTOS</p><h2>{data.referenceImages.length} photo{data.referenceImages.length === 1 ? "" : "s"}</h2></div>
           <label className="upload">{uploading ? "Uploading…" : "+ Add"}<input type="file" accept="image/*" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadReferenceImage(file); event.target.value = ""; }} /></label>
         </div>
+        <label className="keyword-toggle"><input type="checkbox" checked={data.processingPaused} disabled={busy} onChange={(event) => void setProcessingPaused(event.target.checked)} /> Pause vision processing</label>
+        <p className="muted">Stops Gemini from analyzing pending candidates against the photos below — new candidates keep arriving and wait as pending. Turn this on while adding or swapping several reference photos, so nothing gets judged against a set you&rsquo;re still in the middle of changing.</p>
         <input aria-label="Label for the next uploaded reference photo" placeholder="Optional label for the next upload (e.g. maker/style name)" value={newLabel} onChange={(event) => setNewLabel(event.target.value)} style={{ marginTop: 12 }} />
         <div className="photo-grid" style={{ marginTop: 16 }}>
           {data.referenceImages.map((image) => <div className="photo" key={image.id}>
