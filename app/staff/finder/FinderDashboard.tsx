@@ -115,7 +115,7 @@ export default function FinderDashboard() {
       </div>
       <div className="finder-header-actions">
         <button className="primary" disabled={busy} onClick={() => void request("/api/finder/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: kind }) })}>{busy ? "Working…" : "Run now"}</button>
-        {data && <button disabled={busy} onClick={() => void setProcessingPaused(!data.processingPaused)}>{data.processingPaused ? "Resume processing" : "Pause processing"}</button>}
+        {data && <button className={data.processingPaused ? "primary" : "danger"} disabled={busy} onClick={() => void setProcessingPaused(!data.processingPaused)}>{data.processingPaused ? "Resume processing" : "Pause processing"}</button>}
       </div>
     </header>
     {error && <div className="notice finder-error" role="status" aria-live="polite" aria-atomic="true">{friendlyError(error)}</div>}
