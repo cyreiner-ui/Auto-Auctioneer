@@ -792,7 +792,11 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   const now = new Date().toISOString();
   const { data, error } = await supabaseAdmin.from("finder_items").select("*").eq("status", "pending").lte("next_attempt_at", now).order("discovered_at").limit(limit);
   if (error) throw new Error(error.message);
-  const rows = (data || []) as FinderRow[];
+  // Gaucho-knife rows are the newest, uncapped track (see the "no price cap yet" dashboard copy)
+  // and share the same Gemini vision budget as pocket-knife/carving-set — so within a batch they're
+  // sorted after those two (a stable sort, so relative discovered_at order is otherwise unchanged)
+  // to make sure a budget/quota exhaustion mid-batch defers gaucho rows first, not the other tracks.
+  const rows = ((data || []) as FinderRow[]).slice().sort((a, b) => Number(gauchoKnifeGroupForPhrases(a.keyword_phrases || [])) - Number(gauchoKnifeGroupForPhrases(b.keyword_phrases || [])));
   const phraseSet = [...new Set(rows.flatMap((row) => row.keyword_phrases || []))];
   const keywordMaxCost = new Map<string, number | null>();
   if (phraseSet.length) {
