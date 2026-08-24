@@ -7,7 +7,7 @@ type Keyword = { id: string; phrase: string; enabled: boolean };
 type NotifyRecipient = { id: string; email: string; created_at: string };
 type NotifySettings = { mode: "auctions_only" | "all_qualified"; recipients: NotifyRecipient[]; usingEnvFallback: boolean };
 type Schedule = { enabled: boolean; frequency: "daily" | "weekly"; hour: number; minute: number; dayOfWeek: number | null };
-type Overview = { keywords: Keyword[]; notify: NotifySettings; schedule: Schedule; budget: { mode: string; freeAnalyses: number; paidAnalyses: number; analyses: number; monthlyLimit: number; remaining: number; projectedMaximum: number; dailyAnalyses: number; dailyLimit: number; dailyRemaining: number } };
+type Overview = { keywords: Keyword[]; notify: NotifySettings; schedule: Schedule; processingPaused: boolean; budget: { mode: string; freeAnalyses: number; paidAnalyses: number; analyses: number; monthlyLimit: number; remaining: number; projectedMaximum: number; dailyAnalyses: number; dailyLimit: number; dailyRemaining: number } };
 
 const WEEKDAY_LABEL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
@@ -41,6 +41,7 @@ export default function CarvingSetSettingsPanel() {
   const setEnabled = (keyword: Keyword, enabled: boolean) => request("/api/finder/keywords", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: keyword.id, enabled }) });
   const saveMode = (mode: string) => request("/api/finder/notify-settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) });
   const saveSchedule = (patch: Partial<Schedule>) => request("/api/finder/schedule", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: "carving_set", ...patch }) });
+  const setProcessingPaused = (paused: boolean) => request("/api/finder/processing-paused", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: "carving_set", paused }) });
   const budgetPercent = data ? Math.min(100, Math.round((data.budget.analyses / data.budget.monthlyLimit) * 100)) : 0;
   const dailyPercent = data ? Math.min(100, Math.round((data.budget.dailyAnalyses / data.budget.dailyLimit) * 100)) : 0;
 
@@ -58,6 +59,8 @@ export default function CarvingSetSettingsPanel() {
       <div className="panel finder-schedule">
         <div className="panel-heading"><div><p className="eyebrow">AUTOMATION</p><h2>Automatic scan schedule</h2></div></div>
         <label className="keyword-toggle"><input type="checkbox" checked={data.schedule.enabled} disabled={busy} onChange={(event) => void saveSchedule({ enabled: event.target.checked })} /> Run automatically</label>
+        <label className="keyword-toggle"><input type="checkbox" checked={data.processingPaused} disabled={busy} onChange={(event) => void setProcessingPaused(event.target.checked)} /> Pause processing</label>
+        {data.processingPaused && <p className="muted">Pending carving-set candidates wait as-is — no Gemini calls or eBay lookups run for this track until this is turned back off. New candidates from the scan above still keep arriving; they just wait too.</p>}
         <div className="schedule-controls">
           <label>Frequency
             <select value={data.schedule.frequency} disabled={busy} onChange={(event) => void saveSchedule({ frequency: event.target.value as Schedule["frequency"] })}>
