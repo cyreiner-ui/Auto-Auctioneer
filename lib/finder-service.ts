@@ -766,7 +766,10 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   if (rows.some((row) => gauchoKnifeGroupForPhrases(row.keyword_phrases || []))) {
     const [negativeResult, referenceResult] = await Promise.all([
       supabaseAdmin.from("finder_gaucho_negative_keywords").select("phrase").eq("enabled", true),
-      supabaseAdmin.from("finder_reference_images").select("id, storage_path").eq("category", "gaucho_knife"),
+      // Ordered because analyzeGauchoKnifeMatch caps at GAUCHO_MAX_REFERENCE_IMAGES and silently
+      // drops the rest — with no explicit order, which 5 survive the cap would be whatever
+      // Postgres happens to return, not necessarily the ones staff intended to prioritize.
+      supabaseAdmin.from("finder_reference_images").select("id, storage_path").eq("category", "gaucho_knife").order("created_at"),
     ]);
     if (negativeResult.error) throw new Error(negativeResult.error.message);
     if (referenceResult.error) throw new Error(referenceResult.error.message);
