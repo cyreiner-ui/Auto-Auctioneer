@@ -950,6 +950,59 @@ test("startFinderRun rejects immediately as over_budget without a shipping looku
   });
 });
 
+test("startFinderRun rejects a Frost Cutlery listing outright via the negative keyword, even though it would otherwise resolve as a qualifying branded pocket knife", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
+      finder_pocket_knife_negative_keywords: [{ id: "n1", phrase: "frost cutlery", enabled: true, created_at: "2026-01-01" }],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem({
+          title: "Lot of 5 Frost Cutlery Pocket Knives", price: { value: "5.00", currency: "USD" },
+        })] }) },
+      ], async () => {
+        await startFinderRun("manual", "run-frost-cutlery-negative");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected");
+        assert.equal(item.reason, "negative_keyword_match");
+      });
+    });
+  });
+});
+
+test("startFinderRun lets a newly-added Frost Cutlery negative keyword override a stale qualified verdict on refresh", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
+      finder_pocket_knife_negative_keywords: [{ id: "n1", phrase: "frost cutlery", enabled: true, created_at: "2026-01-01" }],
+      finder_items: [{
+        ebay_item_id: "v1|1|0", run_id: "old-run", keyword_phrases: ["knife lot"],
+        title: "Frost Cutlery Assorted Pocket Knives", short_description: "",
+        ebay_url: "https://www.ebay.com/itm/1", image_url: "https://i.ebayimg.com/1.jpg",
+        item_price: 4, shipping_cost: 1, currency: "USD", buying_options: ["AUCTION"],
+        status: "qualified", knife_count: 5, contains_folding_knife: true, confidence: 0.95,
+        detection_source: "vision", item_category: null, reason: null, discovered_at: "2026-01-01",
+      }],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        { test: (url) => url.startsWith(SEARCH_URL), respond: () => jsonResponse({ itemSummaries: [ebayItem({
+          itemId: "v1|1|0", title: "Frost Cutlery Assorted Pocket Knives",
+          price: { value: "4.00", currency: "USD" }, shippingOptions: [{ shippingCost: { value: "1.00", currency: "USD" } }],
+        })] }) },
+      ], async () => {
+        await startFinderRun("manual", "run-frost-cutlery-stale-override");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected", "a newly-added negative keyword must win over a stale vision-qualified verdict");
+        assert.equal(item.reason, "negative_keyword_match");
+      });
+    });
+  });
+});
+
 test("processPendingFinderItems reuses one eBay app token across multiple shipping lookups in the same batch", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);

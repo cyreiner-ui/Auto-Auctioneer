@@ -307,6 +307,16 @@ export function isShippingLookupWorthwhile(itemPrice: number, knifeCount: number
   return Number.isFinite(itemPrice) && Number.isFinite(knifeCount) && knifeCount > 0 && itemPrice / knifeCount <= max;
 }
 
+// Staff-editable post-fetch text filter, shared by every finder category that has its own
+// negative-keyword table (finder_gaucho_negative_keywords, finder_pocket_knife_negative_keywords)
+// — originally lived only in lib/gaucho-knife-finder.ts, moved here once the pocket-knife pipeline
+// needed the exact same substring-match behavior. Returns the matched phrase, for a human-readable
+// rejection note, or null when nothing matches.
+export function matchesNegativeKeyword(title: string, description: string, negativePhrases: string[]): string | null {
+  const text = `${title} ${description}`.toLowerCase();
+  return negativePhrases.find((phrase) => phrase && text.includes(phrase.toLowerCase())) || null;
+}
+
 export function calculateDeal(itemPrice: number, shippingCost: number | null, knifeCount: number, max: number = FINDER_DEFAULTS.maxCostPerKnife) {
   if (!Number.isFinite(itemPrice) || itemPrice < 0) return { qualifies: false, reason: "invalid_price" as const };
   if (shippingCost == null || !Number.isFinite(shippingCost) || shippingCost < 0) return { qualifies: false, reason: "missing_shipping" as const };
