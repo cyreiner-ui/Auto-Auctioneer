@@ -9,9 +9,14 @@
 // qualification is driven purely by whether Gemini vision judges the candidate's photo a match
 // against the staff-curated reference photos.
 import { imagePart, referenceImagePart, reserveUsage, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
+import { matchesNegativeKeyword } from "./finder-core";
 import type { EbayFinderItem } from "./ebay-finder";
 
 export { VisionBudgetError, VisionQuotaError };
+// Re-exported for backward compatibility — this used to be defined here; it's now a shared
+// utility in finder-core.ts since the pocket-knife pipeline's own negative-keyword filter needs
+// the exact same substring-match behavior.
+export { matchesNegativeKeyword };
 
 export const GAUCHO_REFERENCE_IMAGE_BUCKET = "finder-reference-images";
 
@@ -42,14 +47,6 @@ export function gauchoKnifeGroupForPhrases(phrases: string[]): boolean {
 export async function referenceImageBase64(storagePath: string): Promise<string> {
   const part = await referenceImagePart(GAUCHO_REFERENCE_IMAGE_BUCKET, storagePath);
   return part.inlineData.data;
-}
-
-// The category's only pre-vision filter, and deliberately negative-only — no positive text
-// requirement (see the module comment above for why). Returns the matched phrase, for a
-// human-readable rejection note, or null when nothing matches.
-export function matchesNegativeKeyword(title: string, description: string, negativePhrases: string[]): string | null {
-  const text = `${title} ${description}`.toLowerCase();
-  return negativePhrases.find((phrase) => phrase && text.includes(phrase.toLowerCase())) || null;
 }
 
 export type GauchoKnifeMatchResult = {

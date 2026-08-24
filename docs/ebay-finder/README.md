@@ -38,6 +38,20 @@ This roughly triples the keyword count (from 8 to ~34), which means a
 roughly proportional increase in eBay Browse API calls per daily run — worth
 watching against eBay's API rate limits.
 
+## Negative keywords
+
+`037_finder_pocket_knife_negative_keywords.sql` seeds
+`finder_pocket_knife_negative_keywords` with phrases that reject a listing
+outright, before it's ever classified — checked against every candidate's
+title/description, the same way `finder_gaucho_negative_keywords` filters
+the gaucho-knife pipeline. This exists because `lib/finder-core.ts`'s
+brand-name recognition already treats bare "Frost"/"Frost Cutlery" as a
+trusted folding-knife brand signal (the same trust every other mainstream
+brand gets), which would otherwise let a Frost Cutlery listing qualify
+purely on that brand match — a budget import brand staff don't want to
+source regardless of price. Staff can add, disable, or delete phrases
+anytime from `/staff/finder/settings`.
+
 ## Email alerts
 
 Alerts send over plain SMTP (`lib/finder-notify.ts`, via `nodemailer`) using

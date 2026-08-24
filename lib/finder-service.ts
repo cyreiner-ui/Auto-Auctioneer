@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appToken, getItemDescription, getItemShippingCost, searchEbayByImage, searchEbayCategoryNewlyListed, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
-import { analyzeListingText, calculateDeal, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isScheduledRunTime, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife, type FinderScheduleSettings } from "./finder-core";
+import { analyzeListingText, calculateDeal, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isScheduledRunTime, isShippingLookupWorthwhile, matchesNegativeKeyword, monthKey, resolveMaxCostPerKnife, type FinderScheduleSettings } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
 import {
   analyzeCarvingSetWithGemini,
@@ -22,7 +22,6 @@ import {
   analyzeGauchoKnifeMatch,
   gauchoKnifeGroupForPhrases,
   imageSearchPhrase,
-  matchesNegativeKeyword,
   referenceImageBase64,
   refreshedGauchoKnifeRow,
   type GauchoKnifeExistingRow,
@@ -366,7 +365,7 @@ function easternDateKey(date = new Date()) {
   return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
-function initialRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, maxCost: number, swissArmyMax: number) {
+function initialRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, maxCost: number, swissArmyMax: number, negativePhrases: string[]) {
   const base = {
     ebay_item_id: item.itemId,
     run_id: runId,
@@ -385,6 +384,12 @@ function initialRow(item: EbayFinderItem, keywordPhrases: string[], runId: strin
   if (item.shippingCost != null && item.shippingCurrency !== "USD") return { ...base, status: "rejected", reason: "non_usd_shipping", processed_at: new Date().toISOString() };
   if (!Number.isFinite(item.itemPrice) || item.itemPrice < 0) return { ...base, status: "rejected", reason: "invalid_price", processed_at: new Date().toISOString() };
   if (item.itemEndDate && new Date(item.itemEndDate).getTime() <= Date.now()) return { ...base, status: "rejected", reason: "ended", processed_at: new Date().toISOString() };
+  // Checked before analyzeListingText, not after: brandNameList (lib/finder-core.ts) already
+  // recognizes bare "Frost"/"Frost Cutlery" as a trusted folding-knife brand signal, which would
+  // otherwise resolve a Frost Cutlery listing straight to "qualified" on the strength of that
+  // brand match alone. A staff-added negative keyword (e.g. "frost cutlery") must win outright.
+  const negativeMatch = matchesNegativeKeyword(item.title, item.shortDescription, negativePhrases);
+  if (negativeMatch) return { ...base, status: "rejected", reason: "negative_keyword_match", processed_at: new Date().toISOString() };
   const text = analyzeListingText(item.title, item.shortDescription);
   if (text.kind === "reject") return { ...base, status: "rejected", reason: text.reason, processed_at: new Date().toISOString() };
   if (text.kind === "resolved") {
@@ -429,7 +434,7 @@ type ExistingFinderRow = {
   gaucho_match_notes?: string | null;
 };
 
-function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, existing: ExistingFinderRow | undefined, maxCost: number, swissArmyMax: number) {
+function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, existing: ExistingFinderRow | undefined, maxCost: number, swissArmyMax: number, negativePhrases: string[]) {
   // A calculated-shipping listing will keep returning a null shippingCost from eBay's search
   // endpoint forever, so once resolved via a per-item lookup, reuse it across refreshes instead
   // of re-spending an eBay call on the same listing every day.
@@ -437,8 +442,13 @@ function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: str
   const effectiveItem = item.shippingCost == null && preservedShipping
     ? { ...item, shippingCost: Number(existing!.shipping_cost), shippingCurrency: "USD" }
     : item;
-  const fresh = initialRow(effectiveItem, keywordPhrases, runId, maxCost, swissArmyMax);
+  const fresh = initialRow(effectiveItem, keywordPhrases, runId, maxCost, swissArmyMax, negativePhrases);
   const freshRow = preservedShipping ? { ...fresh, shipping_source: "lookup" as const } : fresh;
+  // A fresh negative-keyword rejection always wins over a stale vision verdict — otherwise a
+  // listing vision-qualified before a negative keyword existed could keep re-qualifying below via
+  // the stale-vision-reuse branch, since it carries no knife_count of its own to trip the check
+  // right after this. Same self-correcting guarantee refreshedGauchoKnifeRow relies on.
+  if (freshRow.reason === "negative_keyword_match") return freshRow;
   // Prefer fresh text-derived data whenever it has an opinion (finalized outright, or merely
   // awaiting a shipping lookup) — text is pattern-anchored and strictly more reliable than a
   // single-image vision call. Only fall back to a stale vision-derived count when today's text
@@ -635,6 +645,9 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const { data: negativeKeywordRows, error: negativeKeywordError } = await supabaseAdmin.from("finder_gaucho_negative_keywords").select("phrase").eq("enabled", true);
     if (negativeKeywordError) throw new Error(negativeKeywordError.message);
     const negativePhrases = (negativeKeywordRows || []).map((row) => row.phrase);
+    const { data: pocketKnifeNegativeKeywordRows, error: pocketKnifeNegativeKeywordError } = await supabaseAdmin.from("finder_pocket_knife_negative_keywords").select("phrase").eq("enabled", true);
+    if (pocketKnifeNegativeKeywordError) throw new Error(pocketKnifeNegativeKeywordError.message);
+    const pocketKnifeNegativePhrases = (pocketKnifeNegativeKeywordRows || []).map((row) => row.phrase);
     const textRows = [...found.values()].map(({ item, phrases }) => {
       const existing = existingById.get(item.itemId);
       // A category-scoped run only ever searches its own keyword set (see the keywords filter
@@ -650,7 +663,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
       const carvingGroup = carvingSetGroupForPhrases(mergedPhrases);
       if (carvingGroup) return refreshedCarvingSetRow(item, mergedPhrases, run.id, existing as CarvingSetExistingRow | undefined, carvingGroup);
       if (gauchoKnifeGroupForPhrases(mergedPhrases)) return refreshedGauchoKnifeRow(item, mergedPhrases, run.id, existing as GauchoKnifeExistingRow | undefined, negativePhrases);
-      return refreshedRow(item, mergedPhrases, run.id, existing, resolveMaxCostPerKnife(mergedPhrases, keywordMaxCost, pocketKnifeSettings.maxCostPerKnife), config().swissArmyMaxCost);
+      return refreshedRow(item, mergedPhrases, run.id, existing, resolveMaxCostPerKnife(mergedPhrases, keywordMaxCost, pocketKnifeSettings.maxCostPerKnife), config().swissArmyMaxCost, pocketKnifeNegativePhrases);
     });
     const added = ids.filter((id) => !existingById.has(id)).length;
     // Stamped only for genuinely new items (existingById already distinguishes new vs. re-touched,
@@ -727,6 +740,14 @@ export async function processPendingFinderItems(limit = config().batchSize) {
     if (referenceResult.error) throw new Error(referenceResult.error.message);
     gauchoNegativePhrases.push(...(negativeResult.data || []).map((row) => row.phrase));
     gauchoReferenceImages.push(...(referenceResult.data || []).map((row) => ({ id: row.id, storagePath: row.storage_path })));
+  }
+  // Same "fetch once per batch, only when needed" shape as the gaucho block above — needed
+  // whenever this batch has a plain pocket-knife row (i.e. neither carving-set nor gaucho-knife).
+  const pocketKnifeNegativePhrases: string[] = [];
+  if (rows.some((row) => !carvingSetGroupForPhrases(row.keyword_phrases || []) && !gauchoKnifeGroupForPhrases(row.keyword_phrases || []))) {
+    const { data: pocketKnifeNegativeRows, error: pocketKnifeNegativeError } = await supabaseAdmin.from("finder_pocket_knife_negative_keywords").select("phrase").eq("enabled", true);
+    if (pocketKnifeNegativeError) throw new Error(pocketKnifeNegativeError.message);
+    pocketKnifeNegativePhrases.push(...(pocketKnifeNegativeRows || []).map((row) => row.phrase));
   }
   let processed = 0;
   let deferred = 0;
@@ -951,6 +972,17 @@ export async function processPendingFinderItems(limit = config().batchSize) {
     if (row.run_id) runIds.add(row.run_id);
     const maxCost = resolveMaxCostPerKnife(row.keyword_phrases || [], keywordMaxCost, pocketKnifeSettings.maxCostPerKnife);
     try {
+      // A negative keyword added after this row was first queued must still win outright, whether
+      // the row is only pending on a shipping lookup (knife_count already resolved by text, see
+      // below) or still fully ambiguous and about to spend a Gemini call — checked once, up front,
+      // instead of duplicated in both branches.
+      const negativeMatch = matchesNegativeKeyword(row.title, row.short_description, pocketKnifeNegativePhrases);
+      if (negativeMatch) {
+        const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: "rejected", reason: "negative_keyword_match", attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
+        if (saveError) throw new Error(saveError.message);
+        processed++;
+        return;
+      }
       if (row.knife_count != null) {
         // The text parser already resolved the count (and category, if any) on discovery; this
         // row is only pending because the search result was missing a shipping cost, and
@@ -1071,13 +1103,17 @@ export async function finderOverview(category?: FinderCategory) {
   const keywords = category
     ? (allKeywords.data || []).filter((keyword) => keywordCategory(keyword.phrase) === category)
     : (allKeywords.data || []);
-  // Gaucho-knife-only settings: its negative-keyword filter and staff-uploaded reference images,
-  // neither of which the other two categories' settings pages have any use for.
+  // Gaucho-knife's negative-keyword filter and staff-uploaded reference images are gaucho-only —
+  // the pocket-knife pipeline has its own separate negative-keyword table (no reference images,
+  // since pocket-knife discovery is keyword-driven, not image-search-driven) and carving-set has
+  // neither.
   const [negativeKeywords, referenceImages] = category === "gaucho_knife"
     ? await Promise.all([
         supabaseAdmin.from("finder_gaucho_negative_keywords").select("*").order("created_at"),
         supabaseAdmin.from("finder_reference_images").select("*").eq("category", "gaucho_knife").order("created_at"),
       ])
+    : category === "pocket_knife"
+    ? [await supabaseAdmin.from("finder_pocket_knife_negative_keywords").select("*").order("created_at"), { data: [], error: null }]
     : [{ data: [], error: null }, { data: [], error: null }];
   if (negativeKeywords.error) throw new Error(negativeKeywords.error.message);
   if (referenceImages.error) throw new Error(referenceImages.error.message);
