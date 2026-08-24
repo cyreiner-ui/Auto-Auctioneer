@@ -2,6 +2,7 @@ import { decryptToken } from "./token-crypto";
 import { requiredEnv } from "./runtime-config";
 import { supabaseAdmin } from "./supabase-admin";
 import { ebayApiBaseUrl } from "./ebay-endpoints";
+import { recordEbayApiCall } from "./ebay-call-tracker";
 
 type BidLot = {
   id: string;
@@ -31,6 +32,7 @@ async function refreshAccessToken(account: EbayAccount) {
     },
     body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken }),
   });
+  await recordEbayApiCall();
   if (!response.ok) throw new Error(`eBay token refresh failed (${response.status}).`);
   const payload = await response.json() as { access_token?: string };
   if (!payload.access_token) throw new Error("eBay did not return an access token.");
@@ -47,6 +49,7 @@ async function resolveRestItemId(accessToken: string, lot: BidLot, marketplace: 
       "X-EBAY-C-MARKETPLACE-ID": marketplace,
     },
   });
+  await recordEbayApiCall();
   if (!response.ok) throw new Error(`eBay item lookup failed (${response.status}).`);
   const payload = await response.json() as { itemId?: string };
   if (!payload.itemId) throw new Error("eBay did not return a REST item ID.");
@@ -65,6 +68,7 @@ export async function submitProxyBid(lot: BidLot, account: EbayAccount) {
     },
     body: JSON.stringify({ maxAmount: { currency: lot.currency, value: Number(lot.max_bid).toFixed(2) } }),
   });
+  await recordEbayApiCall();
   const payload = await response.json().catch(() => ({})) as { proxyBidId?: string; errors?: Array<{ message?: string }> };
   if (!response.ok) throw new Error(payload.errors?.[0]?.message || `eBay bid submission failed (${response.status}).`);
   return { responseCode: response.status, proxyBidId: payload.proxyBidId || null, itemId };

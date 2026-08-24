@@ -5,6 +5,7 @@ import { staffOnly } from "@/app/api/bids/auth";
 import { encryptToken } from "@/lib/token-crypto";
 import { ebayApiBaseUrl } from "@/lib/ebay-endpoints";
 import { getEbayOAuthRuName } from "@/lib/ebay-oauth";
+import { recordEbayApiCall } from "@/lib/ebay-call-tracker";
 
 export async function GET(request: Request) {
   const denied = await staffOnly(request);
@@ -30,6 +31,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "eBay OAuth is not configured." }, { status: 503 });
   }
   const tokenResponse = await fetch(`${ebayApiBaseUrl()}/identity/v1/oauth2/token`, { method: "POST", headers: { Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`, "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: ruName }) });
+  await recordEbayApiCall();
   if (!tokenResponse.ok) {
     const details = await tokenResponse.json().catch(() => ({})) as { error?: string; error_description?: string };
     return NextResponse.json({ error: details.error || "ebay_authorization_failed", description: details.error_description || "eBay did not authorize this account." }, { status: 502 });
