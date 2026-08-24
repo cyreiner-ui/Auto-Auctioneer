@@ -8,7 +8,7 @@ import { usePersistedState } from "../../../lib/use-persisted-state";
 type FinderKind = "pocket_knife" | "carving_set" | "gaucho_knife";
 
 type Run = { id: string; trigger: string; status: string; keywords_scanned: number; current_keyword: string | null; items_seen: number; items_added: number; qualified: number; new_qualified: number; rejected: number; errors: string[]; started_at: string };
-type Overview = { results: FinderResult[]; runs: Run[]; keywords: { id: string; phrase: string; enabled: boolean }[]; counts: { pending: number; rejected: number; qualified: number }; ebayCallsToday: number; settings: { zip: string; maxCostPerKnife: number } };
+type Overview = { results: FinderResult[]; runs: Run[]; keywords: { id: string; phrase: string; enabled: boolean }[]; counts: { pending: number; rejected: number; qualified: number }; ebayCallsToday: number; settings: { zip: string; maxCostPerKnife: number }; processingPaused: boolean };
 
 const usd = (value: number) => Number(value || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 const RUN_STATUS_LABEL: Record<string, string> = { running: "Working…", completed: "Done", failed: "Had a problem" };
@@ -56,6 +56,7 @@ export default function FinderDashboard() {
     finally { setBusy(false); }
   };
 
+  const setProcessingPaused = (paused: boolean) => request("/api/finder/processing-paused", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: kind, paused }) });
   const archiveIds = (ebayItemIds: string[]) => request("/api/finder/items", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ebayItemIds, dismissed: true }) });
   const deleteIds = (ids: string[]) => request("/api/finder/items", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) });
   const setBidAndSend = async (result: FinderResult, maxBid: number) => {
@@ -94,7 +95,10 @@ export default function FinderDashboard() {
             <option value="gaucho_knife">{KIND_LABEL.gaucho_knife}</option>
           </select>
         </div>
-        <h1>{KIND_LABEL[kind]}</h1>
+        <div className="finder-title-row">
+          <h1>{KIND_LABEL[kind]}</h1>
+          {data && <span className={`run-status ${data.processingPaused ? "paused" : "analyzing"}`}>{data.processingPaused ? "⏸ Paused" : "● Analyzing"}</span>}
+        </div>
         <p className="muted">
           {kind === "pocket_knife"
             ? <>Daily snapshots delivered to {data?.settings.zip ?? "—"} · maximum {usd(data?.settings.maxCostPerKnife ?? 0)} per knife including shipping</>
@@ -109,7 +113,10 @@ export default function FinderDashboard() {
           <Link className="back finder-settings-link" href="/staff/finder/debug">Debugger</Link>
         </div>
       </div>
-      <button className="primary" disabled={busy} onClick={() => void request("/api/finder/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: kind }) })}>{busy ? "Working…" : "Run now"}</button>
+      <div className="finder-header-actions">
+        <button className="primary" disabled={busy} onClick={() => void request("/api/finder/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: kind }) })}>{busy ? "Working…" : "Run now"}</button>
+        {data && <button className={data.processingPaused ? "primary" : "danger"} disabled={busy} onClick={() => void setProcessingPaused(!data.processingPaused)}>{data.processingPaused ? "Resume processing" : "Pause processing"}</button>}
+      </div>
     </header>
     {error && <div className="notice finder-error" role="status" aria-live="polite" aria-atomic="true">{friendlyError(error)}</div>}
     {notice && <div className="notice" role="status" aria-live="polite" aria-atomic="true">{notice}</div>}
