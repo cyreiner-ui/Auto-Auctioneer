@@ -283,7 +283,7 @@ test("a single run that qualifies both a pocket-knife and a carving-set item sen
       ], async () => {
         const { run } = await startFinderRun("manual", "run-mixed-categories");
         assert.equal(run.qualified, 1, "the pocket-knife item resolves and qualifies from text alone; every Sheffield candidate is left pending on vision");
-        assert.equal(sent.length, 1, "only the pocket-knife email fires from this run's text pass");
+        assert.equal(sent.length, 0, "the qualification email waits for the whole run to finish, including the still-pending carving-set vision analysis");
       });
       await withFetch([
         tokenRoute,

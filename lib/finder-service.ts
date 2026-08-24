@@ -199,6 +199,30 @@ async function notifyBucket(rows: NotifyRow[], mode: FinderNotifyMode, recipient
   }
 }
 
+// Gates notifyNewlyQualified on the *whole run* being done, not just the item(s) that happen to
+// have resolved so far — a run's scan phase often leaves a chunk of its items "pending" (shipping
+// lookup or Gemini vision still outstanding), and those can take many finderTick ticks to drain.
+// Without this, the qualification email would fire immediately after the scan for whatever
+// resolved via text alone, then fire again and again as each later tick resolves a few more
+// vision-dependent items — several partial emails per run instead of one complete one.
+async function pendingCountForRun(runId: string): Promise<number> {
+  const { count, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).eq("run_id", runId).eq("status", "pending");
+  if (error) throw new Error(error.message);
+  return count || 0;
+}
+
+// Called after every point where a run's items might have changed status (the scan itself, and
+// each processPendingFinderItems batch that touches the run) — a no-op until pendingCountForRun
+// reaches zero, at which point every not-yet-notified qualified item this run ever produced (text-
+// resolved at scan time or vision-resolved across however many ticks it took) goes out together.
+async function notifyRunIfComplete(runId: string) {
+  if (await pendingCountForRun(runId)) return;
+  const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id").eq("run_id", runId).eq("status", "qualified").is("notified_at", null);
+  if (error) throw new Error(error.message);
+  const ids = (data || []).map((row) => row.ebay_item_id as string);
+  if (ids.length) await notifyNewlyQualified(ids);
+}
+
 async function notifyNewlyQualified(ebayItemIds: string[]) {
   if (!ebayItemIds.length) return;
   const { data, error } = await supabaseAdmin
@@ -641,7 +665,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     }
     await supabaseAdmin.from("finder_runs").update({ keywords_scanned: keywords?.length || 0, current_keyword: null, items_seen: found.size, items_added: added, errors }).eq("id", run.id);
     await updateRunCounts(run.id);
-    await notifyNewlyQualified(textRows.filter((row) => row.status === "qualified").map((row) => row.ebay_item_id));
+    await notifyRunIfComplete(run.id);
     const { data: refreshed } = await supabaseAdmin.from("finder_runs").select("*").eq("id", run.id).single();
     return { run: refreshed, created: true };
   } catch (error) {
@@ -707,7 +731,11 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   let processed = 0;
   let deferred = 0;
   const runIds = new Set<string>();
-  const qualifiedIds: string[] = [];
+  // A pending row lacking a run_id can't be gated on "its run finished" — there is no run to wait
+  // on (only reachable if finder_runs' on-delete-set-null FK ever actually fires, since every row
+  // startFinderRun writes always stamps run_id) — so those notify immediately, same as before this
+  // run-gated behavior existed.
+  const runlessQualifiedIds: string[] = [];
   // Shared across every shipping lookup in this batch. Caching the in-flight *promise* (rather
   // than checking-then-awaiting-then-caching the resolved value) is what makes this safe under
   // concurrency: tokenForLookup runs fully synchronously up to the point it returns, so two rows
@@ -739,7 +767,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         const reason = shippingValue == null ? "missing_shipping" : (qualifies ? null : "over_budget");
         const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: qualifies ? "qualified" : "rejected", reason, shipping_cost: shippingValue, shipping_source: shippingValue != null ? "lookup" : null, total_cost: totalCost, cost_per_knife: totalCost, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
         if (saveError) throw new Error(saveError.message);
-        if (qualifies) qualifiedIds.push(row.ebay_item_id);
+        if (qualifies && !row.run_id) runlessQualifiedIds.push(row.ebay_item_id);
         processed++;
         return;
       }
@@ -788,7 +816,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
           attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),
         }).eq("ebay_item_id", row.ebay_item_id);
         if (saveError) throw new Error(saveError.message);
-        if (qualifies) qualifiedIds.push(row.ebay_item_id);
+        if (qualifies && !row.run_id) runlessQualifiedIds.push(row.ebay_item_id);
         processed++;
         return;
       }
@@ -841,7 +869,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),
       }).eq("ebay_item_id", row.ebay_item_id);
       if (saveError) throw new Error(saveError.message);
-      if (qualifies) qualifiedIds.push(row.ebay_item_id);
+      if (qualifies && !row.run_id) runlessQualifiedIds.push(row.ebay_item_id);
       processed++;
     } catch (itemError) {
       if (itemError instanceof VisionQuotaError || itemError instanceof VisionBudgetError) {
@@ -903,7 +931,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),
       }).eq("ebay_item_id", row.ebay_item_id);
       if (saveError) throw new Error(saveError.message);
-      if (qualifies) qualifiedIds.push(row.ebay_item_id);
+      if (qualifies && !row.run_id) runlessQualifiedIds.push(row.ebay_item_id);
       processed++;
     } catch (itemError) {
       if (itemError instanceof VisionQuotaError || itemError instanceof VisionBudgetError) {
@@ -936,7 +964,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         const reason = shippingValue == null ? "missing_shipping" : deal?.reason;
         const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: qualifies ? "qualified" : "rejected", reason, shipping_cost: shippingValue, shipping_source: shippingValue != null ? "lookup" : null, total_cost: deal && "totalCost" in deal ? deal.totalCost : null, cost_per_knife: deal && "costPerKnife" in deal ? deal.costPerKnife : null, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
         if (saveError) throw new Error(saveError.message);
-        if (qualifies) qualifiedIds.push(row.ebay_item_id);
+        if (qualifies && !row.run_id) runlessQualifiedIds.push(row.ebay_item_id);
         processed++;
         return;
       }
@@ -975,7 +1003,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       const reason = categoryRejected ? category : !vision.containsFoldingKnife ? "no_folding_knife" : vision.confidence < config().confidence ? (vision.uncertaintyReason || "low_confidence") : effectiveKnifeCount < 1 ? "invalid_count" : effectiveKnifeCount > FINDER_DEFAULTS.maxPlausibleKnifeCount ? "implausible_count" : shippingReason ? shippingReason : deal?.reason;
       const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: qualifies ? "qualified" : "rejected", reason, knife_count: effectiveKnifeCount || null, contains_folding_knife: vision.containsFoldingKnife, confidence: vision.confidence, detection_source: "vision", item_category: category, shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null, total_cost: deal && "totalCost" in deal ? deal.totalCost : null, cost_per_knife: deal && "costPerKnife" in deal ? deal.costPerKnife : null, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
       if (saveError) throw new Error(saveError.message);
-      if (qualifies) qualifiedIds.push(row.ebay_item_id);
+      if (qualifies && !row.run_id) runlessQualifiedIds.push(row.ebay_item_id);
       processed++;
     } catch (itemError) {
       if (itemError instanceof VisionQuotaError || itemError instanceof VisionBudgetError) {
@@ -995,7 +1023,8 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   // only cross-row state, and both are written synchronously with no await in between.
   await mapWithConcurrency(rows, config().processConcurrency, processRow);
   for (const runId of runIds) await updateRunCounts(runId);
-  await notifyNewlyQualified(qualifiedIds);
+  for (const runId of runIds) await notifyRunIfComplete(runId);
+  await notifyNewlyQualified(runlessQualifiedIds);
   return { processed, deferred };
 }
 
