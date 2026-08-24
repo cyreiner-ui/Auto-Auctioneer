@@ -291,6 +291,7 @@ const config = () => {
     swissArmyMaxCost: Number(process.env.EBAY_FINDER_SWISS_ARMY_MAX_PER_KNIFE || FINDER_DEFAULTS.swissArmyMaxCostPerKnife),
     confidence: Number(process.env.GEMINI_CONFIDENCE_THRESHOLD || FINDER_DEFAULTS.confidence),
     searchDepth: Number(process.env.EBAY_FINDER_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.resultsPerKeyword),
+    imageSearchDepth: Number(process.env.EBAY_FINDER_IMAGE_SEARCH_RESULTS_PER_REFERENCE || FINDER_DEFAULTS.imageSearchResultsPerReference),
     batchSize: Number(process.env.GEMINI_BATCH_SIZE || FINDER_DEFAULTS.batchSize),
     processConcurrency: Number(process.env.FINDER_PROCESS_CONCURRENCY || FINDER_DEFAULTS.processConcurrency),
     scanConcurrency: Number(process.env.EBAY_FINDER_SCAN_CONCURRENCY || FINDER_DEFAULTS.scanConcurrency),
@@ -604,7 +605,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
           const phrase = imageSearchPhrase(reference.id);
           // Used-only, same as the keyword-search supplement above — a genuine antique gaucho
           // knife is never a new-made reissue.
-          for (const item of await searchEbayByImage(imageBase64, FINDER_DEFAULTS.imageSearchResultsPerReference, imageToken || undefined, CARVING_SET_USED_CONDITION_ID)) {
+          for (const item of await searchEbayByImage(imageBase64, config().imageSearchDepth, imageToken || undefined, CARVING_SET_USED_CONDITION_ID)) {
             const current = found.get(item.itemId);
             if (current) current.phrases.push(phrase);
             else found.set(item.itemId, { item, phrases: [phrase] });
@@ -733,9 +734,10 @@ export async function debugFindItemViaGauchoImageSearch(itemId: string): Promise
   async function probeReference(reference: { id: string; storage_path: string }): Promise<FinderImageSearchProbe> {
     try {
       const imageBase64 = await referenceImageBase64(reference.storage_path);
-      const items = await searchEbayByImage(imageBase64, FINDER_DEFAULTS.imageSearchResultsPerReference, token || undefined, CARVING_SET_USED_CONDITION_ID);
+      const requested = config().imageSearchDepth;
+      const items = await searchEbayByImage(imageBase64, requested, token || undefined, CARVING_SET_USED_CONDITION_ID);
       const match = items.find((item) => item.itemId.includes(itemId));
-      return { referenceImageId: reference.id, itemsReturned: items.length, hitResultsCap: items.length >= FINDER_DEFAULTS.imageSearchResultsPerReference, found: Boolean(match), matchedTitle: match?.title ?? null, error: null };
+      return { referenceImageId: reference.id, itemsReturned: items.length, hitResultsCap: items.length >= requested, found: Boolean(match), matchedTitle: match?.title ?? null, error: null };
     } catch (err) {
       return { referenceImageId: reference.id, itemsReturned: 0, hitResultsCap: false, found: false, matchedTitle: null, error: err instanceof Error ? err.message : "Image search failed." };
     }
