@@ -27,7 +27,7 @@ export const GAUCHO_KNIFE_PHRASES = [
   "gaucho knife", "facon knife", "facón knife", "criollo knife", "cuchillo criollo",
   "verijero knife", "gaucho dagger", "caronero knife", "Franz Wenk", "Franz Wenk Solingen",
   "Scholberg", "Broqua Scholberg", "JU-CA knife", "Tandil knife", "alpaca gaucho knife",
-  "Argentine gaucho knife",
+  "Argentine gaucho knife", "Boker Arbolito", "Arbolito knife", "La Movediza",
 ];
 
 // Image-search hits aren't found via any finder_keywords phrase, so lib/finder-service.ts's
