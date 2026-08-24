@@ -12,6 +12,7 @@ type Overview = {
   keywords: Keyword[]; negativeKeywords: Keyword[]; referenceImages: ReferenceImage[];
   notify: NotifySettings; schedule: Schedule;
   budget: { mode: string; analyses: number; monthlyLimit: number; remaining: number; projectedMaximum: number; dailyAnalyses: number; dailyLimit: number };
+  settings: { gauchoKeywordSearchEnabled: boolean };
 };
 
 const WEEKDAY_LABEL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -50,6 +51,7 @@ export default function GauchoKnifeSettingsPanel() {
   const setNegativeEnabled = (keyword: Keyword, enabled: boolean) => request("/api/finder/gaucho-negative-keywords", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: keyword.id, enabled }) });
   const saveMode = (mode: string) => request("/api/finder/notify-settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) });
   const saveSchedule = (patch: Partial<Schedule>) => request("/api/finder/schedule", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: "gaucho_knife", ...patch }) });
+  const setKeywordSearchEnabled = (enabled: boolean) => request("/api/finder/gaucho-settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keyword_search_enabled: enabled }) });
 
   const uploadReferenceImage = async (file: File) => {
     setUploading(true); setError("");
@@ -91,7 +93,9 @@ export default function GauchoKnifeSettingsPanel() {
       </div>
       <div className="panel finder-keywords"><div className="panel-heading"><div><p className="eyebrow">SEARCH TERMS</p><h2>Keyword supplement</h2></div></div>
         <p className="muted">Secondary discovery only — the image search above is primary. Maker names and specific terms work well here.</p>
-        <div className="keyword-list">{data.keywords.map((keyword) => <div className="keyword-row" key={keyword.id}><span>{keyword.phrase}</span><label className="keyword-toggle"><input type="checkbox" checked={keyword.enabled} disabled={busy} onChange={(event) => void setKeywordEnabled(keyword, event.target.checked)} /> Active</label><button className="danger" aria-label={`Delete "${keyword.phrase}"`} disabled={busy} onClick={() => { if (window.confirm(`Delete "${keyword.phrase}"?`)) void request(`/api/finder/keywords?id=${encodeURIComponent(keyword.id)}`, { method: "DELETE" }); }}>Delete</button></div>)}</div>
+        <label className="keyword-toggle"><input type="checkbox" checked={data.settings.gauchoKeywordSearchEnabled} disabled={busy} onChange={(event) => void setKeywordSearchEnabled(event.target.checked)} /> Run keyword search</label>
+        {!data.settings.gauchoKeywordSearchEnabled && <p className="muted">Keyword search is off — this run only discovers candidates via the image search above. The phrases below are kept, but none of them are searched until this is turned back on.</p>}
+        <div className="keyword-list" style={data.settings.gauchoKeywordSearchEnabled ? undefined : { opacity: 0.5 }}>{data.keywords.map((keyword) => <div className="keyword-row" key={keyword.id}><span>{keyword.phrase}</span><label className="keyword-toggle"><input type="checkbox" checked={keyword.enabled} disabled={busy || !data.settings.gauchoKeywordSearchEnabled} onChange={(event) => void setKeywordEnabled(keyword, event.target.checked)} /> Active</label><button className="danger" aria-label={`Delete "${keyword.phrase}"`} disabled={busy} onClick={() => { if (window.confirm(`Delete "${keyword.phrase}"?`)) void request(`/api/finder/keywords?id=${encodeURIComponent(keyword.id)}`, { method: "DELETE" }); }}>Delete</button></div>)}</div>
         <form className="keyword-add" onSubmit={(event) => { event.preventDefault(); if (!newPhrase.trim()) return; void request("/api/finder/keywords", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ phrase: newPhrase }) }).then(() => setNewPhrase("")); }}><input aria-label="Add another eBay search phrase" placeholder="Add another eBay search phrase" value={newPhrase} onChange={(event) => setNewPhrase(event.target.value)} /><button className="primary" disabled={busy}>Add</button></form>
       </div>
       <div className="panel finder-keywords"><div className="panel-heading"><div><p className="eyebrow">FILTER OUT</p><h2>Negative keywords</h2></div></div>

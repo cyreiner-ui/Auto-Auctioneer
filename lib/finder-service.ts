@@ -160,6 +160,28 @@ export async function updatePocketKnifeSettings(patch: Partial<PocketKnifeSettin
   if (error) throw new Error(error.message);
 }
 
+type GauchoSettings = { keywordSearchEnabled: boolean };
+
+// Matches the seeded default (supabase/migrations/041_finder_gaucho_settings.sql) — used only if
+// the singleton row is somehow missing.
+const DEFAULT_GAUCHO_SETTINGS: GauchoSettings = { keywordSearchEnabled: true };
+
+// Whether the gaucho-knife pipeline's text keyword-search supplement (GAUCHO_KNIFE_PHRASES plus
+// any staff-added search terms) runs at all. Turning this off leaves the primary searchByImage
+// discovery path (see startFinderRun) untouched — staff want an image-search-only mode when the
+// keyword net is pulling in noise the image comparison already covers better on its own.
+async function getGauchoSettings(): Promise<GauchoSettings> {
+  const { data } = await supabaseAdmin.from("finder_gaucho_settings").select("*").eq("id", true).maybeSingle();
+  if (!data) return DEFAULT_GAUCHO_SETTINGS;
+  return { keywordSearchEnabled: Boolean(data.keyword_search_enabled) };
+}
+
+export async function updateGauchoSettings(patch: Partial<GauchoSettings>) {
+  if (patch.keywordSearchEnabled === undefined) return;
+  const { error } = await supabaseAdmin.from("finder_gaucho_settings").upsert({ id: true, keyword_search_enabled: patch.keywordSearchEnabled, updated_at: new Date().toISOString() }, { onConflict: "id" });
+  if (error) throw new Error(error.message);
+}
+
 type NotifyRow = {
   ebay_item_id: string; title: string; ebay_url: string; image_url: string | null; item_price: number; shipping_cost: number | null;
   total_cost: number | null; cost_per_knife: number | null; knife_count: number | null; notified_at: string | null; gixen_status: string | null;
@@ -544,11 +566,14 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
       : { data: null, error: null };
     if (gauchoReferenceError) throw new Error(gauchoReferenceError.message);
     const hasGauchoReferenceImages = Boolean(gauchoReferenceImageRows?.length);
+    // Staff toggle for image-search-only mode (see updateGauchoSettings) — only fetched when this
+    // run could possibly touch gaucho keywords at all, same gate as the reference-image fetch above.
+    const gauchoSettings = (!category || category === "gaucho_knife") ? await getGauchoSettings() : DEFAULT_GAUCHO_SETTINGS;
     const errors: string[] = [];
     if (category === "gaucho_knife" && !hasGauchoReferenceImages) errors.push("No reference images are configured yet — upload at least one before running the gaucho-knife finder.");
     const keywords = (allKeywords || []).filter((keyword) => {
       const resolvedCategory = keywordCategory(keyword.phrase);
-      if (resolvedCategory === "gaucho_knife" && !hasGauchoReferenceImages) return false;
+      if (resolvedCategory === "gaucho_knife" && (!hasGauchoReferenceImages || !gauchoSettings.keywordSearchEnabled)) return false;
       return category ? resolvedCategory === category : true;
     });
     const keywordMaxCost = new Map((keywords || []).map((keyword) => [keyword.phrase, keyword.max_cost_per_knife]));
@@ -1164,6 +1189,7 @@ export async function finderOverview(category?: FinderCategory) {
   const dailyAnalyses = Number(dailyUsage.data?.analyses || 0);
   const notifyRecipients = notifyRecipientRows.data || [];
   const pocketKnifeSettings = await getPocketKnifeSettings();
+  const gauchoSettings = category === "gaucho_knife" ? await getGauchoSettings() : DEFAULT_GAUCHO_SETTINGS;
   return {
     keywords, results: results.data || [], runs: runs.data || [],
     negativeKeywords: negativeKeywords.data || [], referenceImages: referenceImagesWithUrls,
@@ -1191,7 +1217,7 @@ export async function finderOverview(category?: FinderCategory) {
       freeAnalyses: free, paidAnalyses: paid, analyses, monthlyLimit, remaining: Math.max(0, monthlyLimit - analyses), projectedMaximum: analyses * 0.001,
       dailyAnalyses, dailyLimit, dailyRemaining: Math.max(0, dailyLimit - dailyAnalyses),
     },
-    settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: pocketKnifeSettings.maxCostPerKnife },
+    settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: pocketKnifeSettings.maxCostPerKnife, gauchoKeywordSearchEnabled: gauchoSettings.keywordSearchEnabled },
   };
 }
 
