@@ -13,10 +13,14 @@ export const FINDER_DEFAULTS = {
   // the single page was the actual bottleneck on the gaucho-knife category — a full 200 of 604
   // items in one run came from image search, meaning real matches were being truncated. Each extra
   // page is one more call against the same app-wide 5,000-calls/day Browse API budget every other
-  // eBay call (keyword search, shipping/description lookups) already draws from, so this stays a
-  // config default — overridable via EBAY_FINDER_IMAGE_SEARCH_RESULTS_PER_REFERENCE (see config()
-  // in lib/finder-service.ts) — rather than something to keep raising blindly.
-  imageSearchResultsPerReference: 5000,
+  // eBay call (keyword search, shipping/description lookups) already draws from. Pulled back down
+  // from 5000 (25 pages/reference image) to 1000 (5 pages/reference image) after a 2026-08-24
+  // gaucho-knife backlog left thousands of items stuck retrying against eBay 429s — running every
+  // reference image at the higher depth alongside the other two finders' own keyword/shipping calls
+  // was enough on its own to exhaust the shared per-app rate limit. Still a config default —
+  // overridable via EBAY_FINDER_IMAGE_SEARCH_RESULTS_PER_REFERENCE (see config() in
+  // lib/finder-service.ts) — rather than something to keep raising blindly.
+  imageSearchResultsPerReference: 1000,
   // Sized so the app's own conservative $0.001/analysis accounting (see finderOverview's
   // projectedMaximum) lands at a $10/month ceiling. This is a hard backstop, not a pacing
   // mechanism — see dailyLimit in gemini-vision.ts/finder-service.ts for what actually spreads
