@@ -790,13 +790,33 @@ export async function debugFindItemViaGauchoImageSearch(itemId: string): Promise
 
 export async function processPendingFinderItems(limit = config().batchSize) {
   const now = new Date().toISOString();
-  const { data, error } = await supabaseAdmin.from("finder_items").select("*").eq("status", "pending").lte("next_attempt_at", now).order("discovered_at").limit(limit);
-  if (error) throw new Error(error.message);
+  // Fetched per category (via scopeToCategory) and merged round-robin, rather than one global
+  // "oldest pending item wins" query — a single query lets whichever track has the largest/oldest
+  // backlog (e.g. gaucho-knife after its initial scan dumped thousands of pending rows at once)
+  // fill every batch slot itself, starving the other two tracks out of processing entirely for as
+  // long as that backlog takes to drain. Each category query is still capped at `limit` (not a
+  // smaller per-category share) so a category with the only backlog left still gets a full batch,
+  // same as before this fix — round-robin below is what actually enforces fairness when more than
+  // one category has pending work.
+  const categoryResults = await Promise.all(FINDER_CATEGORIES.map((category) =>
+    scopeToCategory(supabaseAdmin.from("finder_items").select("*").eq("status", "pending").lte("next_attempt_at", now).order("discovered_at").limit(limit), category)
+  ));
+  const queues = categoryResults.map((result) => {
+    if (result.error) throw new Error(result.error.message);
+    return (result.data || []) as FinderRow[];
+  });
+  const merged: FinderRow[] = [];
+  for (let i = 0; merged.length < limit && queues.some((queue) => i < queue.length); i++) {
+    for (const queue of queues) {
+      if (merged.length >= limit) break;
+      if (i < queue.length) merged.push(queue[i]);
+    }
+  }
   // Gaucho-knife rows are the newest, uncapped track (see the "no price cap yet" dashboard copy)
   // and share the same Gemini vision budget as pocket-knife/carving-set — so within a batch they're
   // sorted after those two (a stable sort, so relative discovered_at order is otherwise unchanged)
   // to make sure a budget/quota exhaustion mid-batch defers gaucho rows first, not the other tracks.
-  const rows = ((data || []) as FinderRow[]).slice().sort((a, b) => Number(gauchoKnifeGroupForPhrases(a.keyword_phrases || [])) - Number(gauchoKnifeGroupForPhrases(b.keyword_phrases || [])));
+  const rows = merged.slice().sort((a, b) => Number(gauchoKnifeGroupForPhrases(a.keyword_phrases || [])) - Number(gauchoKnifeGroupForPhrases(b.keyword_phrases || [])));
   const phraseSet = [...new Set(rows.flatMap((row) => row.keyword_phrases || []))];
   const keywordMaxCost = new Map<string, number | null>();
   if (phraseSet.length) {

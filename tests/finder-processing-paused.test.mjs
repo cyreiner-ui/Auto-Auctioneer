@@ -122,6 +122,37 @@ test("pausing one track leaves the other two processing normally in the same bat
   });
 });
 
+test("REGRESSION: a huge, older gaucho-knife backlog does not starve pocket-knife/carving-set out of a batch, even while gaucho is paused", async () => {
+  await withEnv(ENV, async () => {
+    // Reproduces the production incident this test is named for: gaucho-knife's initial scan
+    // dumped thousands of pending rows discovered a full day before any pocket-knife/carving-set
+    // row — with a single global "oldest pending item wins" query, that backlog alone filled every
+    // batch, so pk1/cs1 below never got selected at all, paused or not.
+    const veryOld = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const gauchoBacklog = Array.from({ length: 50 }, (_, i) => pendingRow({
+      ebay_item_id: `gk-backlog-${i}`, keyword_phrases: [], item_category: "gaucho_knife",
+      discovered_at: veryOld, next_attempt_at: veryOld,
+    }));
+    await withFakeBackend({
+      finder_items: [
+        ...gauchoBacklog,
+        pendingRow({ ebay_item_id: "pk1", keyword_phrases: ["knife lot"] }),
+        pendingRow({ ebay_item_id: "cs1", keyword_phrases: ["sheffield carving set"] }),
+      ],
+      finder_reference_images: [{ id: "ref1", storage_path: "ref1.jpg", category: "gaucho_knife", created_at: "2026-01-01" }],
+      finder_processing_settings: [{ category: "gaucho_knife", paused: true }],
+    }, async (fake) => {
+      await withFetch([], () => processPendingFinderItems(5));
+      const pk1 = fake.tables.finder_items.find((r) => r.ebay_item_id === "pk1");
+      assert.notEqual(pk1.attempts, 0, "pocket-knife must still get a batch slot despite the much larger, older gaucho backlog");
+      assert.match(pk1.reason, /Unmocked fetch call/);
+      const cs1 = fake.tables.finder_items.find((r) => r.ebay_item_id === "cs1");
+      assert.equal(cs1.attempts, 1, "carving-set must still get a batch slot despite the much larger, older gaucho backlog");
+      assert.match(cs1.reason, /Unmocked fetch call/);
+    });
+  });
+});
+
 test("updateProcessingPaused/getProcessingPaused round-trip independently per category", async () => {
   await withFakeBackend({ finder_processing_settings: [] }, async (fake) => {
     await updateProcessingPaused("gaucho_knife", true);
