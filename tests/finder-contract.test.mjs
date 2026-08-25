@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeListingText, calculateDeal, effectiveMaxCostPerKnife, finderPages, isScheduledRunTime, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife } from "../lib/finder-core.ts";
+import { analyzeListingText, calculateDeal, effectiveMaxCostPerKnife, finderPages, isScheduledRunTime, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife, summarizeRunFailure } from "../lib/finder-core.ts";
 
 test("extracts explicit numeric and word lot counts", () => {
   assert.deepEqual(analyzeListingText("Lot of 12 folding pocket knives"), { kind: "resolved", count: 12, containsFoldingKnife: true, confidence: 0.99 });
@@ -321,4 +321,37 @@ test("isShippingLookupWorthwhile skips a lookup when the price alone already exc
 test("isShippingLookupWorthwhile rejects invalid inputs", () => {
   assert.equal(isShippingLookupWorthwhile(30, 0, 3.5), false);
   assert.equal(isShippingLookupWorthwhile(NaN, 10, 3.5), false);
+});
+
+test("summarizeRunFailure returns null when a run had no errors", () => {
+  assert.equal(summarizeRunFailure([]), null);
+});
+
+test("summarizeRunFailure diagnoses eBay rate-limiting as the majority status code", () => {
+  const errors = ["eBay search for “pocket knife lot” failed (429).", "eBay search for “buck knife lot” failed (429).", "eBay search for “kershaw knife lot” failed (500)."];
+  const summary = summarizeRunFailure(errors);
+  assert.equal(summary.headline, "eBay rate-limited this search.");
+  assert.match(summary.detail, /another search was already running/);
+});
+
+test("summarizeRunFailure recognizes an expired/invalid eBay token", () => {
+  const summary = summarizeRunFailure(["eBay search for “pocket knife lot” failed (401)."]);
+  assert.equal(summary.headline, "eBay rejected the request.");
+  assert.match(summary.detail, /credentials or access token/);
+});
+
+test("summarizeRunFailure recognizes missing eBay credentials regardless of other errors", () => {
+  const summary = summarizeRunFailure(["eBay API credentials are not configured."]);
+  assert.equal(summary.headline, "eBay API credentials aren't set up.");
+});
+
+test("summarizeRunFailure recognizes a watchdog-abandoned run", () => {
+  const summary = summarizeRunFailure(["Abandoned: still running after 15 minutes."]);
+  assert.equal(summary.headline, "The search timed out before it finished.");
+});
+
+test("summarizeRunFailure falls back to a generic count when messages carry no recognizable status code", () => {
+  const summary = summarizeRunFailure(["Image search failed for reference abc123.", "Flatware Sets category browse failed."]);
+  assert.equal(summary.headline, "2 problems stopped part of this search.");
+  assert.equal(summary.detail, "Image search failed for reference abc123.");
 });

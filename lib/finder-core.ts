@@ -369,3 +369,74 @@ export function finderPages(requested: number) {
   for (let offset = 0; offset < requested; offset += 200) pages.push({ offset, limit: Math.min(200, requested - offset) });
   return pages;
 }
+
+export type RunFailureSummary = { headline: string; detail: string };
+
+// startFinderRun (lib/finder-service.ts) never aborts a scan just because one keyword's eBay
+// call fails — every per-keyword/per-reference-image error is caught and pushed onto
+// finder_runs.errors so the loop keeps going, which means a run can finish with status
+// "completed" and zero items found while every single keyword actually failed (e.g. eBay
+// rate-limiting the whole scan). Dumping those raw "eBay search for “X” failed (429)." strings
+// one per line — often 20+ near-identical copies — told staff *that* something failed but not
+// *why*, so the dashboard couldn't answer "why did my search fail?" on its own. This turns that
+// raw list into one human-readable diagnosis; the raw messages are still available for a staff
+// member who wants the detail (see FinderDashboard.tsx).
+const HTTP_STATUS_PATTERN = /\((\d{3})\)\.?\s*$/;
+
+function summarizeStatusCode(code: number): RunFailureSummary {
+  if (code === 429) {
+    return {
+      headline: "eBay rate-limited this search.",
+      detail: "eBay's Browse API rejected these requests for coming too fast — usually because another search was already running, or a few were started back-to-back. Wait several minutes, then run it again.",
+    };
+  }
+  if (code === 401 || code === 403) {
+    return {
+      headline: "eBay rejected the request.",
+      detail: "The eBay API credentials or access token look invalid or expired. Check the eBay app credentials configured on the server.",
+    };
+  }
+  if (code >= 500) {
+    return {
+      headline: "eBay's servers had a problem.",
+      detail: "eBay returned a server error, which is usually temporary. Try running the search again in a few minutes.",
+    };
+  }
+  return {
+    headline: `eBay returned an unexpected error (${code}).`,
+    detail: "See the individual error messages below for details.",
+  };
+}
+
+// Pure so it can run identically in the browser (FinderDashboard.tsx) and on the server
+// (finderOverview) without either side re-deriving the classification rules.
+export function summarizeRunFailure(errors: string[]): RunFailureSummary | null {
+  if (!errors.length) return null;
+  if (errors.some((message) => /^Abandoned/i.test(message))) {
+    return {
+      headline: "The search timed out before it finished.",
+      detail: "It was still running after 15 minutes, so it was automatically marked failed. Try running it again — if this keeps happening, there may be too many keywords for one run.",
+    };
+  }
+  if (errors.some((message) => /credentials are not configured/i.test(message))) {
+    return {
+      headline: "eBay API credentials aren't set up.",
+      detail: "The server is missing its eBay API credentials, so no searches could run at all.",
+    };
+  }
+  const codeCounts = new Map<number, number>();
+  for (const message of errors) {
+    const match = message.match(HTTP_STATUS_PATTERN);
+    if (!match) continue;
+    const code = Number(match[1]);
+    codeCounts.set(code, (codeCounts.get(code) || 0) + 1);
+  }
+  if (codeCounts.size) {
+    const [mostCommonCode] = [...codeCounts.entries()].sort((a, b) => b[1] - a[1])[0];
+    return summarizeStatusCode(mostCommonCode);
+  }
+  return {
+    headline: errors.length === 1 ? "1 problem stopped part of this search." : `${errors.length} problems stopped part of this search.`,
+    detail: errors[0],
+  };
+}
