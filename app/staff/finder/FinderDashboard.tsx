@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import FinderResultsGrid, { type FinderResult } from "./FinderResultsGrid";
 import { usePersistedState } from "../../../lib/use-persisted-state";
+import { summarizeRunFailure } from "../../../lib/finder-core";
 
 type FinderKind = "pocket_knife" | "carving_set" | "gaucho_knife";
 
@@ -73,6 +74,7 @@ export default function FinderDashboard() {
     void archiveIds([result.ebay_item_id]).then((ok) => { if (ok) { setNotice("Opened on eBay and archived."); window.setTimeout(() => setNotice(""), 1800); } });
   };
   const latest = data?.runs[0];
+  const runFailure = latest ? summarizeRunFailure(latest.errors) : null;
   const totalKeywords = data?.keywords.filter((keyword) => keyword.enabled).length || latest?.keywords_scanned || 0;
   const progressPercent = latest?.status === "running" && totalKeywords ? Math.min(100, Math.round((latest.keywords_scanned / totalKeywords) * 100)) : 0;
 
@@ -127,7 +129,14 @@ export default function FinderDashboard() {
       </section>
       <section className="finder-runs"><div className="section-title"><div><p className="eyebrow">LATEST SEARCH</p><h2>{latest ? new Date(latest.started_at).toLocaleString() : "Not run yet"}</h2></div>{latest && <span className={`run-status ${latest.status}`}>{RUN_STATUS_LABEL[latest.status] || latest.status}</span>}</div>
         {latest?.status === "running" && <div className="finder-progress"><div className="budget-meter" role="progressbar" aria-valuenow={progressPercent} aria-valuemin={0} aria-valuemax={100} aria-label="Search progress"><span style={{ width: `${progressPercent}%` }} /></div><p className="muted">Searching {latest.keywords_scanned}/{totalKeywords || "…"}{latest.current_keyword ? `: “${latest.current_keyword}”` : ""}</p></div>}
-        {latest && latest.status !== "running" && <p className="muted">Found {latest.new_qualified} good deal{latest.new_qualified === 1 ? "" : "s"} among {latest.items_added} new listing{latest.items_added === 1 ? "" : "s"} today.</p>}{latest?.errors?.map((message) => <p className="finder-run-error" key={message}>{message}</p>)}</section>
+        {latest && latest.status !== "running" && <p className="muted">Found {latest.new_qualified} good deal{latest.new_qualified === 1 ? "" : "s"} among {latest.items_added} new listing{latest.items_added === 1 ? "" : "s"} today.</p>}
+        {runFailure && <div className="finder-run-failure">
+          <p className="finder-run-error"><strong>{runFailure.headline}</strong> {runFailure.detail}</p>
+          {latest && latest.errors.length > 1 && <details className="finder-run-error-detail">
+            <summary>{latest.errors.length} error{latest.errors.length === 1 ? "" : "s"} — show details</summary>
+            {latest.errors.map((message) => <p className="finder-run-error" key={message}>{message}</p>)}
+          </details>}
+        </div>}</section>
       <section className="finder-results"><div className="section-title"><div><p className="eyebrow">QUALIFYING SNAPSHOTS</p><h2>{kind === "pocket_knife" ? "Deals at or below $3.50 per knife" : "Cased carving sets within budget"}</h2></div></div>
         <FinderResultsGrid
           results={data.results}
