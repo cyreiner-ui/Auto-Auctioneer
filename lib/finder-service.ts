@@ -22,6 +22,8 @@ import {
 import {
   analyzeGauchoKnifeMatch,
   gauchoKnifeGroupForPhrases,
+  gauchoMakerMismatchConfidenceThreshold,
+  gauchoMatchConfidenceThreshold,
   imageSearchPhrase,
   referenceImageBase64,
   refreshedGauchoKnifeRow,
@@ -1057,8 +1059,12 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       }
       const vision = await analyzeGauchoKnifeMatch({ title: row.title, description, candidateImageUrl: row.image_url || "", referenceImages: gauchoReferenceImages });
       const matchedReferenceId = vision.matchedReferenceIndex != null ? gauchoReferenceImages[vision.matchedReferenceIndex - 1]?.id ?? null : null;
-      const qualifies = vision.matches;
-      const reason = qualifies ? null : (vision.notes || "no_match");
+      // A confident maker mismatch (vision.makerMatch === false, not merely unset/unreadable) is
+      // strong evidence against the item even when the overall silhouette looks right, so it
+      // needs a much higher match confidence to still qualify than an unmarked candidate does.
+      const confidenceFloor = vision.makerMatch === false ? gauchoMakerMismatchConfidenceThreshold() : gauchoMatchConfidenceThreshold();
+      const qualifies = vision.matches && vision.confidence >= confidenceFloor;
+      const reason = qualifies ? null : !vision.matches ? (vision.notes || "no_match") : "low_confidence";
       let shippingValue = row.shipping_cost == null ? null : Number(row.shipping_cost);
       let shippingSource = row.shipping_source;
       if (shippingValue == null) {

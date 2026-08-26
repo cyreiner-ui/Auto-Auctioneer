@@ -60,13 +60,16 @@ async function withFakeBackend(seed, fn) {
   fake.setRpc("reserve_finder_vision_usage", () => ({ data: { reserved: true }, error: null }));
   const restoreFrom = supabaseAdmin.from;
   const restoreRpc = supabaseAdmin.rpc;
+  const restoreStorage = supabaseAdmin.storage;
   supabaseAdmin.from = fake.from.bind(fake);
   supabaseAdmin.rpc = fake.rpc.bind(fake);
+  supabaseAdmin.storage = fake.storage;
   try {
     await fn(fake);
   } finally {
     supabaseAdmin.from = restoreFrom;
     supabaseAdmin.rpc = restoreRpc;
+    supabaseAdmin.storage = restoreStorage;
   }
 }
 
@@ -714,6 +717,74 @@ test("processPendingFinderItems rejects a vision-classified flatware/table-cutle
         assert.equal(item.status, "rejected", "a flatware/table-cutlery set must never qualify, no matter how cheap");
         assert.equal(item.reason, "table_cutlery");
         assert.equal(item.item_category, "table_cutlery");
+      });
+    });
+  });
+});
+
+function gauchoPendingItem(overrides = {}) {
+  return {
+    ebay_item_id: "v1|9|0", run_id: null, title: "Antique Silver Gaucho Dagger", short_description: "",
+    image_url: "https://i.ebayimg.com/9.jpg", item_price: 100, shipping_cost: 15, buying_options: ["FIXED_PRICE"],
+    keyword_phrases: ["gaucho knife"], status: "pending", attempts: 0,
+    next_attempt_at: new Date(Date.now() - 60_000).toISOString(), discovered_at: new Date(Date.now() - 60_000).toISOString(),
+    ...overrides,
+  };
+}
+
+async function withGauchoFakeBackend(seed, fn) {
+  return withFakeBackend({ finder_reference_images: [{ id: "ref-1", storage_path: "ref1.jpg", category: "gaucho_knife", created_at: "2026-01-01" }], ...seed }, async (fake) => {
+    fake.setFile("finder-reference-images", "ref1.jpg", [4, 5, 6], "image/png");
+    await fn(fake);
+  });
+}
+
+test("processPendingFinderItems rejects a gaucho-knife match below the confidence floor instead of qualifying on vision.matches alone", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withGauchoFakeBackend({ finder_items: [gauchoPendingItem()] }, async (fake) => {
+      // Regression: production data showed every match scored exactly 0.8 confidence was the
+      // model rationalizing "the decorative motifs differ, but belong to the same broad
+      // category" — this used to qualify purely on matches: true with no confidence check at all.
+      await withFetch([tokenRoute, itemShippingRoute(null), imageRoute, geminiRoute({ matches: true, confidence: 0.8, notes: "Same broad category; decorative motifs differ." })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected");
+        assert.equal(item.reason, "low_confidence");
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems still qualifies a high-confidence gaucho-knife match", async (t) => {
+  await withEnv(ENV, async () => {
+    const sent = [];
+    mockMailer(t, sent);
+    await withGauchoFakeBackend({ finder_items: [gauchoPendingItem()] }, async (fake) => {
+      await withFetch([tokenRoute, itemShippingRoute(null), imageRoute, geminiRoute({ matches: true, confidence: 0.95, makerMatch: true, matchedReferenceIndex: 1, notes: "Matches reference 1." })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "qualified");
+        assert.equal(item.gaucho_matched_reference_id, "ref-1");
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems requires a much higher confidence to qualify a gaucho-knife match when the visible maker mark doesn't match", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withGauchoFakeBackend({ finder_items: [gauchoPendingItem()] }, async (fake) => {
+      // A confident maker mismatch is strong evidence against the item even when the silhouette
+      // looks right — 0.9 clears the normal floor but not the stricter maker-mismatch one.
+      await withFetch([tokenRoute, itemShippingRoute(null), imageRoute, geminiRoute({ matches: true, confidence: 0.9, makerMatch: false, notes: "Style matches but markings indicate a different maker." })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected");
+        assert.equal(item.reason, "low_confidence");
       });
     });
   });
