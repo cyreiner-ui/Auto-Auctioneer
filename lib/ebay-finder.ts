@@ -24,7 +24,22 @@ export type EbayFinderItem = {
   itemEndDate: string | null;
 };
 
+// Cached at module scope (not just per-run/per-tick the way startFinderRun's local `token`
+// variable and processPendingFinderItems's tokenForLookup already do) so a warm serverless
+// container reuses one token across an eBay-issued ~2-hour lifetime instead of spending a fresh
+// OAuth round trip on every single scheduler tick that touches eBay — one more call this app was
+// making needlessly against the same shared, scarce daily Browse API budget. Refreshed a few
+// minutes early so a token is never handed out right as it's about to expire. Harmless on a cold
+// start (the cache is simply empty and this falls back to a fresh fetch), so this only ever helps.
+let cachedToken: { token: string; expiresAt: number } | null = null;
+const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
+// Test-only: clears the cache so each test gets its own fresh token fetch instead of silently
+// reusing whatever an earlier test in the same file already cached (see tests/helpers/fake-fetch.mjs).
+export function resetAppTokenCacheForTests() { cachedToken = null; }
+
 export async function appToken() {
+  if (cachedToken && cachedToken.expiresAt > Date.now()) return cachedToken.token;
   const clientId = process.env.EBAY_CLIENT_ID?.trim();
   const clientSecret = process.env.EBAY_CLIENT_SECRET?.trim();
   if (!clientId || !clientSecret) throw new Error("eBay API credentials are not configured.");
@@ -39,8 +54,10 @@ export async function appToken() {
   });
   await recordEbayApiCall();
   if (!response.ok) throw new Error(`eBay token request failed (${response.status}).`);
-  const payload = await response.json() as { access_token?: string };
+  const payload = await response.json() as { access_token?: string; expires_in?: number };
   if (!payload.access_token) throw new Error("eBay did not return an application token.");
+  const ttlMs = (Number(payload.expires_in) || 7200) * 1000;
+  cachedToken = { token: payload.access_token, expiresAt: Date.now() + Math.max(ttlMs - TOKEN_REFRESH_MARGIN_MS, 0) };
   return payload.access_token;
 }
 

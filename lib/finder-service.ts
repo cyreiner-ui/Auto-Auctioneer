@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { appToken, getItemDescription, getItemShippingCost, searchEbayByImage, searchEbayCategoryNewlyListed, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
 import { analyzeListingText, calculateDeal, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isScheduledRunTime, isShippingLookupWorthwhile, matchesNegativeKeyword, monthKey, resolveMaxCostPerKnife, type FinderScheduleSettings } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
-import { getEbayApiCallsToday } from "./ebay-call-tracker";
+import { ebayBudgetExceeded, getEbayApiCallsToday } from "./ebay-call-tracker";
 import {
   analyzeCarvingSetWithGemini,
   carvingSetCeiling,
@@ -590,6 +590,12 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const gauchoSettings = (!category || category === "gaucho_knife") ? await getGauchoSettings() : DEFAULT_GAUCHO_SETTINGS;
     const errors: string[] = [];
     if (category === "gaucho_knife" && !hasGauchoReferenceImages) errors.push("No reference images are configured yet — upload at least one before running the gaucho-knife finder.");
+    // Checked once, up front — not per keyword — so a day already at/over eBay's own daily call
+    // budget (see ebayBudgetExceeded's comment) skips every eBay call this scan would otherwise
+    // make and reports one clear reason, instead of every keyword search coming back its own
+    // "failed (429)" line (exactly what happened in production on 2026-08-25/27).
+    const ebayExceeded = await ebayBudgetExceeded();
+    if (ebayExceeded) errors.push("Skipped: eBay's daily Browse API call budget is already used up for today (see the eBay usage counter on the finder dashboard). This run will find nothing until it resets — try again later.");
     const keywords = (allKeywords || []).filter((keyword) => {
       const resolvedCategory = keywordCategory(keyword.phrase);
       if (resolvedCategory === "gaucho_knife" && (!hasGauchoReferenceImages || !gauchoSettings.keywordSearchEnabled)) return false;
@@ -602,7 +608,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     // Fetch the eBay app token once and reuse it across every keyword search in this run —
     // fetching it fresh per keyword adds a whole extra network round trip per keyword, which
     // stacks up fast against this route's serverless time budget once there are 30+ keywords.
-    const token = totalKeywords ? await appToken() : null;
+    const token = !ebayExceeded && totalKeywords ? await appToken() : null;
     // Progress-write interval for the loop below: writing after every single keyword adds a
     // sequential DB round trip per keyword on top of the search itself, which used to be a
     // meaningful fraction of the whole scan's time once there were 30+ keywords. Every 5th
@@ -632,7 +638,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     // 30+ keywords (each up to 3 paginated eBay calls) risked exceeding the route's serverless
     // time budget before the scan even finished, which is exactly what left production runs
     // stuck at "running" with a partial keywords_scanned count and no way to retry that day.
-    await mapWithConcurrency(keywords || [], config().scanConcurrency, scanKeyword);
+    if (!ebayExceeded) await mapWithConcurrency(keywords || [], config().scanConcurrency, scanKeyword);
     // Gaucho-knife discovery leads with eBay's searchByImage against every staff-uploaded
     // reference photo, unlike the other two categories, which discover purely by keyword — real
     // gaucho knives are routinely mislabeled by sellers who don't recognize what they have, so a
@@ -641,7 +647,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     // image produced them (imageSearchPhrase) so category resolution and staff auditability both
     // still work. Skipped entirely with zero reference photos configured (hasGauchoReferenceImages,
     // computed above alongside the keyword filter) — there's nothing to search by.
-    if (hasGauchoReferenceImages) {
+    if (!ebayExceeded && hasGauchoReferenceImages) {
       const referenceImages = gauchoReferenceImageRows || [];
       const imageToken = token || await appToken();
       async function scanReferenceImage(reference: { id: string; storage_path: string }) {
@@ -662,7 +668,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     // The carving-set pipeline's "Flatware Sets" category browse (see CARVING_SET_CATEGORY_ID) is
     // not a text search, so it doesn't belong in scanKeyword's per-finder_keywords-row loop above —
     // it runs once per carving-set-scoped scan instead, independent of any keyword row.
-    if (category === "carving_set") {
+    if (!ebayExceeded && category === "carving_set") {
       try {
         for (const item of await searchEbayCategoryNewlyListed(CARVING_SET_CATEGORY_ID, CARVING_SET_CATEGORY_BROWSE_LIMIT, token || undefined, CARVING_SET_USED_CONDITION_ID)) {
           const current = found.get(item.itemId);
@@ -722,7 +728,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
       const { error } = await supabaseAdmin.from("finder_items").upsert(rowsWithFirstSeen.slice(index, index + 200), { onConflict: "ebay_item_id" });
       if (error) throw new Error(error.message);
     }
-    await supabaseAdmin.from("finder_runs").update({ keywords_scanned: keywords?.length || 0, current_keyword: null, items_seen: found.size, items_added: added, errors }).eq("id", run.id);
+    await supabaseAdmin.from("finder_runs").update({ keywords_scanned: ebayExceeded ? 0 : (keywords?.length || 0), current_keyword: null, items_seen: found.size, items_added: added, errors }).eq("id", run.id);
     await updateRunCounts(run.id);
     await notifyRunIfComplete(run.id);
     const { data: refreshed } = await supabaseAdmin.from("finder_runs").select("*").eq("id", run.id).single();
@@ -791,6 +797,15 @@ export async function debugFindItemViaGauchoImageSearch(itemId: string): Promise
 }
 
 export async function processPendingFinderItems(limit = config().batchSize) {
+  // Checked before even querying the pending queue — every row this function processes needs at
+  // least one eBay call (a shipping or description lookup), so once today's count is already
+  // at/over the soft cap there is nothing useful this tick can do with eBay. Skipping outright
+  // (rather than querying pending rows just to defer them) also means an eligible item is left
+  // untouched, not stamped with a fresh next_attempt_at, so it's picked up normally on the very
+  // next tick once the count is back under the cap. See ebayBudgetExceeded's comment for why this
+  // exists: a large backlog (e.g. gaucho-knife's) draining continuously, one tick per minute, is
+  // exactly what drove eBay's own rate limit into 429s in production.
+  if (await ebayBudgetExceeded()) return { processed: 0, deferred: 0 };
   const now = new Date().toISOString();
   // Fetched per category (via scopeToCategory) and merged round-robin, rather than one global
   // "oldest pending item wins" query — a single query lets whichever track has the largest/oldest
@@ -1043,6 +1058,22 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       deferred++;
       return;
     }
+    // Checked before the eBay description fetch below (not just after it, as a boundary case) —
+    // gaucho rows always need a vision call (see the comment above this function), so once this
+    // tick's Gemini vision budget is already known exhausted, fetching the full description first
+    // only to discover the same exhaustion a moment later burns an eBay Browse API call — a much
+    // scarcer, app-wide-shared daily budget (see EBAY_REQUEST_TIMEOUT_MS's comment in
+    // lib/ebay-finder.ts) — for nothing. With a backlog in the thousands, that's up to a whole
+    // batch's worth of wasted eBay calls every single minute the scheduler ticks, which is exactly
+    // what was driving eBay's own rate limit into 429s overnight while Gemini's budget sat
+    // exhausted. This does mean a row skips the free negative-keyword check (which needs the
+    // description) while vision is exhausted — an acceptable trade since the row simply retries in
+    // an hour, once budget may have reset, rather than resolving via keyword right away.
+    if (visionExhaustedMessage) {
+      await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: visionExhaustedMessage }).eq("ebay_item_id", row.ebay_item_id);
+      deferred++;
+      return;
+    }
     try {
       const description = await getItemDescription(row.ebay_item_id, await tokenForLookup());
       const negativeMatch = matchesNegativeKeyword(row.title, description, gauchoNegativePhrases);
@@ -1050,11 +1081,6 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: "rejected", reason: "negative_keyword_match", gaucho_match_notes: `Matched negative keyword: "${negativeMatch}"`, short_description: description, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
         if (saveError) throw new Error(saveError.message);
         processed++;
-        return;
-      }
-      if (visionExhaustedMessage) {
-        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: visionExhaustedMessage, short_description: description }).eq("ebay_item_id", row.ebay_item_id);
-        deferred++;
         return;
       }
       const vision = await analyzeGauchoKnifeMatch({ title: row.title, description, candidateImageUrl: row.image_url || "", referenceImages: gauchoReferenceImages });

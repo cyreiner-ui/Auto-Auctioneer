@@ -790,6 +790,42 @@ test("processPendingFinderItems requires a much higher confidence to qualify a g
   });
 });
 
+test("processPendingFinderItems does not spend an eBay call on a gaucho row once this tick's Gemini vision budget is already known exhausted", async (t) => {
+  // Regression: every gaucho row genuinely needs a vision call, so processGauchoKnifeRow used to
+  // fetch the full eBay item description before ever checking whether this tick had already
+  // discovered the Gemini vision budget was exhausted — wasting a real eBay Browse API call (a
+  // separate, much scarcer app-wide budget) on every row behind the one that tripped the budget
+  // error, every single scheduler tick, for as long as a backlog sat deferred. This is exactly
+  // what drove eBay's own rate limit into 429s in production. FINDER_PROCESS_CONCURRENCY is
+  // pinned to 1 so the two rows process strictly in order — otherwise both could race past the
+  // check before either sets it.
+  await withEnv({ ...ENV, FINDER_PROCESS_CONCURRENCY: "1" }, async () => {
+    mockMailer(t, []);
+    const earlier = new Date(Date.now() - 60_000).toISOString();
+    const later = new Date(Date.now() - 30_000).toISOString();
+    await withGauchoFakeBackend({
+      finder_items: [
+        gauchoPendingItem({ ebay_item_id: "v1|1|0", next_attempt_at: earlier, discovered_at: earlier }),
+        gauchoPendingItem({ ebay_item_id: "v1|2|0", next_attempt_at: later, discovered_at: later }),
+      ],
+    }, async (fake) => {
+      fake.setRpc("reserve_finder_vision_usage", () => ({ data: { reserved: false }, error: null }));
+      let itemUrlCalls = 0;
+      const countingItemRoute = { test: (url) => url.startsWith(ITEM_URL), respond: () => { itemUrlCalls++; return jsonResponse({ description: "" }); } };
+      await withFetch([tokenRoute, countingItemRoute], async () => {
+        const { processed, deferred } = await processPendingFinderItems(5);
+        assert.equal(processed, 0);
+        assert.equal(deferred, 2, "both rows should defer on the exhausted budget");
+        assert.equal(itemUrlCalls, 1, "only the first row (which discovers the exhaustion) should ever call eBay; the second must short-circuit before fetching a description");
+        const [first, second] = fake.tables.finder_items;
+        assert.equal(first.status, "pending");
+        assert.equal(second.status, "pending");
+        assert.equal(second.attempts, 0, "attempts must not increment on the short-circuited defer");
+      });
+    });
+  });
+});
+
 test("a vision-classified Swiss Army multi-tool qualifies under the stricter $1/knife cap but not merely under the normal $4.00 cap", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
@@ -1437,6 +1473,52 @@ test("startFinderRun's concurrent keyword scan collects every keyword's results 
         assert.equal(run.keywords_scanned, keywordCount, "the final tally should count every keyword regardless of the concurrency wave it ran in");
         assert.equal(fake.tables.finder_items.length, keywordCount, "every keyword's distinct item should be captured despite concurrent scanning");
         assert.equal(run.qualified, keywordCount);
+      });
+    });
+  });
+});
+
+test("startFinderRun skips every eBay call and records one clear reason when the daily eBay call budget is already exhausted", async (t) => {
+  await withEnv({ ...ENV, SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "service-role-key" }, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
+      ebay_api_calls_daily: [{ day: dayKey(), calls: 9999 }],
+    }, async () => {
+      // No routes at all — any eBay fetch (token, search, ...) throws "Unmocked fetch call",
+      // proving the scan never attempts a single one once the budget is already known exhausted.
+      await withFetch([], async () => {
+        const { run } = await startFinderRun("manual", "run-budget-exceeded");
+        assert.equal(run.status, "completed");
+        assert.equal(run.keywords_scanned, 0);
+        assert.equal(run.items_seen, 0);
+        assert.equal(run.errors.length, 1, "one clear reason, not a 429 per keyword");
+        assert.match(run.errors[0], /eBay's daily Browse API call budget/);
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems leaves the pending queue untouched and calls eBay zero times when the daily eBay call budget is already exhausted", async (t) => {
+  await withEnv({ ...ENV, SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "service-role-key" }, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [{
+        ebay_item_id: "v1|1|0", run_id: null, title: "Pocket knife lot", short_description: "",
+        image_url: "https://i.ebayimg.com/x.jpg", item_price: 20, shipping_cost: 5,
+        status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+      }],
+      ebay_api_calls_daily: [{ day: dayKey(), calls: 9999 }],
+    }, async (fake) => {
+      await withFetch([], async () => {
+        const { processed, deferred } = await processPendingFinderItems(5);
+        assert.equal(processed, 0);
+        assert.equal(deferred, 0, "the item is left alone rather than stamped deferred, so it's retried normally on the next tick");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "pending");
+        assert.equal(item.attempts, 0);
+        assert.equal(item.next_attempt_at, pastAttempt, "next_attempt_at must be untouched, not pushed out");
       });
     });
   });

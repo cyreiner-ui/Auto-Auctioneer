@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getItemDescription, getItemShippingCost, searchEbayCategoryNewlyListed, searchEbayKeyword } from "../lib/ebay-finder.ts";
+import { appToken, getItemDescription, getItemShippingCost, searchEbayCategoryNewlyListed, searchEbayKeyword } from "../lib/ebay-finder.ts";
 import { jsonResponse, textResponse, withEnv, withFetch } from "./helpers/fake-fetch.mjs";
 
 const EBAY_ENV = { EBAY_CLIENT_ID: "client-id", EBAY_CLIENT_SECRET: "client-secret", EBAY_ENVIRONMENT: "sandbox" };
@@ -28,6 +28,21 @@ test("throws before any request when eBay credentials are not configured", async
   await withEnv({ EBAY_CLIENT_ID: "", EBAY_CLIENT_SECRET: "" }, async () => {
     await withFetch([], async () => {
       await assert.rejects(() => searchEbayKeyword("knife lot", 10), /credentials are not configured/);
+    });
+  });
+});
+
+test("appToken caches the token across calls instead of fetching a fresh one every time", async () => {
+  await withEnv(EBAY_ENV, async () => {
+    let tokenCalls = 0;
+    await withFetch([
+      { test: (url) => url.startsWith(TOKEN_URL), respond: () => { tokenCalls++; return jsonResponse({ access_token: "fake-app-token", expires_in: 7200 }); } },
+    ], async () => {
+      const first = await appToken();
+      const second = await appToken();
+      assert.equal(first, "fake-app-token");
+      assert.equal(second, "fake-app-token");
+      assert.equal(tokenCalls, 1, "a second call within the token's lifetime should reuse the cache, not fetch a new one");
     });
   });
 });
@@ -346,7 +361,10 @@ test("every eBay request carries an abort timeout, so one stalled response can't
       await searchEbayKeyword("knife lot", 10);
       await getItemShippingCost("v1|1|0");
       await getItemDescription("v1|1|0");
-      assert.equal(signals.length, 6);
+      // 4, not 6: appToken() now caches its token at module scope (see lib/ebay-finder.ts), so
+      // only the first of these three calls actually fetches one — the token call plus the
+      // search, shipping, and description calls themselves.
+      assert.equal(signals.length, 4);
       for (const signal of signals) assert.ok(signal instanceof AbortSignal, "expected every eBay fetch to carry an AbortSignal timeout");
     });
   });

@@ -25,3 +25,28 @@ export async function getEbayApiCallsToday() {
   if (error) throw new Error(error.message);
   return Number(data?.calls || 0);
 }
+
+// Soft-cap default for eBay's own ~5,000-calls/day Browse API budget shared across every eBay
+// call this app makes (search, shipping/description lookups, image search — see
+// EBAY_REQUEST_TIMEOUT_MS's comment in lib/ebay-finder.ts). Kept a safety margin under the real
+// limit so a run or tick that would tip the day's count over 5,000 defers gracefully instead of
+// finding out the hard way — which is exactly what the 2026-08-24/25/27 gaucho-knife backlog did,
+// repeatedly, until a manual pocket-knife run's every single keyword search came back 429.
+// Overridable via EBAY_DAILY_CALL_LIMIT, the same shape as GEMINI_DAILY_ANALYSIS_LIMIT.
+const DEFAULT_EBAY_DAILY_CALL_LIMIT = 4500;
+
+function ebayDailyCallLimit() {
+  return Number(process.env.EBAY_DAILY_CALL_LIMIT || DEFAULT_EBAY_DAILY_CALL_LIMIT);
+}
+
+// Checked once, up front — by startFinderRun before spending a single keyword search, and by
+// processPendingFinderItems before pulling a batch of pending items — rather than per individual
+// eBay call, so a day already at/over the soft cap defers the whole scan/batch at once instead of
+// burning through the rest of its budget one 429 at a time. Mirrors isSupabaseConfigured's
+// no-op-when-unconfigured behavior in recordEbayApiCall above: never blocks work in local/test
+// runs where there's no real budget being tracked.
+export async function ebayBudgetExceeded() {
+  if (!isSupabaseConfigured()) return false;
+  const callsToday = await getEbayApiCallsToday();
+  return callsToday >= ebayDailyCallLimit();
+}
