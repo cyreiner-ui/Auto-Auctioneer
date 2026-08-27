@@ -1043,6 +1043,22 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       deferred++;
       return;
     }
+    // Checked before the eBay description fetch below (not just after it, as a boundary case) —
+    // gaucho rows always need a vision call (see the comment above this function), so once this
+    // tick's Gemini vision budget is already known exhausted, fetching the full description first
+    // only to discover the same exhaustion a moment later burns an eBay Browse API call — a much
+    // scarcer, app-wide-shared daily budget (see EBAY_REQUEST_TIMEOUT_MS's comment in
+    // lib/ebay-finder.ts) — for nothing. With a backlog in the thousands, that's up to a whole
+    // batch's worth of wasted eBay calls every single minute the scheduler ticks, which is exactly
+    // what was driving eBay's own rate limit into 429s overnight while Gemini's budget sat
+    // exhausted. This does mean a row skips the free negative-keyword check (which needs the
+    // description) while vision is exhausted — an acceptable trade since the row simply retries in
+    // an hour, once budget may have reset, rather than resolving via keyword right away.
+    if (visionExhaustedMessage) {
+      await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: visionExhaustedMessage }).eq("ebay_item_id", row.ebay_item_id);
+      deferred++;
+      return;
+    }
     try {
       const description = await getItemDescription(row.ebay_item_id, await tokenForLookup());
       const negativeMatch = matchesNegativeKeyword(row.title, description, gauchoNegativePhrases);
@@ -1050,11 +1066,6 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: "rejected", reason: "negative_keyword_match", gaucho_match_notes: `Matched negative keyword: "${negativeMatch}"`, short_description: description, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
         if (saveError) throw new Error(saveError.message);
         processed++;
-        return;
-      }
-      if (visionExhaustedMessage) {
-        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: visionExhaustedMessage, short_description: description }).eq("ebay_item_id", row.ebay_item_id);
-        deferred++;
         return;
       }
       const vision = await analyzeGauchoKnifeMatch({ title: row.title, description, candidateImageUrl: row.image_url || "", referenceImages: gauchoReferenceImages });

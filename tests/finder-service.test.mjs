@@ -790,6 +790,42 @@ test("processPendingFinderItems requires a much higher confidence to qualify a g
   });
 });
 
+test("processPendingFinderItems does not spend an eBay call on a gaucho row once this tick's Gemini vision budget is already known exhausted", async (t) => {
+  // Regression: every gaucho row genuinely needs a vision call, so processGauchoKnifeRow used to
+  // fetch the full eBay item description before ever checking whether this tick had already
+  // discovered the Gemini vision budget was exhausted — wasting a real eBay Browse API call (a
+  // separate, much scarcer app-wide budget) on every row behind the one that tripped the budget
+  // error, every single scheduler tick, for as long as a backlog sat deferred. This is exactly
+  // what drove eBay's own rate limit into 429s in production. FINDER_PROCESS_CONCURRENCY is
+  // pinned to 1 so the two rows process strictly in order — otherwise both could race past the
+  // check before either sets it.
+  await withEnv({ ...ENV, FINDER_PROCESS_CONCURRENCY: "1" }, async () => {
+    mockMailer(t, []);
+    const earlier = new Date(Date.now() - 60_000).toISOString();
+    const later = new Date(Date.now() - 30_000).toISOString();
+    await withGauchoFakeBackend({
+      finder_items: [
+        gauchoPendingItem({ ebay_item_id: "v1|1|0", next_attempt_at: earlier, discovered_at: earlier }),
+        gauchoPendingItem({ ebay_item_id: "v1|2|0", next_attempt_at: later, discovered_at: later }),
+      ],
+    }, async (fake) => {
+      fake.setRpc("reserve_finder_vision_usage", () => ({ data: { reserved: false }, error: null }));
+      let itemUrlCalls = 0;
+      const countingItemRoute = { test: (url) => url.startsWith(ITEM_URL), respond: () => { itemUrlCalls++; return jsonResponse({ description: "" }); } };
+      await withFetch([tokenRoute, countingItemRoute], async () => {
+        const { processed, deferred } = await processPendingFinderItems(5);
+        assert.equal(processed, 0);
+        assert.equal(deferred, 2, "both rows should defer on the exhausted budget");
+        assert.equal(itemUrlCalls, 1, "only the first row (which discovers the exhaustion) should ever call eBay; the second must short-circuit before fetching a description");
+        const [first, second] = fake.tables.finder_items;
+        assert.equal(first.status, "pending");
+        assert.equal(second.status, "pending");
+        assert.equal(second.attempts, 0, "attempts must not increment on the short-circuited defer");
+      });
+    });
+  });
+});
+
 test("a vision-classified Swiss Army multi-tool qualifies under the stricter $1/knife cap but not merely under the normal $4.00 cap", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
