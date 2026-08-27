@@ -316,6 +316,13 @@ type FinderRow = {
   carving_handle_material: "stag" | "ivory" | "other" | null;
 };
 
+// Every column processPendingFinderItems' merged `rows` actually reads (matches FinderRow above,
+// field for field) — kept as an explicit list instead of "*" because this query runs unconditionally
+// on every scheduler tick (once a minute, forever), so pulling every column of finder_items
+// (including the many gaucho/carving match fields no batch-processing code path ever reads) here
+// is pure wasted egress at that frequency.
+const FINDER_BATCH_COLUMNS = "ebay_item_id, run_id, keyword_phrases, title, short_description, image_url, item_price, shipping_cost, shipping_source, knife_count, item_category, status, attempts, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material";
+
 // Categories that never qualify, at any price, regardless of which stage (text or vision)
 // classified them. swiss_army_multi_tool is deliberately absent — it's allowed through at the
 // stricter cap enforced by effectiveMaxCostPerKnife instead of being rejected outright.
@@ -807,6 +814,13 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   // exactly what drove eBay's own rate limit into 429s in production.
   if (await ebayBudgetExceeded()) return { processed: 0, deferred: 0 };
   const now = new Date().toISOString();
+  // This whole function runs unconditionally on every scheduler tick (once a minute, forever), so
+  // a cheap head-count check (same pattern as pendingCountForRun above) is worth it to skip the
+  // per-category select()s entirely once the backlog is drained, rather than always paying for
+  // three row-fetching queries even when there's nothing due yet.
+  const { count: duePending, error: duePendingError } = await supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).eq("status", "pending").lte("next_attempt_at", now);
+  if (duePendingError) throw new Error(duePendingError.message);
+  if (!duePending) return { processed: 0, deferred: 0 };
   // Fetched per category (via scopeToCategory) and merged round-robin, rather than one global
   // "oldest pending item wins" query — a single query lets whichever track has the largest/oldest
   // backlog (e.g. gaucho-knife after its initial scan dumped thousands of pending rows at once)
@@ -816,7 +830,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   // same as before this fix — round-robin below is what actually enforces fairness when more than
   // one category has pending work.
   const categoryResults = await Promise.all(FINDER_CATEGORIES.map((category) =>
-    scopeToCategory(supabaseAdmin.from("finder_items").select("*").eq("status", "pending").lte("next_attempt_at", now).order("discovered_at").limit(limit), category)
+    scopeToCategory(supabaseAdmin.from("finder_items").select(FINDER_BATCH_COLUMNS).eq("status", "pending").lte("next_attempt_at", now).order("discovered_at").limit(limit), category)
   ));
   const queues = categoryResults.map((result) => {
     if (result.error) throw new Error(result.error.message);
