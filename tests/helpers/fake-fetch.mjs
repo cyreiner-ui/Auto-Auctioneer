@@ -2,6 +2,8 @@
 // test file can describe "when the code calls X endpoint, respond with Y" without
 // re-writing the same fetch-mock boilerplate every time.
 
+import { resetAppTokenCacheForTests } from "../../lib/ebay-finder.ts";
+
 export function routedFetch(routes) {
   return async (input, init) => {
     const url = typeof input === "string" ? input : input?.url ?? String(input);
@@ -23,6 +25,11 @@ export function textResponse(text, init) {
 export function withFetch(routes, fn) {
   const original = globalThis.fetch;
   globalThis.fetch = routedFetch(routes);
+  // Every test's eBay token route expects to be hit exactly as many times as that test's own
+  // assertions describe — without this, a token cached by an earlier test in the same file (see
+  // appToken's module-level cache in lib/ebay-finder.ts) would silently satisfy a later test's
+  // calls for free and its tokenCalls-counting assertions would fail.
+  resetAppTokenCacheForTests();
   return (async () => fn())().finally(() => { globalThis.fetch = original; });
 }
 

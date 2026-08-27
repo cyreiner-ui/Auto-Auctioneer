@@ -1478,6 +1478,52 @@ test("startFinderRun's concurrent keyword scan collects every keyword's results 
   });
 });
 
+test("startFinderRun skips every eBay call and records one clear reason when the daily eBay call budget is already exhausted", async (t) => {
+  await withEnv({ ...ENV, SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "service-role-key" }, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
+      ebay_api_calls_daily: [{ day: dayKey(), calls: 9999 }],
+    }, async () => {
+      // No routes at all — any eBay fetch (token, search, ...) throws "Unmocked fetch call",
+      // proving the scan never attempts a single one once the budget is already known exhausted.
+      await withFetch([], async () => {
+        const { run } = await startFinderRun("manual", "run-budget-exceeded");
+        assert.equal(run.status, "completed");
+        assert.equal(run.keywords_scanned, 0);
+        assert.equal(run.items_seen, 0);
+        assert.equal(run.errors.length, 1, "one clear reason, not a 429 per keyword");
+        assert.match(run.errors[0], /eBay's daily Browse API call budget/);
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems leaves the pending queue untouched and calls eBay zero times when the daily eBay call budget is already exhausted", async (t) => {
+  await withEnv({ ...ENV, SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "service-role-key" }, async () => {
+    mockMailer(t, []);
+    const pastAttempt = new Date(Date.now() - 60_000).toISOString();
+    await withFakeBackend({
+      finder_items: [{
+        ebay_item_id: "v1|1|0", run_id: null, title: "Pocket knife lot", short_description: "",
+        image_url: "https://i.ebayimg.com/x.jpg", item_price: 20, shipping_cost: 5,
+        status: "pending", attempts: 0, next_attempt_at: pastAttempt, discovered_at: pastAttempt,
+      }],
+      ebay_api_calls_daily: [{ day: dayKey(), calls: 9999 }],
+    }, async (fake) => {
+      await withFetch([], async () => {
+        const { processed, deferred } = await processPendingFinderItems(5);
+        assert.equal(processed, 0);
+        assert.equal(deferred, 0, "the item is left alone rather than stamped deferred, so it's retried normally on the next tick");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "pending");
+        assert.equal(item.attempts, 0);
+        assert.equal(item.next_attempt_at, pastAttempt, "next_attempt_at must be untouched, not pushed out");
+      });
+    });
+  });
+});
+
 test("processPendingFinderItems's vision-exhaustion short-circuit still limits repeated RPC calls across concurrency waves", async (t) => {
   await withEnv({ ...ENV, FINDER_PROCESS_CONCURRENCY: "2" }, async () => {
     mockMailer(t, []);
