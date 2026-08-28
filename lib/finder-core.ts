@@ -13,6 +13,13 @@ export const FINDER_DEFAULTS = {
   // since the last scan (at most a day, for the daily schedule), not compete with the main
   // best-match pass's depth, and every keyword already pays for the main pass's full 500.
   newlyListedResultsPerKeyword: 50,
+  // Pocket-knife's 25 keywords are generic brand/lot phrases ("gerber knife lot", "pocket knife
+  // lot") competing against far higher listing volume than carving-set/gaucho-knife's narrower
+  // phrasing — a real report (2026-08-26) showed a still-active, still-unqualified auction already
+  // pushed past the default 50-item newlyListed window within about 2 days, purely from other
+  // sellers' new listings for the same generic phrase. Only pocket-knife keywords get this wider
+  // supplemental page; carving-set/gaucho-knife keep the narrower default above.
+  pocketKnifeNewlyListedResultsPerKeyword: 200,
   // searchEbayByImage paginates the same way searchEbayKeyword does (offset/limit, stopping once
   // a page comes back short — see finderPages below), so this isn't limited by eBay's searchByImage
   // `total` field being documented as unreliable for pagination use; that field is never read here.
