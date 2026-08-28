@@ -340,6 +340,7 @@ const config = () => {
     swissArmyMaxCost: Number(process.env.EBAY_FINDER_SWISS_ARMY_MAX_PER_KNIFE || FINDER_DEFAULTS.swissArmyMaxCostPerKnife),
     confidence: Number(process.env.GEMINI_CONFIDENCE_THRESHOLD || FINDER_DEFAULTS.confidence),
     searchDepth: Number(process.env.EBAY_FINDER_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.resultsPerKeyword),
+    newlyListedSearchDepth: Number(process.env.EBAY_FINDER_NEWLY_LISTED_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.newlyListedResultsPerKeyword),
     imageSearchDepth: Number(process.env.EBAY_FINDER_IMAGE_SEARCH_RESULTS_PER_REFERENCE || FINDER_DEFAULTS.imageSearchResultsPerReference),
     batchSize: Number(process.env.GEMINI_BATCH_SIZE || FINDER_DEFAULTS.batchSize),
     processConcurrency: Number(process.env.FINDER_PROCESS_CONCURRENCY || FINDER_DEFAULTS.processConcurrency),
@@ -630,9 +631,21 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
         // CARVING_SET_USED_CONDITION_ID) — this buyer wants antique cutlery, never new-made
         // reissues. Left unset for pocket-knife keywords, which keep searching every condition.
         const conditionId = carvingGroup ? CARVING_SET_USED_CONDITION_ID : undefined;
-        for (const item of await searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms, conditionId)) {
+        const [bestMatch, newlyListed] = await Promise.all([
+          searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms, conditionId),
+          // Supplemental pass, sorted chronologically instead of by relevance — see
+          // searchEbayKeyword's sort param comment for why the best-match pass above can miss a
+          // brand-new, low-engagement listing outright. Deliberately shallow (see
+          // FINDER_DEFAULTS.newlyListedResultsPerKeyword); results merge into the same `found` map
+          // below, so anything the best-match pass already caught is a harmless no-op here.
+          searchEbayKeyword(keyword.phrase, config().newlyListedSearchDepth, token || undefined, extraExcludeTerms, conditionId, "newlyListed"),
+        ]);
+        // An item can legitimately appear in both passes above (this same keyword ranking it
+        // within both best-match and newlyListed) — guard against pushing this keyword's phrase
+        // onto it twice, which the original single-pass loop never had to consider.
+        for (const item of [...bestMatch, ...newlyListed]) {
           const current = found.get(item.itemId);
-          if (current) current.phrases.push(keyword.phrase);
+          if (current) { if (!current.phrases.includes(keyword.phrase)) current.phrases.push(keyword.phrase); }
           else found.set(item.itemId, { item, phrases: [keyword.phrase] });
         }
       } catch (error) { errors.push(error instanceof Error ? error.message : `Search failed for ${keyword.phrase}.`); }
@@ -746,13 +759,16 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
   }
 }
 
-export type FinderKeywordProbe = { phrase: string; itemsReturned: number; hitResultsCap: boolean; found: boolean; matchedTitle: string | null; error: string | null };
+export type FinderKeywordProbe = { phrase: string; itemsReturned: number; hitResultsCap: boolean; found: boolean; matchedTitle: string | null; foundVia: "best_match" | "newly_listed" | null; error: string | null };
 
 // Standing diagnostic for "why didn't the finder pick up listing X" reports: independently of
 // any finder_items row, re-runs every enabled keyword's live eBay search and checks whether the
 // given item id (either the bare numeric eBay id or the full "v1|...|0" form) shows up in the
 // raw results. Distinguishes "genuinely absent from the eBay Browse API's results" from "present,
 // but the keyword search returned so many results it hit resultsPerKeyword before reaching it".
+// Probes both of startFinderRun's scanKeyword passes (best-match and the supplemental newlyListed
+// one) so this stays accurate to what a real scan actually does — probing best-match alone would
+// misreport "not found" for exactly the low-engagement listings the newlyListed pass exists to catch.
 export async function debugFindItemAcrossKeywords(itemId: string): Promise<FinderKeywordProbe[]> {
   const { data: keywordRows, error: keywordError } = await supabaseAdmin.from("finder_keywords").select("phrase").eq("enabled", true).order("created_at");
   if (keywordError) throw new Error(keywordError.message);
@@ -763,11 +779,24 @@ export async function debugFindItemAcrossKeywords(itemId: string): Promise<Finde
       const carvingGroup = carvingSetGroupForPhrases([keyword.phrase]);
       const extraExcludeTerms = carvingGroup ? CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS : [];
       const conditionId = carvingGroup ? CARVING_SET_USED_CONDITION_ID : undefined;
-      const items = await searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms, conditionId);
-      const match = items.find((item) => item.itemId.includes(itemId));
-      return { phrase: keyword.phrase, itemsReturned: items.length, hitResultsCap: items.length >= config().searchDepth, found: Boolean(match), matchedTitle: match?.title ?? null, error: null };
+      const [bestMatch, newlyListed] = await Promise.all([
+        searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms, conditionId),
+        searchEbayKeyword(keyword.phrase, config().newlyListedSearchDepth, token || undefined, extraExcludeTerms, conditionId, "newlyListed"),
+      ]);
+      const bestMatchHit = bestMatch.find((item) => item.itemId.includes(itemId));
+      const newlyListedHit = newlyListed.find((item) => item.itemId.includes(itemId));
+      const match = bestMatchHit || newlyListedHit;
+      return {
+        phrase: keyword.phrase,
+        itemsReturned: bestMatch.length,
+        hitResultsCap: bestMatch.length >= config().searchDepth,
+        found: Boolean(match),
+        matchedTitle: match?.title ?? null,
+        foundVia: bestMatchHit ? "best_match" : newlyListedHit ? "newly_listed" : null,
+        error: null,
+      };
     } catch (error) {
-      return { phrase: keyword.phrase, itemsReturned: 0, hitResultsCap: false, found: false, matchedTitle: null, error: error instanceof Error ? error.message : "Search failed." };
+      return { phrase: keyword.phrase, itemsReturned: 0, hitResultsCap: false, found: false, matchedTitle: null, foundVia: null, error: error instanceof Error ? error.message : "Search failed." };
     }
   }
   return mapWithConcurrency(keywords, config().scanConcurrency, probeKeyword);

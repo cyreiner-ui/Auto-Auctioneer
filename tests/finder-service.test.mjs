@@ -309,10 +309,12 @@ test("startFinderRun is idempotent for the same run key", async (t) => {
         gixenOkRoute,
       ], async () => {
         await startFinderRun("manual", "same-key");
-        assert.equal(searchCalls, 1);
+        // 1 keyword, searched twice (best-match + the supplemental newlyListed pass — see
+        // scanKeyword in lib/finder-service.ts).
+        assert.equal(searchCalls, 2);
         const second = await startFinderRun("manual", "same-key");
         assert.equal(second.created, false);
-        assert.equal(searchCalls, 1, "the second call must not re-run the eBay search");
+        assert.equal(searchCalls, 2, "the second call must not re-run the eBay search");
       });
     });
   });
@@ -1376,7 +1378,8 @@ test("startFinderRun treats a running run older than the lock window as abandone
         const { run, created } = await startFinderRun("manual", "run-after-stale");
         assert.equal(created, true);
         assert.notEqual(run.id, "stale-run");
-        assert.equal(searchCalls, 1, "a run stuck 'running' well past the lock window should not block a fresh scan");
+        // 1 keyword, searched twice (best-match + the supplemental newlyListed pass).
+        assert.equal(searchCalls, 2, "a run stuck 'running' well past the lock window should not block a fresh scan");
       });
       const stale = fake.tables.finder_runs.find((row) => row.id === "stale-run");
       assert.equal(stale.status, "failed", "the abandoned row itself should be reconciled, not just ignored");
