@@ -1365,6 +1365,18 @@ export async function finderOverview(category?: FinderCategory) {
       mode: process.env.GEMINI_PAID_MODE === "true" ? "paid" : "free",
       freeAnalyses: free, paidAnalyses: paid, analyses, monthlyLimit, remaining: Math.max(0, monthlyLimit - analyses), projectedMaximum: analyses * 0.001,
       dailyAnalyses, dailyLimit, dailyRemaining: Math.max(0, dailyLimit - dailyAnalyses),
+      // Masked, not secret-safe-to-hide: GEMINI_PAID_MODE only ever changes which counter this
+      // app logs an analysis under (see reserveUsage in lib/gemini-vision.ts) — it has no effect
+      // on the actual Gemini API call, so "mode: paid" here can lie about reality if the deployed
+      // GEMINI_API_KEY doesn't actually belong to a billing-enabled Google Cloud project. Surfacing
+      // a prefix/suffix (never the full key) lets staff cross-check it against the exact key shown
+      // in Google AI Studio / Cloud Console for the project they enabled billing on, without ever
+      // exposing the secret itself in the UI or this API response.
+      geminiApiKeyPreview: (() => {
+        const key = process.env.GEMINI_API_KEY?.trim();
+        if (!key) return null;
+        return key.length > 10 ? `${key.slice(0, 6)}…${key.slice(-4)}` : `${key.slice(0, 2)}…`;
+      })(),
     },
     settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: pocketKnifeSettings.maxCostPerKnife, gauchoKeywordSearchEnabled: gauchoSettings.keywordSearchEnabled },
   };
