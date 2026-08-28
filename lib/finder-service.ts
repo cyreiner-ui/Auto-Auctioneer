@@ -341,6 +341,7 @@ const config = () => {
     confidence: Number(process.env.GEMINI_CONFIDENCE_THRESHOLD || FINDER_DEFAULTS.confidence),
     searchDepth: Number(process.env.EBAY_FINDER_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.resultsPerKeyword),
     newlyListedSearchDepth: Number(process.env.EBAY_FINDER_NEWLY_LISTED_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.newlyListedResultsPerKeyword),
+    pocketKnifeNewlyListedSearchDepth: Number(process.env.EBAY_FINDER_POCKET_KNIFE_NEWLY_LISTED_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.pocketKnifeNewlyListedResultsPerKeyword),
     imageSearchDepth: Number(process.env.EBAY_FINDER_IMAGE_SEARCH_RESULTS_PER_REFERENCE || FINDER_DEFAULTS.imageSearchResultsPerReference),
     batchSize: Number(process.env.GEMINI_BATCH_SIZE || FINDER_DEFAULTS.batchSize),
     processConcurrency: Number(process.env.FINDER_PROCESS_CONCURRENCY || FINDER_DEFAULTS.processConcurrency),
@@ -631,6 +632,9 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
         // CARVING_SET_USED_CONDITION_ID) — this buyer wants antique cutlery, never new-made
         // reissues. Left unset for pocket-knife keywords, which keep searching every condition.
         const conditionId = carvingGroup ? CARVING_SET_USED_CONDITION_ID : undefined;
+        // Pocket-knife's generic brand/lot phrases see far more competing new listings than
+        // carving-set/gaucho-knife's narrower phrasing — see FINDER_DEFAULTS.pocketKnifeNewlyListedResultsPerKeyword.
+        const newlyListedDepth = keywordCategory(keyword.phrase) === "pocket_knife" ? config().pocketKnifeNewlyListedSearchDepth : config().newlyListedSearchDepth;
         const [bestMatch, newlyListed] = await Promise.all([
           searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms, conditionId),
           // Supplemental pass, sorted chronologically instead of by relevance — see
@@ -638,7 +642,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
           // brand-new, low-engagement listing outright. Deliberately shallow (see
           // FINDER_DEFAULTS.newlyListedResultsPerKeyword); results merge into the same `found` map
           // below, so anything the best-match pass already caught is a harmless no-op here.
-          searchEbayKeyword(keyword.phrase, config().newlyListedSearchDepth, token || undefined, extraExcludeTerms, conditionId, "newlyListed"),
+          searchEbayKeyword(keyword.phrase, newlyListedDepth, token || undefined, extraExcludeTerms, conditionId, "newlyListed"),
         ]);
         // An item can legitimately appear in both passes above (this same keyword ranking it
         // within both best-match and newlyListed) — guard against pushing this keyword's phrase
@@ -779,9 +783,10 @@ export async function debugFindItemAcrossKeywords(itemId: string): Promise<Finde
       const carvingGroup = carvingSetGroupForPhrases([keyword.phrase]);
       const extraExcludeTerms = carvingGroup ? CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS : [];
       const conditionId = carvingGroup ? CARVING_SET_USED_CONDITION_ID : undefined;
+      const newlyListedDepth = keywordCategory(keyword.phrase) === "pocket_knife" ? config().pocketKnifeNewlyListedSearchDepth : config().newlyListedSearchDepth;
       const [bestMatch, newlyListed] = await Promise.all([
         searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms, conditionId),
-        searchEbayKeyword(keyword.phrase, config().newlyListedSearchDepth, token || undefined, extraExcludeTerms, conditionId, "newlyListed"),
+        searchEbayKeyword(keyword.phrase, newlyListedDepth, token || undefined, extraExcludeTerms, conditionId, "newlyListed"),
       ]);
       const bestMatchHit = bestMatch.find((item) => item.itemId.includes(itemId));
       const newlyListedHit = newlyListed.find((item) => item.itemId.includes(itemId));
