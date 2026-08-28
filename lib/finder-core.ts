@@ -6,6 +6,13 @@ export const FINDER_DEFAULTS = {
   maxCostPerKnife: 4.0,
   confidence: 0.9,
   resultsPerKeyword: 500,
+  // A small supplemental page, sorted by newlyListed instead of the default best-match ranking —
+  // see searchEbayKeyword's sort param comment in lib/ebay-finder.ts for why best-match alone can
+  // miss a brand-new, low-engagement listing entirely. Deliberately shallow (a single ~50-item
+  // page, not another 500-deep pagination): this pass only needs to cover whatever's been listed
+  // since the last scan (at most a day, for the daily schedule), not compete with the main
+  // best-match pass's depth, and every keyword already pays for the main pass's full 500.
+  newlyListedResultsPerKeyword: 50,
   // searchEbayByImage paginates the same way searchEbayKeyword does (offset/limit, stopping once
   // a page comes back short — see finderPages below), so this isn't limited by eBay's searchByImage
   // `total` field being documented as unreliable for pagination use; that field is never read here.

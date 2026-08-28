@@ -71,7 +71,9 @@ test("startFinderRun(gaucho_knife) runs both the keyword search and the image se
         await startFinderRun("manual", "run-keyword-enabled", "gaucho_knife");
       });
     });
-    assert.equal(keywordSearches, 1, "the keyword search must run by default (no finder_gaucho_settings row at all — falls back to the enabled default)");
+    // 1 gaucho keyword, searched twice (best-match + the supplemental newlyListed pass — see
+    // scanKeyword in lib/finder-service.ts).
+    assert.equal(keywordSearches, 2, "the keyword search must run by default (no finder_gaucho_settings row at all — falls back to the enabled default)");
     assert.equal(imageSearches, 1);
   });
 });
