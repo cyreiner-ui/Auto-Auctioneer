@@ -5,6 +5,7 @@ import { PATCH as keywordsPatch } from "../app/api/finder/keywords/route.ts";
 import { archivedFinderItems, finderOverview, keywordCategory, processPendingFinderItems, startFinderRun } from "../lib/finder-service.ts";
 import { CARVING_SET_PHRASES } from "../lib/carving-set-finder.ts";
 import { GAUCHO_KNIFE_PHRASES, imageSearchPhrase } from "../lib/gaucho-knife-finder.ts";
+import { imageSearchPhrase as mateGourdImageSearchPhrase } from "../lib/mate-gourd-finder.ts";
 import { COOKIE_NAME, staffSessionToken } from "../lib/staff-auth.ts";
 import { supabaseAdmin } from "../lib/supabase-admin.ts";
 import { createFakeSupabase } from "./helpers/fake-supabase.mjs";
@@ -511,6 +512,80 @@ test("within a single unscoped scan, an eBay listing matched by both a carving-s
       const carvingOverview = await finderOverview("carving_set");
       assert.deepEqual(pocketOverview.counts, { pending: 0, rejected: 0, qualified: 0 }, "the listing must not be counted anywhere in the pocket-knife track");
       assert.deepEqual(carvingOverview.counts, { pending: 1, rejected: 0, qualified: 0 }, "it must be counted exactly once, under carving-set — its only correct category");
+    });
+  });
+});
+
+function sharedMateGourdRow(overrides = {}) {
+  return {
+    ebay_item_id: "v1|shared-gourd|0",
+    run_id: "prior-run",
+    keyword_phrases: [mateGourdImageSearchPhrase("gourd-ref1")],
+    title: "Antique Silver Mate Gourd",
+    short_description: "",
+    ebay_url: "https://www.ebay.com/itm/shared-gourd",
+    image_url: "https://i.ebayimg.com/gourd.jpg",
+    item_price: 60,
+    shipping_cost: 12,
+    currency: "USD",
+    buying_options: ["FIXED_PRICE"],
+    item_end_date: null,
+    knife_count: 1,
+    contains_folding_knife: false,
+    confidence: 0.95,
+    detection_source: "vision",
+    item_category: "mate_gourd",
+    mate_gourd_match_confidence: 0.95,
+    mate_gourd_matched_reference_id: "gourd-ref1",
+    mate_gourd_match_notes: "Matches reference 1 closely.",
+    status: "qualified",
+    reason: null,
+    attempts: 1,
+    total_cost: 72,
+    cost_per_knife: 72,
+    discovered_at: "2026-01-01",
+    first_seen_run_id: "prior-run",
+    ...overrides,
+  };
+}
+
+// Companion to the gaucho-knife REGRESSION test above — same cross-finder "mixing" bug class,
+// checked for the fourth category. This is exactly why scopeToCategory's pocket_knife branch had
+// to move from a single item_category.neq.gaucho_knife check to an item_category.not.in.(...)
+// check covering both gaucho_knife and mate_gourd — a plain neq against only one of them would
+// have let the other leak straight into the pocket-knife dashboard.
+test("REGRESSION: a mate-gourd item (discovered via image search, no finder_keywords phrase at all) keeps its classification after a later pocket-knife-scoped run's keyword search also matches it", async () => {
+  await withEnv(ENV, async () => {
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "knife lot", enabled: true, created_at: "2026-01-01" }],
+      finder_items: [sharedMateGourdRow()],
+    }, async (fake) => {
+      await withFetch([
+        tokenRoute,
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: () => jsonResponse({ itemSummaries: [{
+            itemId: "v1|shared-gourd|0",
+            title: "Antique Silver Mate Gourd",
+            shortDescription: "",
+            itemWebUrl: "https://www.ebay.com/itm/shared-gourd",
+            image: { imageUrl: "https://i.ebayimg.com/gourd.jpg" },
+            price: { value: "60.00", currency: "USD" },
+            shippingOptions: [{ shippingCost: { value: "12.00", currency: "USD" } }],
+            buyingOptions: ["FIXED_PRICE"],
+          }] }),
+        },
+      ], async () => { await startFinderRun("manual", "run-pocket-remix-3", "pocket_knife"); });
+
+      const row = fake.tables.finder_items.find((r) => r.ebay_item_id === "v1|shared-gourd|0");
+      assert.equal(row.item_category, "mate_gourd", "a pocket-knife-scoped run must never strip an already-established mate-gourd classification");
+      assert.ok(row.keyword_phrases.includes(mateGourdImageSearchPhrase("gourd-ref1")), "the item's synthetic image-search marker must survive so it's still recognized as a mate-gourd row on every future scan");
+      assert.equal(row.status, "qualified", "the prior vision verdict must still be honored, not discarded");
+
+      const pocketOverview = await finderOverview("pocket_knife");
+      assert.ok(!pocketOverview.results.some((r) => r.ebay_item_id === "v1|shared-gourd|0"), "the mate-gourd item must never appear on the pocket-knife dashboard");
+      const gourdOverview = await finderOverview("mate_gourd");
+      assert.ok(gourdOverview.results.some((r) => r.ebay_item_id === "v1|shared-gourd|0"), "it must still appear under mate-gourd, its original category");
     });
   });
 });

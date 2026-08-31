@@ -1,6 +1,6 @@
 import nodemailer from "nodemailer";
 
-export type NotifyKind = "pocket_knife" | "carving_set" | "gaucho_knife";
+export type NotifyKind = "pocket_knife" | "carving_set" | "gaucho_knife" | "mate_gourd";
 
 export type NotifiableFinderItem = {
   ebay_item_id: string;
@@ -19,11 +19,13 @@ export type NotifiableFinderItem = {
   gaucho_match_confidence?: number | null;
   gaucho_maker_match?: boolean | null;
   gaucho_match_notes?: string | null;
+  mate_gourd_match_confidence?: number | null;
+  mate_gourd_match_notes?: string | null;
 };
 
 const usd = (value: number | null) => (value == null ? "—" : Number(value).toLocaleString("en-US", { style: "currency", currency: "USD" }));
 const escapeHtml = (value: string) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char] as string));
-const dealLabel = (kind: NotifyKind) => (kind === "carving_set" ? "carving set" : kind === "gaucho_knife" ? "gaucho knife" : "pocket knife");
+const dealLabel = (kind: NotifyKind) => (kind === "carving_set" ? "carving set" : kind === "gaucho_knife" ? "gaucho knife" : kind === "mate_gourd" ? "maté gourd" : "pocket knife");
 
 // Same palette as the finder dashboard (see app/globals.css's :root and .finder-card rules) so the
 // alert email reads as the same product rather than a generic transactional email.
@@ -65,6 +67,11 @@ function itemBadges(item: NotifiableFinderItem, kind: NotifyKind): string[] {
     else if (item.gaucho_maker_match === false) badges.push("maker markings don't match");
     return badges;
   }
+  if (kind === "mate_gourd") {
+    const badges: string[] = [];
+    if (item.mate_gourd_match_confidence != null) badges.push(`${Math.round(Number(item.mate_gourd_match_confidence) * 100)}% match confidence`);
+    return badges;
+  }
   return [item.knife_count != null ? `${item.knife_count} knives` : "Knife count unknown"];
 }
 
@@ -86,8 +93,9 @@ function renderItemCard(item: NotifiableFinderItem, kind: NotifyKind) {
   const unitPrice = kind === "pocket_knife" && item.cost_per_knife != null
     ? `<p style="margin:8px 0;color:${COLORS.lime};font:15px Georgia,serif;">${usd(item.cost_per_knife)}/knife</p>`
     : "";
-  const gauchoNotes = kind === "gaucho_knife" && item.gaucho_match_notes
-    ? `<p style="margin:6px 0 0;color:${COLORS.muted};font-size:9px;line-height:1.4;">${escapeHtml(item.gaucho_match_notes)}</p>`
+  const matchNotes = (kind === "gaucho_knife" && item.gaucho_match_notes) || (kind === "mate_gourd" && item.mate_gourd_match_notes) || "";
+  const gauchoNotes = matchNotes
+    ? `<p style="margin:6px 0 0;color:${COLORS.muted};font-size:9px;line-height:1.4;">${escapeHtml(matchNotes)}</p>`
     : "";
   return `
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${COLORS.panel};border:1px solid ${COLORS.line};">

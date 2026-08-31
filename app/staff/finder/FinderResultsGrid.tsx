@@ -7,9 +7,10 @@ export type FinderResult = {
   ebay_item_id: string; title: string; ebay_url: string; image_url: string | null; item_price: number; shipping_cost: number; total_cost: number; cost_per_knife: number; knife_count: number; detection_source: string; discovered_at: string; gixen_status?: string | null; gixen_message?: string | null; buying_options: string[]; max_bid: number | null;
   carving_piece_count?: number | null; carving_has_case?: boolean | null; carving_carbon_steel?: boolean | null; carving_handle_material?: "stag" | "ivory" | "other" | null;
   gaucho_match_confidence?: number | null; gaucho_maker_match?: boolean | null; gaucho_match_notes?: string | null;
+  mate_gourd_match_confidence?: number | null; mate_gourd_match_notes?: string | null;
   reason?: string | null;
 };
-export type FinderResultsVariant = "pocket_knife" | "carving_set" | "gaucho_knife";
+export type FinderResultsVariant = "pocket_knife" | "carving_set" | "gaucho_knife" | "mate_gourd";
 
 type ResultAction = { label: string; className?: string; visible?: (result: FinderResult) => boolean; onClick: (result: FinderResult) => void };
 type BulkAction = { label: string; className?: string; onClick: (ids: string[]) => void };
@@ -145,6 +146,10 @@ export default function FinderResultsGrid({ results, busy, emptyMessage, actions
                   {result.gaucho_maker_match === true && <span>Maker matches</span>}
                   {result.gaucho_maker_match === false && <span>Maker doesn&apos;t match</span>}
                 </>
+              : variant === "mate_gourd"
+              ? <>
+                  {result.mate_gourd_match_confidence != null && <span>{Math.round(result.mate_gourd_match_confidence * 100)}% match</span>}
+                </>
               : <span>{result.knife_count != null ? `${result.knife_count} knives` : "Knife count unknown"}</span>}
             {result.gixen_status && <span className={result.gixen_status === "failed" ? "gixen-failed" : undefined} title={result.gixen_message || undefined}>{GIXEN_BADGE[result.gixen_status] || result.gixen_status}</span>}
           </div>
@@ -152,6 +157,7 @@ export default function FinderResultsGrid({ results, busy, emptyMessage, actions
           <p className="finder-price-line">{usd(result.item_price)}{result.shipping_cost != null ? ` + ${usd(result.shipping_cost)} shipping` : ""}{result.total_cost != null ? ` = ${usd(result.total_cost)} total` : ""}</p>
           {variant === "pocket_knife" && result.cost_per_knife != null && <strong className="finder-unit-price">{usd(result.cost_per_knife)} / knife</strong>}
           {variant === "gaucho_knife" && result.gaucho_match_notes && <p className="finder-snapshot">{result.gaucho_match_notes}</p>}
+          {variant === "mate_gourd" && result.mate_gourd_match_notes && <p className="finder-snapshot">{result.mate_gourd_match_notes}</p>}
           {result.reason && <p className="finder-reject-reason">Not a match: {rejectionLabel(result.reason)}</p>}
           <p className="finder-snapshot">Price captured {new Date(result.discovered_at).toLocaleString()}. Verify the current price on eBay.</p>
           {bidAction && isAuctionFormat(result.buying_options) && result.gixen_status !== "sent" && result.gixen_status !== "not_auction" &&

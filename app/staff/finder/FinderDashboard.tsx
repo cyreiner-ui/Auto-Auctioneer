@@ -6,7 +6,7 @@ import FinderResultsGrid, { type FinderResult } from "./FinderResultsGrid";
 import { usePersistedState } from "../../../lib/use-persisted-state";
 import { summarizeRunFailure } from "../../../lib/finder-core";
 
-type FinderKind = "pocket_knife" | "carving_set" | "gaucho_knife";
+type FinderKind = "pocket_knife" | "carving_set" | "gaucho_knife" | "mate_gourd";
 
 type Run = { id: string; trigger: string; status: string; keywords_scanned: number; current_keyword: string | null; items_seen: number; items_added: number; qualified: number; new_qualified: number; rejected: number; errors: string[]; started_at: string };
 type Overview = { results: FinderResult[]; runs: Run[]; keywords: { id: string; phrase: string; enabled: boolean }[]; counts: { pending: number; rejected: number; qualified: number }; ebayCallsToday: number; settings: { zip: string; maxCostPerKnife: number }; processingPaused: boolean };
@@ -14,10 +14,10 @@ type Overview = { results: FinderResult[]; runs: Run[]; keywords: { id: string; 
 const usd = (value: number) => Number(value || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 const RUN_STATUS_LABEL: Record<string, string> = { running: "Working…", completed: "Done", failed: "Had a problem" };
 
-const KIND_LABEL: Record<FinderKind, string> = { pocket_knife: "Pocket Knife Finder", carving_set: "Carving Set Finder", gaucho_knife: "Gaucho Knife Finder" };
-const KIND_SETTINGS_HREF: Record<FinderKind, string> = { pocket_knife: "/staff/finder/settings", carving_set: "/staff/finder/carving-sets/settings", gaucho_knife: "/staff/finder/gaucho-knives/settings" };
-const KIND_ARCHIVED_HREF: Record<FinderKind, string> = { pocket_knife: "/staff/finder/archived", carving_set: "/staff/finder/carving-sets/archived", gaucho_knife: "/staff/finder/gaucho-knives/archived" };
-const KIND_REJECTED_HREF: Record<FinderKind, string> = { pocket_knife: "/staff/finder/rejected", carving_set: "/staff/finder/carving-sets/rejected", gaucho_knife: "/staff/finder/gaucho-knives/rejected" };
+const KIND_LABEL: Record<FinderKind, string> = { pocket_knife: "Pocket Knife Finder", carving_set: "Carving Set Finder", gaucho_knife: "Gaucho Knife Finder", mate_gourd: "Maté Gourd Finder" };
+const KIND_SETTINGS_HREF: Record<FinderKind, string> = { pocket_knife: "/staff/finder/settings", carving_set: "/staff/finder/carving-sets/settings", gaucho_knife: "/staff/finder/gaucho-knives/settings", mate_gourd: "/staff/finder/mate-gourds/settings" };
+const KIND_ARCHIVED_HREF: Record<FinderKind, string> = { pocket_knife: "/staff/finder/archived", carving_set: "/staff/finder/carving-sets/archived", gaucho_knife: "/staff/finder/gaucho-knives/archived", mate_gourd: "/staff/finder/mate-gourds/archived" };
+const KIND_REJECTED_HREF: Record<FinderKind, string> = { pocket_knife: "/staff/finder/rejected", carving_set: "/staff/finder/carving-sets/rejected", gaucho_knife: "/staff/finder/gaucho-knives/rejected", mate_gourd: "/staff/finder/mate-gourds/rejected" };
 
 export default function FinderDashboard() {
   const [kind, setKind] = usePersistedState<FinderKind>("knife-auctions:finder-kind", "pocket_knife");
@@ -95,6 +95,7 @@ export default function FinderDashboard() {
             <option value="pocket_knife">{KIND_LABEL.pocket_knife}</option>
             <option value="carving_set">{KIND_LABEL.carving_set}</option>
             <option value="gaucho_knife">{KIND_LABEL.gaucho_knife}</option>
+            <option value="mate_gourd">{KIND_LABEL.mate_gourd}</option>
           </select>
         </div>
         <div className="finder-title-row">
@@ -106,6 +107,8 @@ export default function FinderDashboard() {
             ? <>Daily snapshots delivered to {data?.settings.zip ?? "—"} · maximum {usd(data?.settings.maxCostPerKnife ?? 0)} per knife including shipping</>
             : kind === "carving_set"
             ? <>Sheffield/English sets: $200 flat, carbon steel only. German and other cased sets: $10 × piece count + $15. A case is required for all three.</>
+            : kind === "mate_gourd"
+            ? <>Discovered by visual match against your reference photos of the specific gourd (plus a keyword-search supplement) — no price cap, review every match yourself.</>
             : <>Discovered by visual match against your reference photos (plus a keyword-search supplement) — no price cap yet, review every match yourself.</>}
         </p>
         <div className="finder-header-links">
@@ -137,7 +140,7 @@ export default function FinderDashboard() {
             {latest.errors.map((message) => <p className="finder-run-error" key={message}>{message}</p>)}
           </details>}
         </div>}</section>
-      <section className="finder-results"><div className="section-title"><div><p className="eyebrow">QUALIFYING SNAPSHOTS</p><h2>{kind === "pocket_knife" ? "Deals at or below $3.50 per knife" : "Cased carving sets within budget"}</h2></div></div>
+      <section className="finder-results"><div className="section-title"><div><p className="eyebrow">QUALIFYING SNAPSHOTS</p><h2>{kind === "pocket_knife" ? "Deals at or below $3.50 per knife" : kind === "carving_set" ? "Cased carving sets within budget" : kind === "gaucho_knife" ? "Visual matches against your reference photos" : "Visual matches against your gourd's reference photos"}</h2></div></div>
         <FinderResultsGrid
           results={data.results}
           variant={kind}
