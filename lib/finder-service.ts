@@ -24,36 +24,47 @@ import {
   gauchoKnifeGroupForPhrases,
   gauchoMakerMismatchConfidenceThreshold,
   gauchoMatchConfidenceThreshold,
-  imageSearchPhrase,
-  referenceImageBase64,
+  imageSearchPhrase as gauchoImageSearchPhrase,
+  referenceImageBase64 as gauchoReferenceImageBase64,
   refreshedGauchoKnifeRow,
   type GauchoKnifeExistingRow,
 } from "./gaucho-knife-finder";
+import {
+  analyzeMateGourdMatch,
+  imageSearchPhrase as mateGourdImageSearchPhrase,
+  mateGourdGroupForPhrases,
+  mateGourdMatchConfidenceThreshold,
+  referenceImageBase64 as mateGourdReferenceImageBase64,
+  refreshedMateGourdRow,
+  type MateGourdExistingRow,
+} from "./mate-gourd-finder";
 import { isAuctionFormat } from "./gixen-client";
 import { sendQualifiedItemsEmail, sendRunSummaryEmail } from "./finder-notify";
 import { supabaseAdmin } from "./supabase-admin";
 
-// The three independent operational tracks staff run/review separately (see
-// lib/carving-set-finder.ts/lib/gaucho-knife-finder.ts for how a keyword phrase resolves to
-// "carving_set"/"gaucho_knife" — anything else is "pocket_knife"). Threaded through
-// startFinderRun/finderOverview/archivedFinderItems/notifyNewlyQualified so a manual run, a
-// results/settings page, or a qualification email for one track never touches another's data.
-export type FinderCategory = "pocket_knife" | "carving_set" | "gaucho_knife";
+// The four independent operational tracks staff run/review separately (see
+// lib/carving-set-finder.ts/lib/gaucho-knife-finder.ts/lib/mate-gourd-finder.ts for how a keyword
+// phrase resolves to "carving_set"/"gaucho_knife"/"mate_gourd" — anything else is "pocket_knife").
+// Threaded through startFinderRun/finderOverview/archivedFinderItems/notifyNewlyQualified so a
+// manual run, a results/settings page, or a qualification email for one track never touches
+// another's data.
+export type FinderCategory = "pocket_knife" | "carving_set" | "gaucho_knife" | "mate_gourd";
 
-export const FINDER_CATEGORIES = ["pocket_knife", "carving_set", "gaucho_knife"] as const;
+export const FINDER_CATEGORIES = ["pocket_knife", "carving_set", "gaucho_knife", "mate_gourd"] as const;
 export function isFinderCategory(value: unknown): value is FinderCategory {
   return typeof value === "string" && (FINDER_CATEGORIES as readonly string[]).includes(value);
 }
 
-// The single canonical classifier for "which of the three tracks does this finder_keywords phrase
+// The single canonical classifier for "which of the four tracks does this finder_keywords phrase
 // belong to" — every other definition of this test (startFinderRun's scoped-keyword filter,
 // finderOverview's per-category keyword list, debugFindItemAcrossKeywords) must call this rather
-// than re-implementing the carving-then-gaucho-else-pocket precedence inline, so a future edit to
-// one category's phrase detection can't silently drift out of sync with another's and reopen a
-// cross-finder mixing bug.
+// than re-implementing the carving-then-gaucho-then-mate-gourd-else-pocket precedence inline, so a
+// future edit to one category's phrase detection can't silently drift out of sync with another's
+// and reopen a cross-finder mixing bug.
 export function keywordCategory(phrase: string): FinderCategory {
   if (carvingSetGroupForPhrases([phrase])) return "carving_set";
   if (gauchoKnifeGroupForPhrases([phrase])) return "gaucho_knife";
+  if (mateGourdGroupForPhrases([phrase])) return "mate_gourd";
   return "pocket_knife";
 }
 
@@ -71,18 +82,19 @@ function pgTextArrayLiteral(values: string[]) {
 function scopeToCategory<Q extends { overlaps: (col: string, val: string) => any; not: (col: string, op: string, val: string) => any; eq: (col: string, val: string) => any; or: (val: string) => any }>(query: Q, category?: FinderCategory) {
   if (!category) return query;
   if (category === "carving_set") return query.overlaps("keyword_phrases", pgTextArrayLiteral(CARVING_SET_PHRASES));
-  // Image-search-discovered gaucho items carry a synthetic "__image_search:<id>__" phrase (see
-  // lib/gaucho-knife-finder.ts's imageSearchPhrase) rather than one of GAUCHO_KNIFE_PHRASES, and
-  // Postgres array operators can't prefix-match an array element — so this scopes by
-  // item_category instead, which initialGauchoKnifeRow sets to "gaucho_knife" unconditionally on
-  // every row (unlike pocket_knife's item_category, which is null for a plain non-Swiss-Army
-  // knife), regardless of which discovery path found it.
+  // Image-search-discovered gaucho/mate-gourd items carry a synthetic "__..._image_search:<id>"
+  // phrase (see lib/gaucho-knife-finder.ts's/lib/mate-gourd-finder.ts's imageSearchPhrase) rather
+  // than one of their keyword-phrase lists, and Postgres array operators can't prefix-match an
+  // array element — so this scopes by item_category instead, which initialGauchoKnifeRow/
+  // initialMateGourdRow sets unconditionally on every row (unlike pocket_knife's item_category,
+  // which is null for a plain non-Swiss-Army knife), regardless of which discovery path found it.
   if (category === "gaucho_knife") return query.eq("item_category", "gaucho_knife");
-  // pocket_knife: neither a carving-set phrase nor a gaucho_knife item_category. The `.or` clause
-  // must explicitly include NULL — a plain `.neq("item_category", "gaucho_knife")` would silently
-  // exclude every ordinary pocket-knife row (item_category is null for those), since SQL's `<>`
-  // against NULL evaluates to NULL/false, not true.
-  return query.not("keyword_phrases", "ov", pgTextArrayLiteral(CARVING_SET_PHRASES)).or("item_category.is.null,item_category.neq.gaucho_knife");
+  if (category === "mate_gourd") return query.eq("item_category", "mate_gourd");
+  // pocket_knife: neither a carving-set phrase nor a gaucho_knife/mate_gourd item_category. The
+  // `.or` clause must explicitly include NULL — a plain `.not("item_category", "in", "(...)")`
+  // would silently exclude every ordinary pocket-knife row (item_category is null for those),
+  // since SQL's `IN`/`NOT IN` against NULL evaluates to NULL, not true.
+  return query.not("keyword_phrases", "ov", pgTextArrayLiteral(CARVING_SET_PHRASES)).or("item_category.is.null,item_category.not.in.(gaucho_knife,mate_gourd)");
 }
 
 type FinderNotifyMode = "auctions_only" | "all_qualified";
@@ -184,6 +196,26 @@ export async function updateGauchoSettings(patch: Partial<GauchoSettings>) {
   if (error) throw new Error(error.message);
 }
 
+type MateGourdSettings = { keywordSearchEnabled: boolean };
+
+// Matches the seeded default (supabase/migrations/044_finder_mate_gourds.sql) — used only if the
+// singleton row is somehow missing.
+const DEFAULT_MATE_GOURD_SETTINGS: MateGourdSettings = { keywordSearchEnabled: true };
+
+// Mirrors getGauchoSettings — whether the maté-gourd finder's text keyword-search supplement runs
+// at all, alongside the primary searchByImage discovery path.
+async function getMateGourdSettings(): Promise<MateGourdSettings> {
+  const { data } = await supabaseAdmin.from("finder_mate_gourd_settings").select("*").eq("id", true).maybeSingle();
+  if (!data) return DEFAULT_MATE_GOURD_SETTINGS;
+  return { keywordSearchEnabled: Boolean(data.keyword_search_enabled) };
+}
+
+export async function updateMateGourdSettings(patch: Partial<MateGourdSettings>) {
+  if (patch.keywordSearchEnabled === undefined) return;
+  const { error } = await supabaseAdmin.from("finder_mate_gourd_settings").upsert({ id: true, keyword_search_enabled: patch.keywordSearchEnabled, updated_at: new Date().toISOString() }, { onConflict: "id" });
+  if (error) throw new Error(error.message);
+}
+
 // A per-category pause on processPendingFinderItems's vision/classification work — wired
 // separately for each of the three finder tracks (see the finder_processing_settings check
 // constraint) rather than one shared on/off switch, since staff want to (for example) pause
@@ -206,6 +238,7 @@ type NotifyRow = {
   total_cost: number | null; cost_per_knife: number | null; knife_count: number | null; notified_at: string | null; gixen_status: string | null;
   buying_options: string[]; keyword_phrases: string[] | null; carving_piece_count: number | null; carving_has_case: boolean | null; carving_carbon_steel: boolean | null;
   gaucho_match_confidence?: number | string | null; gaucho_maker_match?: boolean | null; gaucho_match_notes?: string | null;
+  mate_gourd_match_confidence?: number | string | null; mate_gourd_match_notes?: string | null;
 };
 
 // Sends the qualified-item alert email for one category's bucket of rows, using the shared
@@ -268,20 +301,22 @@ async function notifyNewlyQualified(ebayItemIds: string[]) {
   if (!ebayItemIds.length) return;
   const { data, error } = await supabaseAdmin
     .from("finder_items")
-    .select("ebay_item_id, title, ebay_url, image_url, item_price, shipping_cost, total_cost, cost_per_knife, knife_count, notified_at, gixen_status, buying_options, keyword_phrases, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, gaucho_match_confidence, gaucho_maker_match, gaucho_match_notes")
+    .select("ebay_item_id, title, ebay_url, image_url, item_price, shipping_cost, total_cost, cost_per_knife, knife_count, notified_at, gixen_status, buying_options, keyword_phrases, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, gaucho_match_confidence, gaucho_maker_match, gaucho_match_notes, mate_gourd_match_confidence, mate_gourd_match_notes")
     .eq("status", "qualified")
     .in("ebay_item_id", ebayItemIds);
   if (error || !data?.length) return;
   const { mode, recipients } = await getNotifySettings();
   // Split by category before sending — a single run/batch that qualifies items across multiple
   // categories must never combine them into one email, even though the notify mode and recipient
-  // list are the same shared settings for all three.
+  // list are the same shared settings for all four.
   const carvingRows = data.filter((row) => carvingSetGroupForPhrases(row.keyword_phrases || []));
   const gauchoRows = data.filter((row) => gauchoKnifeGroupForPhrases(row.keyword_phrases || []));
-  const pocketRows = data.filter((row) => !carvingSetGroupForPhrases(row.keyword_phrases || []) && !gauchoKnifeGroupForPhrases(row.keyword_phrases || []));
+  const mateGourdRows = data.filter((row) => mateGourdGroupForPhrases(row.keyword_phrases || []));
+  const pocketRows = data.filter((row) => !carvingSetGroupForPhrases(row.keyword_phrases || []) && !gauchoKnifeGroupForPhrases(row.keyword_phrases || []) && !mateGourdGroupForPhrases(row.keyword_phrases || []));
   await notifyBucket(pocketRows, mode, recipients, "pocket_knife");
   await notifyBucket(carvingRows, mode, recipients, "carving_set");
   await notifyBucket(gauchoRows, mode, recipients, "gaucho_knife");
+  await notifyBucket(mateGourdRows, mode, recipients, "mate_gourd");
   const notAuction = data.filter((row) => !row.gixen_status && !isAuctionFormat(row.buying_options));
   if (notAuction.length) {
     await supabaseAdmin.from("finder_items").update({
@@ -484,6 +519,9 @@ type ExistingFinderRow = {
   gaucho_maker_match?: boolean | null;
   gaucho_matched_reference_id?: string | null;
   gaucho_match_notes?: string | null;
+  mate_gourd_match_confidence?: number | string | null;
+  mate_gourd_matched_reference_id?: string | null;
+  mate_gourd_match_notes?: string | null;
 };
 
 function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, existing: ExistingFinderRow | undefined, maxCost: number, swissArmyMax: number, negativePhrases: string[]) {
@@ -597,8 +635,16 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     // Staff toggle for image-search-only mode (see updateGauchoSettings) — only fetched when this
     // run could possibly touch gaucho keywords at all, same gate as the reference-image fetch above.
     const gauchoSettings = (!category || category === "gaucho_knife") ? await getGauchoSettings() : DEFAULT_GAUCHO_SETTINGS;
+    // Same shape as the gaucho-knife fetches above, for the maté-gourd category.
+    const { data: mateGourdReferenceImageRows, error: mateGourdReferenceError } = (!category || category === "mate_gourd")
+      ? await supabaseAdmin.from("finder_reference_images").select("id, storage_path").eq("category", "mate_gourd")
+      : { data: null, error: null };
+    if (mateGourdReferenceError) throw new Error(mateGourdReferenceError.message);
+    const hasMateGourdReferenceImages = Boolean(mateGourdReferenceImageRows?.length);
+    const mateGourdSettings = (!category || category === "mate_gourd") ? await getMateGourdSettings() : DEFAULT_MATE_GOURD_SETTINGS;
     const errors: string[] = [];
     if (category === "gaucho_knife" && !hasGauchoReferenceImages) errors.push("No reference images are configured yet — upload at least one before running the gaucho-knife finder.");
+    if (category === "mate_gourd" && !hasMateGourdReferenceImages) errors.push("No reference images are configured yet — upload at least one before running the maté-gourd finder.");
     // Checked once, up front — not per keyword — so a day already at/over eBay's own daily call
     // budget (see ebayBudgetExceeded's comment) skips every eBay call this scan would otherwise
     // make and reports one clear reason, instead of every keyword search coming back its own
@@ -608,6 +654,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const keywords = (allKeywords || []).filter((keyword) => {
       const resolvedCategory = keywordCategory(keyword.phrase);
       if (resolvedCategory === "gaucho_knife" && (!hasGauchoReferenceImages || !gauchoSettings.keywordSearchEnabled)) return false;
+      if (resolvedCategory === "mate_gourd" && (!hasMateGourdReferenceImages || !mateGourdSettings.keywordSearchEnabled)) return false;
       return category ? resolvedCategory === category : true;
     });
     const keywordMaxCost = new Map((keywords || []).map((keyword) => [keyword.phrase, keyword.max_cost_per_knife]));
@@ -676,8 +723,8 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
       const imageToken = token || await appToken();
       async function scanReferenceImage(reference: { id: string; storage_path: string }) {
         try {
-          const imageBase64 = await referenceImageBase64(reference.storage_path);
-          const phrase = imageSearchPhrase(reference.id);
+          const imageBase64 = await gauchoReferenceImageBase64(reference.storage_path);
+          const phrase = gauchoImageSearchPhrase(reference.id);
           // Used-only, same as the keyword-search supplement above — a genuine antique gaucho
           // knife is never a new-made reissue.
           for (const item of await searchEbayByImage(imageBase64, config().imageSearchDepth, imageToken || undefined, CARVING_SET_USED_CONDITION_ID)) {
@@ -688,6 +735,25 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
         } catch (error) { errors.push(error instanceof Error ? error.message : `Image search failed for reference ${reference.id}.`); }
       }
       await mapWithConcurrency(referenceImages || [], config().scanConcurrency, scanReferenceImage);
+    }
+    // Same shape as the gaucho-knife image-search block above, for the maté-gourd category —
+    // unlike gaucho/carving-set, not restricted to Used-only condition, since a specific target
+    // gourd could plausibly be found new (artisan-made) as well as antique.
+    if (!ebayExceeded && hasMateGourdReferenceImages) {
+      const referenceImages = mateGourdReferenceImageRows || [];
+      const imageToken = token || await appToken();
+      async function scanMateGourdReferenceImage(reference: { id: string; storage_path: string }) {
+        try {
+          const imageBase64 = await mateGourdReferenceImageBase64(reference.storage_path);
+          const phrase = mateGourdImageSearchPhrase(reference.id);
+          for (const item of await searchEbayByImage(imageBase64, config().imageSearchDepth, imageToken || undefined)) {
+            const current = found.get(item.itemId);
+            if (current) current.phrases.push(phrase);
+            else found.set(item.itemId, { item, phrases: [phrase] });
+          }
+        } catch (error) { errors.push(error instanceof Error ? error.message : `Image search failed for reference ${reference.id}.`); }
+      }
+      await mapWithConcurrency(referenceImages || [], config().scanConcurrency, scanMateGourdReferenceImage);
     }
     // The carving-set pipeline's "Flatware Sets" category browse (see CARVING_SET_CATEGORY_ID) is
     // not a text search, so it doesn't belong in scanKeyword's per-finder_keywords-row loop above —
@@ -714,13 +780,16 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const ids = [...found.keys()];
     const existingById = new Map<string, ExistingFinderRow>();
     for (let index = 0; index < ids.length; index += 200) {
-      const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id, keyword_phrases, status, reason, knife_count, contains_folding_knife, confidence, detection_source, item_category, shipping_cost, shipping_source, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, gaucho_match_confidence, gaucho_maker_match, gaucho_matched_reference_id, gaucho_match_notes").in("ebay_item_id", ids.slice(index, index + 200));
+      const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id, keyword_phrases, status, reason, knife_count, contains_folding_knife, confidence, detection_source, item_category, shipping_cost, shipping_source, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, gaucho_match_confidence, gaucho_maker_match, gaucho_matched_reference_id, gaucho_match_notes, mate_gourd_match_confidence, mate_gourd_matched_reference_id, mate_gourd_match_notes").in("ebay_item_id", ids.slice(index, index + 200));
       if (error) throw new Error(error.message);
       for (const row of data || []) existingById.set(row.ebay_item_id, row);
     }
     const { data: negativeKeywordRows, error: negativeKeywordError } = await supabaseAdmin.from("finder_gaucho_negative_keywords").select("phrase").eq("enabled", true);
     if (negativeKeywordError) throw new Error(negativeKeywordError.message);
     const negativePhrases = (negativeKeywordRows || []).map((row) => row.phrase);
+    const { data: mateGourdNegativeKeywordRows, error: mateGourdNegativeKeywordError } = await supabaseAdmin.from("finder_mate_gourd_negative_keywords").select("phrase").eq("enabled", true);
+    if (mateGourdNegativeKeywordError) throw new Error(mateGourdNegativeKeywordError.message);
+    const mateGourdNegativePhrases = (mateGourdNegativeKeywordRows || []).map((row) => row.phrase);
     const { data: pocketKnifeNegativeKeywordRows, error: pocketKnifeNegativeKeywordError } = await supabaseAdmin.from("finder_pocket_knife_negative_keywords").select("phrase").eq("enabled", true);
     if (pocketKnifeNegativeKeywordError) throw new Error(pocketKnifeNegativeKeywordError.message);
     const pocketKnifeNegativePhrases = (pocketKnifeNegativeKeywordRows || []).map((row) => row.phrase);
@@ -739,6 +808,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
       const carvingGroup = carvingSetGroupForPhrases(mergedPhrases);
       if (carvingGroup) return refreshedCarvingSetRow(item, mergedPhrases, run.id, existing as CarvingSetExistingRow | undefined, carvingGroup);
       if (gauchoKnifeGroupForPhrases(mergedPhrases)) return refreshedGauchoKnifeRow(item, mergedPhrases, run.id, existing as GauchoKnifeExistingRow | undefined, negativePhrases);
+      if (mateGourdGroupForPhrases(mergedPhrases)) return refreshedMateGourdRow(item, mergedPhrases, run.id, existing as MateGourdExistingRow | undefined, mateGourdNegativePhrases);
       return refreshedRow(item, mergedPhrases, run.id, existing, resolveMaxCostPerKnife(mergedPhrases, keywordMaxCost, pocketKnifeSettings.maxCostPerKnife), config().swissArmyMaxCost, pocketKnifeNegativePhrases);
     });
     const added = ids.filter((id) => !existingById.has(id)).length;
@@ -825,7 +895,7 @@ export async function debugFindItemViaGauchoImageSearch(itemId: string): Promise
   const token = await appToken();
   async function probeReference(reference: { id: string; storage_path: string }): Promise<FinderImageSearchProbe> {
     try {
-      const imageBase64 = await referenceImageBase64(reference.storage_path);
+      const imageBase64 = await gauchoReferenceImageBase64(reference.storage_path);
       const requested = config().imageSearchDepth;
       const items = await searchEbayByImage(imageBase64, requested, token || undefined, CARVING_SET_USED_CONDITION_ID);
       const match = items.find((item) => item.itemId.includes(itemId));
@@ -881,7 +951,11 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   // and share the same Gemini vision budget as pocket-knife/carving-set — so within a batch they're
   // sorted after those two (a stable sort, so relative discovered_at order is otherwise unchanged)
   // to make sure a budget/quota exhaustion mid-batch defers gaucho rows first, not the other tracks.
-  const rows = merged.slice().sort((a, b) => Number(gauchoKnifeGroupForPhrases(a.keyword_phrases || [])) - Number(gauchoKnifeGroupForPhrases(b.keyword_phrases || [])));
+  // gaucho-knife and maté-gourd rows are both newest, uncapped tracks sharing the same Gemini
+  // vision budget as pocket-knife/carving-set — see the comment this replaces for why they're
+  // sorted after those two within a batch (a budget/quota exhaustion mid-batch defers them first).
+  const isDeprioritizedTrack = (phrases: string[] | null) => gauchoKnifeGroupForPhrases(phrases || []) || mateGourdGroupForPhrases(phrases || []);
+  const rows = merged.slice().sort((a, b) => Number(isDeprioritizedTrack(a.keyword_phrases)) - Number(isDeprioritizedTrack(b.keyword_phrases)));
   const phraseSet = [...new Set(rows.flatMap((row) => row.keyword_phrases || []))];
   const keywordMaxCost = new Map<string, number | null>();
   if (phraseSet.length) {
@@ -892,7 +966,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   const pocketKnifeSettings = await getPocketKnifeSettings();
   // One cheap query for all three tracks' pause state (see updateProcessingPaused) rather than
   // conditionally fetching per category like the negative-keyword/reference-image blocks below —
-  // every batch potentially mixes all three, and this table only ever has 3 rows.
+  // every batch potentially mixes all four, and this table only ever has 4 rows.
   const { data: pausedRows, error: pausedError } = await supabaseAdmin.from("finder_processing_settings").select("category, paused");
   if (pausedError) throw new Error(pausedError.message);
   const pausedByCategory = new Map((pausedRows || []).map((row) => [row.category as FinderCategory, Boolean(row.paused)]));
@@ -913,10 +987,23 @@ export async function processPendingFinderItems(limit = config().batchSize) {
     gauchoNegativePhrases.push(...(negativeResult.data || []).map((row) => row.phrase));
     gauchoReferenceImages.push(...(referenceResult.data || []).map((row) => ({ id: row.id, storagePath: row.storage_path })));
   }
+  // Same shape as the gaucho block above, for the maté-gourd category.
+  const mateGourdNegativePhrases: string[] = [];
+  const mateGourdReferenceImages: { id: string; storagePath: string }[] = [];
+  if (rows.some((row) => mateGourdGroupForPhrases(row.keyword_phrases || []))) {
+    const [negativeResult, referenceResult] = await Promise.all([
+      supabaseAdmin.from("finder_mate_gourd_negative_keywords").select("phrase").eq("enabled", true),
+      supabaseAdmin.from("finder_reference_images").select("id, storage_path").eq("category", "mate_gourd").order("created_at"),
+    ]);
+    if (negativeResult.error) throw new Error(negativeResult.error.message);
+    if (referenceResult.error) throw new Error(referenceResult.error.message);
+    mateGourdNegativePhrases.push(...(negativeResult.data || []).map((row) => row.phrase));
+    mateGourdReferenceImages.push(...(referenceResult.data || []).map((row) => ({ id: row.id, storagePath: row.storage_path })));
+  }
   // Same "fetch once per batch, only when needed" shape as the gaucho block above — needed
-  // whenever this batch has a plain pocket-knife row (i.e. neither carving-set nor gaucho-knife).
+  // whenever this batch has a plain pocket-knife row (i.e. none of the other three tracks).
   const pocketKnifeNegativePhrases: string[] = [];
-  if (rows.some((row) => !carvingSetGroupForPhrases(row.keyword_phrases || []) && !gauchoKnifeGroupForPhrases(row.keyword_phrases || []))) {
+  if (rows.some((row) => !carvingSetGroupForPhrases(row.keyword_phrases || []) && !gauchoKnifeGroupForPhrases(row.keyword_phrases || []) && !mateGourdGroupForPhrases(row.keyword_phrases || []))) {
     const { data: pocketKnifeNegativeRows, error: pocketKnifeNegativeError } = await supabaseAdmin.from("finder_pocket_knife_negative_keywords").select("phrase").eq("enabled", true);
     if (pocketKnifeNegativeError) throw new Error(pocketKnifeNegativeError.message);
     pocketKnifeNegativePhrases.push(...(pocketKnifeNegativeRows || []).map((row) => row.phrase));
@@ -1168,10 +1255,73 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       await supabaseAdmin.from("finder_items").update({ status: attempts >= 3 ? "error" : "pending", reason: itemError instanceof Error ? itemError.message : "Vision analysis failed.", attempts, next_attempt_at: attempts >= 3 ? null : new Date(Date.now() + 15 * 60 * 1000).toISOString(), processed_at: attempts >= 3 ? new Date().toISOString() : null }).eq("ebay_item_id", row.ebay_item_id);
     }
   }
+  // Mirrors processGauchoKnifeRow above — a maté-gourd match is inherently a visual judgment, so
+  // every row reaching this function needs a vision call, and there's no maker-mismatch confidence
+  // floor (no maker-markings concept for this category, unlike gaucho-knife).
+  async function processMateGourdRow(row: FinderRow) {
+    if (row.run_id) runIds.add(row.run_id);
+    if (pausedByCategory.get("mate_gourd")) {
+      await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: "Maté-gourd vision processing is paused by staff." }).eq("ebay_item_id", row.ebay_item_id);
+      deferred++;
+      return;
+    }
+    if (!mateGourdReferenceImages.length) {
+      await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: "No reference images are configured for the maté-gourd finder yet." }).eq("ebay_item_id", row.ebay_item_id);
+      deferred++;
+      return;
+    }
+    if (visionExhaustedMessage) {
+      await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: visionExhaustedMessage }).eq("ebay_item_id", row.ebay_item_id);
+      deferred++;
+      return;
+    }
+    try {
+      const description = await getItemDescription(row.ebay_item_id, await tokenForLookup());
+      const negativeMatch = matchesNegativeKeyword(row.title, description, mateGourdNegativePhrases);
+      if (negativeMatch) {
+        const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: "rejected", reason: "negative_keyword_match", mate_gourd_match_notes: `Matched negative keyword: "${negativeMatch}"`, short_description: description, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
+        if (saveError) throw new Error(saveError.message);
+        processed++;
+        return;
+      }
+      const vision = await analyzeMateGourdMatch({ title: row.title, description, candidateImageUrl: row.image_url || "", referenceImages: mateGourdReferenceImages });
+      const matchedReferenceId = vision.matchedReferenceIndex != null ? mateGourdReferenceImages[vision.matchedReferenceIndex - 1]?.id ?? null : null;
+      const qualifies = vision.matches && vision.confidence >= mateGourdMatchConfidenceThreshold();
+      const reason = qualifies ? null : !vision.matches ? (vision.notes || "no_match") : "low_confidence";
+      let shippingValue = row.shipping_cost == null ? null : Number(row.shipping_cost);
+      let shippingSource = row.shipping_source;
+      if (shippingValue == null) {
+        const shipping = await getItemShippingCost(row.ebay_item_id, await tokenForLookup());
+        if (shipping.value != null && (shipping.currency === "" || shipping.currency === "USD")) { shippingValue = shipping.value; shippingSource = "lookup"; }
+      }
+      const totalCost = shippingValue != null ? Math.round((Number(row.item_price) + shippingValue) * 100) / 100 : null;
+      const { error: saveError } = await supabaseAdmin.from("finder_items").update({
+        status: qualifies ? "qualified" : "rejected", reason,
+        knife_count: 1, contains_folding_knife: false, confidence: vision.confidence, detection_source: "vision", item_category: "mate_gourd",
+        mate_gourd_match_confidence: vision.confidence, mate_gourd_matched_reference_id: matchedReferenceId, mate_gourd_match_notes: vision.notes,
+        shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null,
+        total_cost: totalCost, cost_per_knife: totalCost, short_description: description,
+        attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),
+      }).eq("ebay_item_id", row.ebay_item_id);
+      if (saveError) throw new Error(saveError.message);
+      if (qualifies && !row.run_id) runlessQualifiedIds.push(row.ebay_item_id);
+      processed++;
+    } catch (itemError) {
+      if (itemError instanceof VisionQuotaError || itemError instanceof VisionBudgetError) {
+        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: itemError.message }).eq("ebay_item_id", row.ebay_item_id);
+        deferred++;
+        visionExhaustedMessage = itemError.message;
+        return;
+      }
+      const attempts = row.attempts + 1;
+      await supabaseAdmin.from("finder_items").update({ status: attempts >= 3 ? "error" : "pending", reason: itemError instanceof Error ? itemError.message : "Vision analysis failed.", attempts, next_attempt_at: attempts >= 3 ? null : new Date(Date.now() + 15 * 60 * 1000).toISOString(), processed_at: attempts >= 3 ? new Date().toISOString() : null }).eq("ebay_item_id", row.ebay_item_id);
+    }
+  }
   async function processRow(row: FinderRow) {
     const carvingGroup = carvingSetGroupForPhrases(row.keyword_phrases || []);
     if (carvingGroup) return processCarvingSetRow(row, carvingGroup);
     if (gauchoKnifeGroupForPhrases(row.keyword_phrases || [])) return processGauchoKnifeRow(row);
+    if (mateGourdGroupForPhrases(row.keyword_phrases || [])) return processMateGourdRow(row);
     if (row.run_id) runIds.add(row.run_id);
     // Staff-paused (see updateProcessingPaused) — defer without spending an eBay/Gemini call or
     // counting against the row's attempts, same shape as the carving-set/gaucho-knife pause checks.
@@ -1275,10 +1425,11 @@ export async function finderTick(date = new Date()) {
   // "failed" (and the dashboard stops showing it as active) within a minute of going stale, rather
   // than waiting for the next automatic scan or a staff member clicking "Run now".
   await reconcileOrphanedRuns();
-  const [pocketSchedule, carvingSchedule, gauchoSchedule] = await Promise.all([
+  const [pocketSchedule, carvingSchedule, gauchoSchedule, mateGourdSchedule] = await Promise.all([
     getScheduleSettings("pocket_knife"),
     getScheduleSettings("carving_set"),
     getScheduleSettings("gaucho_knife"),
+    getScheduleSettings("mate_gourd"),
   ]);
   const runs: Partial<Record<FinderCategory, Awaited<ReturnType<typeof startFinderRun>>>> = {};
   // Each finder's automatic scan is independently scheduled and genuinely category-scoped now
@@ -1287,6 +1438,7 @@ export async function finderTick(date = new Date()) {
   if (isScheduledRunTime(pocketSchedule, date)) runs.pocket_knife = await startFinderRun("scheduled", `scheduled:pocket_knife:${easternDateKey(date)}`, "pocket_knife");
   if (isScheduledRunTime(carvingSchedule, date)) runs.carving_set = await startFinderRun("scheduled", `scheduled:carving_set:${easternDateKey(date)}`, "carving_set");
   if (isScheduledRunTime(gauchoSchedule, date)) runs.gaucho_knife = await startFinderRun("scheduled", `scheduled:gaucho_knife:${easternDateKey(date)}`, "gaucho_knife");
+  if (isScheduledRunTime(mateGourdSchedule, date)) runs.mate_gourd = await startFinderRun("scheduled", `scheduled:mate_gourd:${easternDateKey(date)}`, "mate_gourd");
   const queue = await processPendingFinderItems();
   return { runs, queue };
 }
@@ -1315,14 +1467,19 @@ export async function finderOverview(category?: FinderCategory) {
   const keywords = category
     ? (allKeywords.data || []).filter((keyword) => keywordCategory(keyword.phrase) === category)
     : (allKeywords.data || []);
-  // Gaucho-knife's negative-keyword filter and staff-uploaded reference images are gaucho-only —
-  // the pocket-knife pipeline has its own separate negative-keyword table (no reference images,
-  // since pocket-knife discovery is keyword-driven, not image-search-driven) and carving-set has
-  // neither.
+  // Gaucho-knife's and maté-gourd's negative-keyword filters and staff-uploaded reference images
+  // are each their own category's — the pocket-knife pipeline has its own separate negative-keyword
+  // table (no reference images, since pocket-knife discovery is keyword-driven, not
+  // image-search-driven) and carving-set has neither.
   const [negativeKeywords, referenceImages] = category === "gaucho_knife"
     ? await Promise.all([
         supabaseAdmin.from("finder_gaucho_negative_keywords").select("*").order("created_at"),
         supabaseAdmin.from("finder_reference_images").select("*").eq("category", "gaucho_knife").order("created_at"),
+      ])
+    : category === "mate_gourd"
+    ? await Promise.all([
+        supabaseAdmin.from("finder_mate_gourd_negative_keywords").select("*").order("created_at"),
+        supabaseAdmin.from("finder_reference_images").select("*").eq("category", "mate_gourd").order("created_at"),
       ])
     : category === "pocket_knife"
     ? [await supabaseAdmin.from("finder_pocket_knife_negative_keywords").select("*").order("created_at"), { data: [], error: null }]
@@ -1341,11 +1498,12 @@ export async function finderOverview(category?: FinderCategory) {
   const notifyRecipients = notifyRecipientRows.data || [];
   const pocketKnifeSettings = await getPocketKnifeSettings();
   const gauchoSettings = category === "gaucho_knife" ? await getGauchoSettings() : DEFAULT_GAUCHO_SETTINGS;
+  const mateGourdSettings = category === "mate_gourd" ? await getMateGourdSettings() : DEFAULT_MATE_GOURD_SETTINGS;
   return {
     keywords, results: results.data || [], runs: runs.data || [],
     negativeKeywords: negativeKeywords.data || [], referenceImages: referenceImagesWithUrls,
     counts: { pending: pending.count || 0, rejected: rejected.count || 0, qualified: qualified.count || 0 },
-    // App-wide (not scoped to `category`) — every eBay call this app makes, across all three
+    // App-wide (not scoped to `category`) — every eBay call this app makes, across all four
     // finder pipelines plus bidding and the manual listing importer, shares one daily quota.
     ebayCallsToday,
     notify: {
@@ -1383,7 +1541,7 @@ export async function finderOverview(category?: FinderCategory) {
         return key.length > 10 ? `${key.slice(0, 6)}…${key.slice(-4)}` : `${key.slice(0, 2)}…`;
       })(),
     },
-    settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: pocketKnifeSettings.maxCostPerKnife, gauchoKeywordSearchEnabled: gauchoSettings.keywordSearchEnabled },
+    settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: pocketKnifeSettings.maxCostPerKnife, gauchoKeywordSearchEnabled: gauchoSettings.keywordSearchEnabled, mateGourdKeywordSearchEnabled: mateGourdSettings.keywordSearchEnabled },
   };
 }
 

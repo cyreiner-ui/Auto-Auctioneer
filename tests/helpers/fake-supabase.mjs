@@ -22,6 +22,7 @@ function matchesFilters(row, filters) {
     if (filter.type === "is") return (value ?? null) === filter.val;
     if (filter.type === "not" && filter.op === "is") return !((value ?? null) === filter.val);
     if (filter.type === "not" && filter.op === "ov") return !(Array.isArray(value) && value.some((v) => filter.val.includes(v)));
+    if (filter.type === "not" && filter.op === "in") return !filter.val.includes(value);
     if (filter.type === "lte") return value != null && value <= filter.val;
     if (filter.type === "gte") return value != null && value >= filter.val;
     if (filter.type === "overlaps") return Array.isArray(value) && value.some((v) => filter.val.includes(v));
@@ -57,14 +58,31 @@ class Builder {
   lte(col, val) { this.filters.push({ type: "lte", col, val }); return this; }
   gte(col, val) { this.filters.push({ type: "gte", col, val }); return this; }
   overlaps(col, val) { this.filters.push({ type: "overlaps", col, val }); return this; }
-  // Minimal PostgREST-style `.or("col.is.null,col.eq.value")` parser — only supports the
-  // `is.null` / `eq.<value>` clause shapes this test suite's callers actually use.
+  // Minimal PostgREST-style `.or("col.is.null,col.eq.value")` parser — supports the `is.null` /
+  // `eq.<value>` / `neq.<value>` / `not.in.(v1,v2)` clause shapes this test suite's callers
+  // actually use. Splits on top-level commas only (paren-depth aware), since `not.in.(v1,v2)`'s
+  // own value list uses commas too.
   or(expression) {
-    const clauses = expression.split(",").map((clause) => {
-      const [col, op, rawVal] = clause.split(".");
-      if (op === "is") return { type: "is", col, val: rawVal === "null" ? null : rawVal };
-      if (op === "eq") return { type: "eq", col, val: rawVal };
-      if (op === "neq") return { type: "neq", col, val: rawVal };
+    const parts = [];
+    let depth = 0, start = 0;
+    for (let i = 0; i < expression.length; i++) {
+      const char = expression[i];
+      if (char === "(") depth++;
+      else if (char === ")") depth--;
+      else if (char === "," && depth === 0) { parts.push(expression.slice(start, i)); start = i + 1; }
+    }
+    parts.push(expression.slice(start));
+    const clauses = parts.map((clause) => {
+      const segments = clause.split(".");
+      if (segments.length === 3) {
+        const [col, op, rawVal] = segments;
+        if (op === "is") return { type: "is", col, val: rawVal === "null" ? null : rawVal };
+        if (op === "eq") return { type: "eq", col, val: rawVal };
+        if (op === "neq") return { type: "neq", col, val: rawVal };
+      }
+      if (segments.length === 4 && segments[1] === "not" && segments[2] === "in") {
+        return { type: "not", op: "in", col: segments[0], val: segments[3].replace(/^\(|\)$/g, "").split(",") };
+      }
       throw new Error(`Unsupported .or() clause in fake-supabase: "${clause}"`);
     });
     this.filters.push({ type: "or", clauses });

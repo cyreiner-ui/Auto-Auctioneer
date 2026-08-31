@@ -828,6 +828,74 @@ test("processPendingFinderItems does not spend an eBay call on a gaucho row once
   });
 });
 
+function mateGourdPendingItem(overrides = {}) {
+  return {
+    ebay_item_id: "v1|9|0", run_id: null, title: "Antique Silver Mate Gourd", short_description: "",
+    image_url: "https://i.ebayimg.com/9.jpg", item_price: 60, shipping_cost: 12, buying_options: ["FIXED_PRICE"],
+    keyword_phrases: ["mate gourd"], status: "pending", attempts: 0,
+    next_attempt_at: new Date(Date.now() - 60_000).toISOString(), discovered_at: new Date(Date.now() - 60_000).toISOString(),
+    ...overrides,
+  };
+}
+
+async function withMateGourdFakeBackend(seed, fn) {
+  return withFakeBackend({ finder_reference_images: [{ id: "gourd-ref-1", storage_path: "gourdref1.jpg", category: "mate_gourd", created_at: "2026-01-01" }], ...seed }, async (fake) => {
+    fake.setFile("finder-reference-images", "gourdref1.jpg", [4, 5, 6], "image/png");
+    await fn(fake);
+  });
+}
+
+test("processPendingFinderItems rejects a mate-gourd match below the confidence floor instead of qualifying on vision.matches alone", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withMateGourdFakeBackend({ finder_items: [mateGourdPendingItem()] }, async (fake) => {
+      await withFetch([tokenRoute, itemShippingRoute(null), imageRoute, geminiRoute({ matches: true, confidence: 0.75, notes: "Same broad style; specific metalwork differs." })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected");
+        assert.equal(item.reason, "low_confidence");
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems still qualifies a high-confidence mate-gourd match", async (t) => {
+  await withEnv(ENV, async () => {
+    const sent = [];
+    mockMailer(t, sent);
+    await withMateGourdFakeBackend({ finder_items: [mateGourdPendingItem()] }, async (fake) => {
+      await withFetch([tokenRoute, itemShippingRoute(null), imageRoute, geminiRoute({ matches: true, confidence: 0.95, matchedReferenceIndex: 1, notes: "Matches reference 1." })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "qualified");
+        assert.equal(item.mate_gourd_matched_reference_id, "gourd-ref-1");
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems rejects a mate-gourd candidate matching a negative keyword before spending a Gemini call", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withMateGourdFakeBackend({
+      finder_mate_gourd_negative_keywords: [{ id: "n1", phrase: "coffee mug", enabled: true, created_at: "2026-01-01" }],
+      finder_items: [mateGourdPendingItem({ title: "Ceramic Coffee Mug" })],
+    }, async (fake) => {
+      let geminiCalled = false;
+      await withFetch([tokenRoute, itemShippingRoute(null), { test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => { geminiCalled = true; return jsonResponse({}); } }], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        assert.equal(geminiCalled, false, "a negative-keyword match must reject before ever spending a Gemini call");
+        const [item] = fake.tables.finder_items;
+        assert.equal(item.status, "rejected");
+        assert.equal(item.reason, "negative_keyword_match");
+      });
+    });
+  });
+});
+
 test("a vision-classified Swiss Army multi-tool qualifies under the stricter $1/knife cap but not merely under the normal $4.00 cap", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);

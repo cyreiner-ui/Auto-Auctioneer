@@ -9,7 +9,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "npm run build && node --experimental-strip-types --import ./tests/helpers/register-ts-resolve.mjs --test tests/core.test.mjs tests/rendered-html.test.mjs tests/bidding-contract.test.mjs tests/finder-contract.test.mjs tests/carving-set-finder.test.mjs tests/finder-category-split.test.mjs tests/gixen-client.test.mjs tests/finder-notify.test.mjs tests/ebay-finder.test.mjs tests/ebay-call-tracker.test.mjs tests/gemini-vision.test.mjs tests/finder-service.test.mjs tests/finder-routes.test.mjs",
+    "test": "npm run build && node --experimental-strip-types --import ./tests/helpers/register-ts-resolve.mjs --test tests/core.test.mjs tests/rendered-html.test.mjs tests/bidding-contract.test.mjs tests/finder-contract.test.mjs tests/carving-set-finder.test.mjs tests/finder-category-split.test.mjs tests/gixen-client.test.mjs tests/finder-notify.test.mjs tests/ebay-finder.test.mjs tests/ebay-call-tracker.test.mjs tests/gemini-vision.test.mjs tests/finder-service.test.mjs tests/finder-routes.test.mjs tests/mate-gourd-finder.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "scheduler:dev": "wrangler dev --config scheduler/wrangler.jsonc",
     "scheduler:deploy": "wrangler deploy --config scheduler/wrangler.jsonc"
