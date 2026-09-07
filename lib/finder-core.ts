@@ -20,6 +20,20 @@ export const FINDER_DEFAULTS = {
   // sellers' new listings for the same generic phrase. Only pocket-knife keywords get this wider
   // supplemental page; carving-set/gaucho-knife keep the narrower default above.
   pocketKnifeNewlyListedResultsPerKeyword: 200,
+  // Third supplemental pass, sorted by soonest-ending instead of relevance or listing date — see
+  // searchEbayKeyword's sort param comment in lib/ebay-finder.ts. Best-match ranking is biased
+  // toward listings with existing engagement (bids/watchers/sales), and newlyListed only covers
+  // whatever's been posted since the last scan — together they systematically miss an auction
+  // that's a few days old, has drawn little to no attention, and is about to close: exactly the
+  // kind of underpriced listing a buyer manually sorting eBay by "Time: ending soonest" would find,
+  // and exactly the gap staff reported when the finder surfaced far fewer candidates than a manual
+  // search with the same keywords. Same shallow depth as newlyListedResultsPerKeyword — this only
+  // needs to catch whatever's ending soon, not compete with the main pass's ranking depth.
+  endingSoonestResultsPerKeyword: 50,
+  // Mirrors pocketKnifeNewlyListedResultsPerKeyword's reasoning: pocket-knife's generic brand/lot
+  // phrases have far more listings ending soon on any given day than carving-set/gaucho-knife's
+  // narrower phrasing, so this category gets the same wider window.
+  pocketKnifeEndingSoonestResultsPerKeyword: 200,
   // searchEbayByImage paginates the same way searchEbayKeyword does (offset/limit, stopping once
   // a page comes back short — see finderPages below), so this isn't limited by eBay's searchByImage
   // `total` field being documented as unreliable for pagination use; that field is never read here.
