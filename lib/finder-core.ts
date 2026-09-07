@@ -6,6 +6,13 @@ export const FINDER_DEFAULTS = {
   maxCostPerKnife: 4.0,
   confidence: 0.9,
   resultsPerKeyword: 500,
+  // Pocket-knife-specific override of the best-match depth above — staff reported the finder
+  // still surfacing far fewer candidates than a manual eBay search with the same keywords even
+  // after the newlyListed/endingSoonest supplemental passes below existed, so this raises the
+  // primary pass's own depth for pocket-knife's generic brand/lot phrases too (same
+  // high-volume-keyword reasoning as pocketKnifeNewlyListedResultsPerKeyword). Well within the
+  // shared eBay Browse API budget — see EBAY_DAILY_CALL_LIMIT in lib/ebay-call-tracker.ts.
+  pocketKnifeResultsPerKeyword: 800,
   // A small supplemental page, sorted by newlyListed instead of the default best-match ranking —
   // see searchEbayKeyword's sort param comment in lib/ebay-finder.ts for why best-match alone can
   // miss a brand-new, low-engagement listing entirely. Deliberately shallow (a single ~50-item
@@ -18,8 +25,9 @@ export const FINDER_DEFAULTS = {
   // phrasing — a real report (2026-08-26) showed a still-active, still-unqualified auction already
   // pushed past the default 50-item newlyListed window within about 2 days, purely from other
   // sellers' new listings for the same generic phrase. Only pocket-knife keywords get this wider
-  // supplemental page; carving-set/gaucho-knife keep the narrower default above.
-  pocketKnifeNewlyListedResultsPerKeyword: 200,
+  // supplemental page; carving-set/gaucho-knife keep the narrower default above. Doubled from 200
+  // to 400 alongside pocketKnifeResultsPerKeyword above — same "still not enough volume" report.
+  pocketKnifeNewlyListedResultsPerKeyword: 400,
   // Third supplemental pass, sorted by soonest-ending instead of relevance or listing date — see
   // searchEbayKeyword's sort param comment in lib/ebay-finder.ts. Best-match ranking is biased
   // toward listings with existing engagement (bids/watchers/sales), and newlyListed only covers
@@ -32,8 +40,22 @@ export const FINDER_DEFAULTS = {
   endingSoonestResultsPerKeyword: 50,
   // Mirrors pocketKnifeNewlyListedResultsPerKeyword's reasoning: pocket-knife's generic brand/lot
   // phrases have far more listings ending soon on any given day than carving-set/gaucho-knife's
-  // narrower phrasing, so this category gets the same wider window.
-  pocketKnifeEndingSoonestResultsPerKeyword: 200,
+  // narrower phrasing, so this category gets the same wider window. Doubled alongside it.
+  pocketKnifeEndingSoonestResultsPerKeyword: 400,
+  // Depth for the structured "Brand" category browse below (searchEbayBrandCategory) — this
+  // pool is already narrowed to one brand within one category, so it doesn't need the same depth
+  // as the free-text passes above.
+  pocketKnifeBrandCategoryResultsPerKeyword: 200,
+  // eBay category ID for "Collectible Folding Knives" (Collectibles > Knives, Swords & Blades >
+  // Folding Knives) — looked up 2026-09-07 the same way CARVING_SET_CATEGORY_ID was. Paired with
+  // POCKET_KNIFE_BRAND_ASPECT_BY_PHRASE below in a structured-field ("Brand" item specific) browse
+  // that runs alongside the free-text passes for pocket-knife's named-brand keywords — a title-only
+  // search misses any listing where the seller filled in Brand as an item specific but wrote a
+  // vague title ("Estate lot of vintage pocket knives") that never names the brand at all.
+  // Env-overridable (EBAY_FINDER_POCKET_KNIFE_BRAND_CATEGORY_ID — see config() in
+  // lib/finder-service.ts) in case eBay's taxonomy shifts this id or a different category proves
+  // more accurate in practice.
+  pocketKnifeBrandCategoryId: "182981",
   // searchEbayByImage paginates the same way searchEbayKeyword does (offset/limit, stopping once
   // a page comes back short — see finderPages below), so this isn't limited by eBay's searchByImage
   // `total` field being documented as unreliable for pagination use; that field is never read here.
@@ -130,6 +152,31 @@ const brandNameList = [
   "elk\\s*ridge", "opinel", "colt", "mossy\\s*oak", "tac\\s*force", "remington", "zippo",
 ];
 const brandNames = brandNameList.join("|");
+// Maps a subset of the pocket-knife pipeline's brand-lot finder_keywords phrases (see migration
+// 010_finder_brand_keywords.sql and its follow-ups) to the literal eBay "Brand" item-specific
+// value sellers use for that brand — not every brandNameList regex fragment above is an actual
+// eBay-recognized Brand aspect string (e.g. "s&w" isn't; "Smith & Wesson" is; "old\\s*timer" isn't
+// a literal string at all), so this is deliberately its own short, curated list rather than
+// derived from brandNameList. Used by startFinderRun's scanKeyword (lib/finder-service.ts) to run
+// an additional structured-field category browse (searchEbayBrandCategory, paired with
+// FINDER_DEFAULTS.pocketKnifeBrandCategoryId) for exactly these keywords — a title-only text
+// search misses any listing where the seller filled in Brand correctly as an item specific but
+// wrote a vague title ("Estate lot of vintage pocket knives") that never names the brand at all.
+export const POCKET_KNIFE_BRAND_ASPECT_BY_PHRASE: Record<string, string> = {
+  "buck knife lot": "Buck",
+  "gerber knife lot": "Gerber",
+  "kershaw knife lot": "Kershaw",
+  "schrade knife lot": "Schrade",
+  "camillus knife lot": "Camillus",
+  "boker knife lot": "Boker",
+  "m-tech knife lot": "M-Tech",
+  "old timer knife lot": "Old Timer",
+  "ozark trail knife lot": "Ozark Trail",
+  "colt pocket knife lot": "Colt",
+  "remington pocket knife lot": "Remington",
+  "smith and wesson knife lot": "Smith & Wesson",
+  "winchester pocket knife lot": "Winchester",
+};
 // digit -> up to 2 filler words -> known brand -> up to 3 filler words -> knife word. The "lot "
 // lookbehind keeps this out of the same auction-lot-numbering trap componentPattern below avoids
 // (e.g. "Lot 45 folding pocket knife" is a lot number, not a count).
