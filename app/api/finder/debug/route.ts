@@ -19,10 +19,15 @@ function summarize(itemId: string, keywordProbes: Awaited<ReturnType<typeof debu
   const base = { itemId, failedKeywords, imageSearchConfigured: imageProbes.length > 0, imageSearchesRun: imageProbes.length, failedImageSearches };
   if (imageMatch) return { ...base, found: true as const, keyword: null, matchedTitle: imageMatch.matchedTitle, foundVia: "image_search" as const };
   // keywordMatch.foundVia distinguishes eBay's default relevance ranking from the supplemental
-  // newlyListed pass (see debugFindItemAcrossKeywords) — surfaced here so staff can tell "this
-  // keyword's normal best-match search would have found it" from "only the newlyListed
+  // newlyListed/endingSoonest passes (see debugFindItemAcrossKeywords) — surfaced here so staff
+  // can tell "this keyword's normal best-match search would have found it" from "only a
   // supplemental pass caught this," which matters for judging whether a keyword needs adjusting.
-  if (keywordMatch) return { ...base, found: true as const, keyword: keywordMatch.phrase, matchedTitle: keywordMatch.matchedTitle, foundVia: (keywordMatch.foundVia === "newly_listed" ? "keyword_newly_listed" : "keyword") as const };
+  if (keywordMatch) {
+    const foundVia = keywordMatch.foundVia === "newly_listed" ? "keyword_newly_listed" as const
+      : keywordMatch.foundVia === "ending_soonest" ? "keyword_ending_soonest" as const
+      : "keyword" as const;
+    return { ...base, found: true as const, keyword: keywordMatch.phrase, matchedTitle: keywordMatch.matchedTitle, foundVia };
+  }
   return { ...base, found: false as const };
 }
 

@@ -141,9 +141,10 @@ test("startFinderRun(category) only scans that category's enabled keywords", asy
         await startFinderRun("manual", "run-carving-only", "carving_set");
         // searchEbayKeyword appends exclusion terms (see FINDER_DEFAULTS.excludeTerms) to every
         // query, so match on the keyword being searched, not the exact resulting query string.
-        // Each of the 2 keywords is searched twice now (the best-match pass, plus the
-        // supplemental newlyListed pass — see scanKeyword in lib/finder-service.ts), so 4 total.
-        assert.equal(searchedPhrases.length, 4);
+        // Each of the 2 keywords is searched three times now (the best-match pass, plus the
+        // supplemental newlyListed and endingSoonest passes — see scanKeyword in
+        // lib/finder-service.ts), so 6 total.
+        assert.equal(searchedPhrases.length, 6);
         assert.ok(searchedPhrases.every((phrase) => phrase.startsWith("sheffield carving set") || phrase.startsWith("german carving set")), "a carving-set-scoped run must never search the pocket-knife keyword");
         // A carving-set-scoped run also browses the "Flatware Sets" category directly (see
         // CARVING_SET_CATEGORY_ID) — a separate lead source alongside the phrase searches above,
@@ -163,8 +164,9 @@ test("startFinderRun(category) only scans that category's enabled keywords", asy
         { test: (url) => url.startsWith(SEARCH_URL), respond: (url) => { searchedPhrases.push(new URL(url).searchParams.get("q")); return jsonResponse({ itemSummaries: [] }); } },
       ], async () => {
         await startFinderRun("manual", "run-pocket-only", "pocket_knife");
-        // The 1 enabled keyword is searched twice (best-match + newlyListed), so 2 total.
-        assert.equal(searchedPhrases.length, 2);
+        // The 1 enabled keyword is searched three times (best-match + newlyListed +
+        // endingSoonest), so 3 total.
+        assert.equal(searchedPhrases.length, 3);
         assert.ok(searchedPhrases[0].startsWith("knife lot"), "a pocket-knife-scoped run must never search the carving-set keywords");
       });
     });
@@ -207,10 +209,11 @@ test("the Flatware Sets category browse stays capped at 1500 even when EBAY_FIND
       ], async () => {
         await startFinderRun("manual", "run-carving-budget-check", "carving_set");
         // The overridden env var does shrink the keyword search's own page size (the best-match
-        // pass); the supplemental newlyListed pass runs alongside it at its own independent
-        // default page size, which also happens to be 50 (FINDER_DEFAULTS.newlyListedResultsPerKeyword) —
-        // hence two 50s here, not one...
-        assert.deepEqual(keywordLimits, [50, 50]);
+        // pass); the supplemental newlyListed and endingSoonest passes run alongside it at their
+        // own independent default page sizes, which also happen to be 50 each
+        // (FINDER_DEFAULTS.newlyListedResultsPerKeyword/endingSoonestResultsPerKeyword) — hence
+        // three 50s here, not one...
+        assert.deepEqual(keywordLimits, [50, 50, 50]);
         // ...but the category browse pages in fixed 200-per-request chunks up to its own
         // independent 1500 cap (see CARVING_SET_CATEGORY_BROWSE_LIMIT), unaffected either way.
         assert.deepEqual(categoryBrowseLimits, [200, 200, 200, 200, 200, 200, 200, 100]);
