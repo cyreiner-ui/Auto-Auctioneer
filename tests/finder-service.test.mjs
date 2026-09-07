@@ -320,6 +320,76 @@ test("startFinderRun is idempotent for the same run key", async (t) => {
   });
 });
 
+test("startFinderRun paginates a pocket-knife keyword's best-match/newlyListed/endingSoonest passes to their wider, pocket-knife-specific depths", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const limitsBySort = { none: [], newlyListed: [], endingSoonest: [] };
+    await withFakeBackend({
+      finder_keywords: [{ id: "k1", phrase: "pocket knife lot", enabled: true, created_at: "2026-01-01" }],
+    }, async () => {
+      await withFetch([
+        tokenRoute,
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: (url) => {
+            const params = new URL(url).searchParams;
+            const limit = Number(params.get("limit"));
+            const offset = Number(params.get("offset"));
+            const sort = params.get("sort") || "none";
+            limitsBySort[sort].push(limit);
+            // Return a full page every time so pagination keeps going through every planned page
+            // instead of stopping early — otherwise this test couldn't tell "reached the new,
+            // wider depth" apart from "stopped after the first page".
+            return jsonResponse({ itemSummaries: Array.from({ length: limit }, (_, i) => ({ itemId: `v1|${sort}-${offset + i}|0`, title: `Item ${offset + i}`, itemWebUrl: `https://www.ebay.com/itm/${offset + i}` })) });
+          },
+        },
+      ], async () => {
+        await startFinderRun("manual", "run-pocket-knife-depth");
+        // FINDER_DEFAULTS.pocketKnifeResultsPerKeyword (800) in 200-item pages.
+        assert.deepEqual(limitsBySort.none, [200, 200, 200, 200]);
+        // FINDER_DEFAULTS.pocketKnifeNewlyListedResultsPerKeyword/pocketKnifeEndingSoonestResultsPerKeyword (400 each).
+        assert.deepEqual(limitsBySort.newlyListed, [200, 200]);
+        assert.deepEqual(limitsBySort.endingSoonest, [200, 200]);
+      });
+    });
+  });
+});
+
+test("startFinderRun runs a fourth, brand-category-aspect search only for keywords with a mapped eBay Brand", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const requests = [];
+    await withFakeBackend({
+      finder_keywords: [
+        { id: "k1", phrase: "buck knife lot", enabled: true, created_at: "2026-01-01" },
+        { id: "k2", phrase: "pocket knife lot", enabled: true, created_at: "2026-01-02" },
+      ],
+    }, async () => {
+      await withFetch([
+        tokenRoute,
+        {
+          test: (url) => url.startsWith(SEARCH_URL),
+          respond: (url) => { requests.push(new URL(url)); return jsonResponse({ itemSummaries: [] }); },
+        },
+      ], async () => {
+        await startFinderRun("manual", "run-brand-category");
+        const brandCategoryRequests = requests.filter((url) => url.searchParams.has("aspect_filter"));
+        // Only "buck knife lot" has a mapped eBay Brand (see POCKET_KNIFE_BRAND_ASPECT_BY_PHRASE in
+        // lib/finder-core.ts) — "pocket knife lot" is generic and gets no fourth pass.
+        assert.equal(brandCategoryRequests.length, 1, "the brand-category browse must run once, only for the mapped keyword");
+        const [brandCategoryUrl] = brandCategoryRequests;
+        assert.equal(brandCategoryUrl.searchParams.get("category_ids"), "182981");
+        assert.equal(brandCategoryUrl.searchParams.get("aspect_filter"), "categoryId:182981,Brand:{Buck}");
+        assert.equal(brandCategoryUrl.searchParams.get("sort"), "newlyListed");
+        assert.equal(brandCategoryUrl.searchParams.get("q"), null, "the brand-category browse is a structured-field filter, not a title search");
+        // 4 requests total: "buck knife lot" (best-match + newlyListed + endingSoonest + brand
+        // category) plus "pocket knife lot" (best-match + newlyListed + endingSoonest, no brand pass).
+        assert.equal(requests.length, 7);
+      });
+    });
+  });
+});
+
 test("startFinderRun fetches the eBay app token once and reuses it across every keyword search", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);

@@ -9,7 +9,7 @@ type Result = {
   keyword?: string | null;
   matchedTitle?: string | null;
   failedKeywords: string[];
-  foundVia?: "keyword" | "keyword_newly_listed" | "keyword_ending_soonest" | "image_search";
+  foundVia?: "keyword" | "keyword_newly_listed" | "keyword_ending_soonest" | "keyword_brand_category" | "image_search";
   imageSearchConfigured: boolean;
   imageSearchesRun: number;
   failedImageSearches: number;
@@ -50,6 +50,8 @@ export default function FinderDebugPanel() {
             ? <>was found under keyword “{result.keyword}”, but only via its newly-listed search — “{result.matchedTitle}”.</>
             : result.foundVia === "keyword_ending_soonest"
             ? <>was found under keyword “{result.keyword}”, but only via its ending-soonest search — “{result.matchedTitle}”.</>
+            : result.foundVia === "keyword_brand_category"
+            ? <>was found under keyword “{result.keyword}”, but only via its brand-category browse — “{result.matchedTitle}”.</>
             : <>was found under keyword “{result.keyword}” — “{result.matchedTitle}”.</>
           : <>was not in results for any enabled keyword{result.imageSearchConfigured ? " or the gaucho-knife image search" : ""}.</>}
         {result.failedKeywords.length > 0 && <> ({result.failedKeywords.length} keyword search{result.failedKeywords.length === 1 ? "" : "es"} failed and couldn&apos;t be checked: {result.failedKeywords.join(", ")})</>}

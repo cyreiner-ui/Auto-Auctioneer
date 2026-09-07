@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { appToken, getItemDescription, getItemShippingCost, searchEbayByImage, searchEbayCategoryNewlyListed, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
-import { analyzeListingText, calculateDeal, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isScheduledRunTime, isShippingLookupWorthwhile, matchesNegativeKeyword, monthKey, resolveMaxCostPerKnife, type FinderScheduleSettings } from "./finder-core";
+import { appToken, getItemDescription, getItemShippingCost, searchEbayBrandCategory, searchEbayByImage, searchEbayCategoryNewlyListed, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
+import { analyzeListingText, calculateDeal, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isScheduledRunTime, isShippingLookupWorthwhile, matchesNegativeKeyword, monthKey, POCKET_KNIFE_BRAND_ASPECT_BY_PHRASE, resolveMaxCostPerKnife, type FinderScheduleSettings } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
 import { ebayBudgetExceeded, getEbayApiCallsToday } from "./ebay-call-tracker";
 import {
@@ -375,10 +375,13 @@ const config = () => {
     swissArmyMaxCost: Number(process.env.EBAY_FINDER_SWISS_ARMY_MAX_PER_KNIFE || FINDER_DEFAULTS.swissArmyMaxCostPerKnife),
     confidence: Number(process.env.GEMINI_CONFIDENCE_THRESHOLD || FINDER_DEFAULTS.confidence),
     searchDepth: Number(process.env.EBAY_FINDER_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.resultsPerKeyword),
+    pocketKnifeSearchDepth: Number(process.env.EBAY_FINDER_POCKET_KNIFE_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.pocketKnifeResultsPerKeyword),
     newlyListedSearchDepth: Number(process.env.EBAY_FINDER_NEWLY_LISTED_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.newlyListedResultsPerKeyword),
     pocketKnifeNewlyListedSearchDepth: Number(process.env.EBAY_FINDER_POCKET_KNIFE_NEWLY_LISTED_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.pocketKnifeNewlyListedResultsPerKeyword),
     endingSoonestSearchDepth: Number(process.env.EBAY_FINDER_ENDING_SOONEST_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.endingSoonestResultsPerKeyword),
     pocketKnifeEndingSoonestSearchDepth: Number(process.env.EBAY_FINDER_POCKET_KNIFE_ENDING_SOONEST_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.pocketKnifeEndingSoonestResultsPerKeyword),
+    pocketKnifeBrandCategorySearchDepth: Number(process.env.EBAY_FINDER_POCKET_KNIFE_BRAND_CATEGORY_RESULTS_PER_KEYWORD || FINDER_DEFAULTS.pocketKnifeBrandCategoryResultsPerKeyword),
+    pocketKnifeBrandCategoryId: process.env.EBAY_FINDER_POCKET_KNIFE_BRAND_CATEGORY_ID || FINDER_DEFAULTS.pocketKnifeBrandCategoryId,
     imageSearchDepth: Number(process.env.EBAY_FINDER_IMAGE_SEARCH_RESULTS_PER_REFERENCE || FINDER_DEFAULTS.imageSearchResultsPerReference),
     batchSize: Number(process.env.GEMINI_BATCH_SIZE || FINDER_DEFAULTS.batchSize),
     processConcurrency: Number(process.env.FINDER_PROCESS_CONCURRENCY || FINDER_DEFAULTS.processConcurrency),
@@ -683,12 +686,18 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
         const conditionId = carvingGroup ? CARVING_SET_USED_CONDITION_ID : undefined;
         // Pocket-knife's generic brand/lot phrases see far more competing new (or soon-to-end)
         // listings than carving-set/gaucho-knife's narrower phrasing — see
-        // FINDER_DEFAULTS.pocketKnifeNewlyListedResultsPerKeyword/pocketKnifeEndingSoonestResultsPerKeyword.
+        // FINDER_DEFAULTS.pocketKnifeResultsPerKeyword/pocketKnifeNewlyListedResultsPerKeyword/
+        // pocketKnifeEndingSoonestResultsPerKeyword.
         const isPocketKnife = keywordCategory(keyword.phrase) === "pocket_knife";
+        const bestMatchDepth = isPocketKnife ? config().pocketKnifeSearchDepth : config().searchDepth;
         const newlyListedDepth = isPocketKnife ? config().pocketKnifeNewlyListedSearchDepth : config().newlyListedSearchDepth;
         const endingSoonestDepth = isPocketKnife ? config().pocketKnifeEndingSoonestSearchDepth : config().endingSoonestSearchDepth;
-        const [bestMatch, newlyListed, endingSoonest] = await Promise.all([
-          searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms, conditionId),
+        // Only set for pocket-knife's named-brand keywords (see POCKET_KNIFE_BRAND_ASPECT_BY_PHRASE
+        // in lib/finder-core.ts) — every other keyword (generic pocket-knife lot phrases,
+        // carving-set/gaucho-knife/maté-gourd phrases) has no single eBay Brand aspect to filter on.
+        const brandAspect = isPocketKnife ? POCKET_KNIFE_BRAND_ASPECT_BY_PHRASE[keyword.phrase] : undefined;
+        const searches = [
+          searchEbayKeyword(keyword.phrase, bestMatchDepth, token || undefined, extraExcludeTerms, conditionId),
           // Supplemental pass, sorted chronologically instead of by relevance — see
           // searchEbayKeyword's sort param comment for why the best-match pass above can miss a
           // brand-new, low-engagement listing outright. Deliberately shallow (see
@@ -700,12 +709,20 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
           // together still miss an aged, low-engagement auction that's about to close. Same merge
           // and same "harmless no-op if already caught" behavior as the newlyListed pass above.
           searchEbayKeyword(keyword.phrase, endingSoonestDepth, token || undefined, extraExcludeTerms, conditionId, "endingSoonest"),
-        ]);
+        ];
+        // Fourth supplemental pass, for named-brand keywords only — a structured "Brand" item
+        // specific browse instead of a title search at all. See searchEbayBrandCategory's comment
+        // in lib/ebay-finder.ts for why: a vaguely-titled listing with Brand correctly filled in
+        // never matches any of the three title searches above.
+        if (brandAspect) {
+          searches.push(searchEbayBrandCategory(config().pocketKnifeBrandCategoryId, brandAspect, config().pocketKnifeBrandCategorySearchDepth, token || undefined, "newlyListed"));
+        }
+        const passResults = await Promise.all(searches);
         // An item can legitimately appear in more than one pass above (this same keyword ranking
-        // it within best-match, newlyListed, and endingSoonest all at once) — guard against
-        // pushing this keyword's phrase onto it more than once, which the original single-pass
-        // loop never had to consider.
-        for (const item of [...bestMatch, ...newlyListed, ...endingSoonest]) {
+        // it within best-match, newlyListed, endingSoonest, and the brand-category browse all at
+        // once) — guard against pushing this keyword's phrase onto it more than once, which the
+        // original single-pass loop never had to consider.
+        for (const item of passResults.flat()) {
           const current = found.get(item.itemId);
           if (current) { if (!current.phrases.includes(keyword.phrase)) current.phrases.push(keyword.phrase); }
           else found.set(item.itemId, { item, phrases: [keyword.phrase] });
@@ -844,17 +861,17 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
   }
 }
 
-export type FinderKeywordProbe = { phrase: string; itemsReturned: number; hitResultsCap: boolean; found: boolean; matchedTitle: string | null; foundVia: "best_match" | "newly_listed" | "ending_soonest" | null; error: string | null };
+export type FinderKeywordProbe = { phrase: string; itemsReturned: number; hitResultsCap: boolean; found: boolean; matchedTitle: string | null; foundVia: "best_match" | "newly_listed" | "ending_soonest" | "brand_category" | null; error: string | null };
 
 // Standing diagnostic for "why didn't the finder pick up listing X" reports: independently of
 // any finder_items row, re-runs every enabled keyword's live eBay search and checks whether the
 // given item id (either the bare numeric eBay id or the full "v1|...|0" form) shows up in the
 // raw results. Distinguishes "genuinely absent from the eBay Browse API's results" from "present,
 // but the keyword search returned so many results it hit resultsPerKeyword before reaching it".
-// Probes all three of startFinderRun's scanKeyword passes (best-match, newlyListed, and
-// endingSoonest) so this stays accurate to what a real scan actually does — probing best-match
-// alone would misreport "not found" for exactly the low-engagement listings the other two passes
-// exist to catch.
+// Probes every one of startFinderRun's scanKeyword passes (best-match, newlyListed,
+// endingSoonest, and — for named-brand keywords — the brand-category browse) so this stays
+// accurate to what a real scan actually does — probing best-match alone would misreport "not
+// found" for exactly the low-engagement or vaguely-titled listings the other passes exist to catch.
 export async function debugFindItemAcrossKeywords(itemId: string): Promise<FinderKeywordProbe[]> {
   const { data: keywordRows, error: keywordError } = await supabaseAdmin.from("finder_keywords").select("phrase").eq("enabled", true).order("created_at");
   if (keywordError) throw new Error(keywordError.message);
@@ -866,24 +883,28 @@ export async function debugFindItemAcrossKeywords(itemId: string): Promise<Finde
       const extraExcludeTerms = carvingGroup ? CARVING_SET_MODERN_ORIGIN_EXCLUDE_TERMS : [];
       const conditionId = carvingGroup ? CARVING_SET_USED_CONDITION_ID : undefined;
       const isPocketKnife = keywordCategory(keyword.phrase) === "pocket_knife";
+      const bestMatchDepth = isPocketKnife ? config().pocketKnifeSearchDepth : config().searchDepth;
       const newlyListedDepth = isPocketKnife ? config().pocketKnifeNewlyListedSearchDepth : config().newlyListedSearchDepth;
       const endingSoonestDepth = isPocketKnife ? config().pocketKnifeEndingSoonestSearchDepth : config().endingSoonestSearchDepth;
-      const [bestMatch, newlyListed, endingSoonest] = await Promise.all([
-        searchEbayKeyword(keyword.phrase, config().searchDepth, token || undefined, extraExcludeTerms, conditionId),
+      const brandAspect = isPocketKnife ? POCKET_KNIFE_BRAND_ASPECT_BY_PHRASE[keyword.phrase] : undefined;
+      const [bestMatch, newlyListed, endingSoonest, brandCategory] = await Promise.all([
+        searchEbayKeyword(keyword.phrase, bestMatchDepth, token || undefined, extraExcludeTerms, conditionId),
         searchEbayKeyword(keyword.phrase, newlyListedDepth, token || undefined, extraExcludeTerms, conditionId, "newlyListed"),
         searchEbayKeyword(keyword.phrase, endingSoonestDepth, token || undefined, extraExcludeTerms, conditionId, "endingSoonest"),
+        brandAspect ? searchEbayBrandCategory(config().pocketKnifeBrandCategoryId, brandAspect, config().pocketKnifeBrandCategorySearchDepth, token || undefined, "newlyListed") : Promise.resolve([]),
       ]);
       const bestMatchHit = bestMatch.find((item) => item.itemId.includes(itemId));
       const newlyListedHit = newlyListed.find((item) => item.itemId.includes(itemId));
       const endingSoonestHit = endingSoonest.find((item) => item.itemId.includes(itemId));
-      const match = bestMatchHit || newlyListedHit || endingSoonestHit;
+      const brandCategoryHit = brandCategory.find((item) => item.itemId.includes(itemId));
+      const match = bestMatchHit || newlyListedHit || endingSoonestHit || brandCategoryHit;
       return {
         phrase: keyword.phrase,
         itemsReturned: bestMatch.length,
-        hitResultsCap: bestMatch.length >= config().searchDepth,
+        hitResultsCap: bestMatch.length >= bestMatchDepth,
         found: Boolean(match),
         matchedTitle: match?.title ?? null,
-        foundVia: bestMatchHit ? "best_match" : newlyListedHit ? "newly_listed" : endingSoonestHit ? "ending_soonest" : null,
+        foundVia: bestMatchHit ? "best_match" : newlyListedHit ? "newly_listed" : endingSoonestHit ? "ending_soonest" : brandCategoryHit ? "brand_category" : null,
         error: null,
       };
     } catch (error) {

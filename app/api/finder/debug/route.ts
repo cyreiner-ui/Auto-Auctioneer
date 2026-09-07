@@ -25,6 +25,7 @@ function summarize(itemId: string, keywordProbes: Awaited<ReturnType<typeof debu
   if (keywordMatch) {
     const foundVia = keywordMatch.foundVia === "newly_listed" ? "keyword_newly_listed" as const
       : keywordMatch.foundVia === "ending_soonest" ? "keyword_ending_soonest" as const
+      : keywordMatch.foundVia === "brand_category" ? "keyword_brand_category" as const
       : "keyword" as const;
     return { ...base, found: true as const, keyword: keywordMatch.phrase, matchedTitle: keywordMatch.matchedTitle, foundVia };
   }

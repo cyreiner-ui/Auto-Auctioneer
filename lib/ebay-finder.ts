@@ -249,6 +249,45 @@ export async function searchEbayCategoryNewlyListed(categoryId: string, requeste
   return result;
 }
 
+// A structured-field browse — filters on eBay's own "Brand" item specific within one category,
+// not a q= title search at all — for the pocket-knife pipeline's named-brand keywords. See
+// POCKET_KNIFE_BRAND_ASPECT_BY_PHRASE in lib/finder-core.ts for why this exists: a seller
+// routinely fills in Brand correctly as an item specific while writing a vague title ("Estate lot
+// of vintage pocket knives") that a free-text searchEbayKeyword call for "buck knife lot" would
+// never match. eBay's aspect_filter syntax requires the category id to appear twice — once as its
+// own query param, once again inside aspect_filter itself.
+export async function searchEbayBrandCategory(categoryId: string, brand: string, requested: number, token?: string, sort?: string) {
+  const authToken = token || await appToken();
+  const marketplace = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
+  const zip = process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip;
+  const result: EbayFinderItem[] = [];
+  for (const { offset, limit } of finderPages(requested)) {
+    const url = new URL(`${ebayApiBaseUrl()}/buy/browse/v1/item_summary/search`);
+    url.searchParams.set("category_ids", categoryId);
+    url.searchParams.set("aspect_filter", `categoryId:${categoryId},Brand:{${brand}}`);
+    url.searchParams.set("limit", String(limit));
+    url.searchParams.set("offset", String(offset));
+    url.searchParams.set("fieldgroups", "EXTENDED");
+    if (sort) url.searchParams.set("sort", sort);
+    url.searchParams.set("filter", "deliveryCountry:US");
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+        "X-EBAY-C-MARKETPLACE-ID": marketplace,
+        "X-EBAY-C-ENDUSERCTX": `contextualLocation=country%3DUS%2Czip%3D${encodeURIComponent(zip)}`,
+      },
+      signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS),
+    });
+    await recordEbayApiCall();
+    if (!response.ok) throw new Error(`eBay brand category browse for "${brand}" failed (${response.status}).`);
+    const payload = await response.json() as { itemSummaries?: Array<Record<string, unknown>> };
+    const summaries = payload.itemSummaries || [];
+    result.push(...parseItemSummaries(summaries));
+    if (summaries.length < limit) break;
+  }
+  return result;
+}
+
 // eBay's searchByImage Browse API method — a limited-release endpoint requiring separate
 // business-unit approval from eBay (confirmed working for this app's credentials via a one-off
 // production probe; see PR history). Not supported in eBay's Sandbox at all, so this always hits
