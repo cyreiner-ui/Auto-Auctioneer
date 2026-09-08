@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeListingText, calculateDeal, effectiveMaxCostPerKnife, finderPages, isScheduledRunTime, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife, summarizeRunFailure } from "../lib/finder-core.ts";
+import { analyzeListingText, calculateDeal, currentScheduledRunKeySuffix, effectiveMaxCostPerKnife, finderPages, isScheduledRunTime, isShippingLookupWorthwhile, monthKey, resolveMaxCostPerKnife, summarizeRunFailure } from "../lib/finder-core.ts";
 
 test("extracts explicit numeric and word lot counts", () => {
   assert.deepEqual(analyzeListingText("Lot of 12 folding pocket knives"), { kind: "resolved", count: 12, containsFoldingKnife: true, confidence: 0.99 });
@@ -288,6 +288,34 @@ test("isScheduledRunTime: weekly schedule only fires on the configured day of we
   assert.equal(isScheduledRunTime(thursdaySchedule, new Date("2026-08-06T10:30:00Z")), true, "2026-08-06 is a Thursday (index 4) at 06:30 ET");
   const wednesdaySchedule = { ...thursdaySchedule, dayOfWeek: 3 };
   assert.equal(isScheduledRunTime(wednesdaySchedule, new Date("2026-08-06T10:30:00Z")), false, "same time, but Thursday isn't the configured Wednesday");
+});
+
+// 2026-08-06T18:00:00Z is 14:00 (2pm) America/New_York; 2026-08-07T02:00:00Z is 22:00 (10pm) the
+// same New York evening (still 2026-08-06 there, since ET trails UTC).
+const THRICE_DAILY_SCHEDULE = { ...DAILY_SCHEDULE, extraRunHours: [14, 22] };
+
+test("isScheduledRunTime: a schedule with extraRunHours fires at each additional hour too, not just the primary one", () => {
+  assert.equal(isScheduledRunTime(THRICE_DAILY_SCHEDULE, new Date("2026-08-06T13:59:00Z")), true, "09:59 ET is after the 06:00 slot, before the 14:00 slot — still within the day's window");
+  assert.equal(isScheduledRunTime(THRICE_DAILY_SCHEDULE, new Date("2026-08-06T18:00:00Z")), true, "14:00 ET is exactly the second slot");
+  assert.equal(isScheduledRunTime(THRICE_DAILY_SCHEDULE, new Date("2026-08-07T02:00:00Z")), true, "22:00 ET is exactly the third slot");
+});
+
+test("isScheduledRunTime: a plain single-hour schedule (extraRunHours omitted or empty) is unaffected", () => {
+  assert.equal(isScheduledRunTime(DAILY_SCHEDULE, new Date("2026-08-06T18:00:00Z")), true, "14:00 ET is still after the single 06:00 schedule — same as before extraRunHours existed");
+  assert.equal(isScheduledRunTime({ ...DAILY_SCHEDULE, extraRunHours: [] }, new Date("2026-08-06T18:00:00Z")), true, "an explicit empty extraRunHours behaves identically");
+});
+
+test("currentScheduledRunKeySuffix: empty for a plain single-hour schedule, so its run_key shape never changes", () => {
+  assert.equal(currentScheduledRunKeySuffix(DAILY_SCHEDULE, new Date("2026-08-06T10:30:00Z")), "");
+  assert.equal(currentScheduledRunKeySuffix({ ...DAILY_SCHEDULE, extraRunHours: [] }, new Date("2026-08-06T10:30:00Z")), "");
+});
+
+test("currentScheduledRunKeySuffix: keys each slot of a multi-hour schedule distinctly, and stays stable within one slot's window", () => {
+  assert.equal(currentScheduledRunKeySuffix(THRICE_DAILY_SCHEDULE, new Date("2026-08-06T10:30:00Z")), ":06", "09:30 ET is still within the 06:00 slot's window");
+  assert.equal(currentScheduledRunKeySuffix(THRICE_DAILY_SCHEDULE, new Date("2026-08-06T18:00:00Z")), ":14", "14:00 ET has moved into the second slot");
+  assert.equal(currentScheduledRunKeySuffix(THRICE_DAILY_SCHEDULE, new Date("2026-08-06T21:59:00Z")), ":14", "17:59 ET is still within the 14:00 slot's window, before 22:00");
+  assert.equal(currentScheduledRunKeySuffix(THRICE_DAILY_SCHEDULE, new Date("2026-08-07T02:00:00Z")), ":22", "22:00 ET has moved into the third slot");
+  assert.equal(currentScheduledRunKeySuffix(THRICE_DAILY_SCHEDULE, new Date("2026-08-06T09:59:00Z")), "", "05:59 ET is before even the first slot — no slot has started yet");
 });
 
 test("paginates 500 eBay results as 200, 200, and 100", () => {

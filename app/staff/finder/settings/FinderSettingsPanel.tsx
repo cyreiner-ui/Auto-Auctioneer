@@ -6,7 +6,7 @@ import Link from "next/link";
 type Keyword = { id: string; phrase: string; enabled: boolean; max_cost_per_knife: number | null };
 type NotifyRecipient = { id: string; email: string; created_at: string };
 type NotifySettings = { mode: "auctions_only" | "all_qualified"; recipients: NotifyRecipient[]; usingEnvFallback: boolean; lastAttemptAt: string | null; lastError: string | null; lastSuccessAt: string | null };
-type Schedule = { enabled: boolean; frequency: "daily" | "weekly"; hour: number; minute: number; dayOfWeek: number | null };
+type Schedule = { enabled: boolean; frequency: "daily" | "weekly"; hour: number; minute: number; dayOfWeek: number | null; extraRunHours: number[] };
 type NegativeKeyword = { id: string; phrase: string; enabled: boolean };
 type Overview = { keywords: Keyword[]; negativeKeywords: NegativeKeyword[]; notify: NotifySettings; schedule: Schedule; processingPaused: boolean; budget: { mode: string; freeAnalyses: number; paidAnalyses: number; analyses: number; monthlyLimit: number; remaining: number; projectedMaximum: number; dailyAnalyses: number; dailyLimit: number; dailyRemaining: number; geminiApiKeyPreview: string | null }; settings: { zip: string; maxCostPerKnife: number } };
 
@@ -22,12 +22,15 @@ export default function FinderSettingsPanel() {
   const [newNegativePhrase, setNewNegativePhrase] = useState("");
   const [newRecipientEmail, setNewRecipientEmail] = useState("");
   const [maxCostInput, setMaxCostInput] = useState("");
+  const [extraRunHoursInput, setExtraRunHoursInput] = useState("");
 
   const load = useCallback(async () => {
     const response = await fetch("/api/finder?category=pocket_knife", { cache: "no-store" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Could not load finder settings.");
-    setData(payload); setMaxCostInput(String(payload.settings.maxCostPerKnife)); setError("");
+    setData(payload); setMaxCostInput(String(payload.settings.maxCostPerKnife));
+    setExtraRunHoursInput((payload.schedule.extraRunHours as number[]).join(", "));
+    setError("");
   }, []);
 
   useEffect(() => { const timer = window.setTimeout(() => void load().catch((reason) => setError(reason.message)), 0); return () => window.clearTimeout(timer); }, [load]);
@@ -57,6 +60,12 @@ export default function FinderSettingsPanel() {
   const setNegativeEnabled = (keyword: NegativeKeyword, enabled: boolean) => request("/api/finder/pocket-knife-negative-keywords", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: keyword.id, enabled }) });
   const saveMode = (mode: string) => request("/api/finder/notify-settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) });
   const saveSchedule = (patch: Partial<Schedule>) => request("/api/finder/schedule", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: "pocket_knife", ...patch }) });
+  const saveExtraRunHours = (event: FormEvent) => {
+    event.preventDefault();
+    const hours = extraRunHoursInput.split(",").map((part) => part.trim()).filter(Boolean).map(Number);
+    if (hours.some((hour) => !Number.isInteger(hour) || hour < 0 || hour > 23)) { setError("Additional run hours must be whole numbers between 0 and 23, comma-separated."); return; }
+    void saveSchedule({ extraRunHours: [...new Set(hours)] });
+  };
   const setProcessingPaused = (paused: boolean) => request("/api/finder/processing-paused", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category: "pocket_knife", paused }) });
   const saveMaxCostPerKnife = (event: FormEvent) => { event.preventDefault(); void request("/api/finder/pocket-knife-settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max_cost_per_knife: maxCostInput }) }); };
   const budgetPercent = data ? Math.min(100, Math.round((data.budget.analyses / data.budget.monthlyLimit) * 100)) : 0;
@@ -108,7 +117,13 @@ export default function FinderSettingsPanel() {
             <input type="time" disabled={busy} value={`${String(data.schedule.hour).padStart(2, "0")}:${String(data.schedule.minute).padStart(2, "0")}`} onChange={(event) => { const [hour, minute] = event.target.value.split(":").map(Number); if (Number.isInteger(hour) && Number.isInteger(minute)) void saveSchedule({ hour, minute }); }} />
           </label>
         </div>
-        <p className="muted">Runs in America/New_York time. Scheduled independently from the carving-set finder&apos;s automatic scan.</p>
+        <form className="keyword-add" onSubmit={saveExtraRunHours}>
+          <label>Additional run hours (Eastern, comma-separated, 0-23)
+            <input aria-label="Additional run hours" placeholder="e.g. 14, 22" disabled={busy} value={extraRunHoursInput} onChange={(event) => setExtraRunHoursInput(event.target.value)} />
+          </label>
+          <button className="primary" disabled={busy}>Save additional hours</button>
+        </form>
+        <p className="muted">Runs at the time above, plus any additional hours listed (same minute each time) — e.g. the default 6, 14, 22 runs the scan three times a day. Leave blank to run only once a day/week. Scheduled independently from the other finders&apos; automatic scans.</p>
       </div>
       <div className="panel finder-notify">
         <div className="panel-heading"><div><p className="eyebrow">EMAIL ALERTS</p><h2>Notification settings</h2></div></div>

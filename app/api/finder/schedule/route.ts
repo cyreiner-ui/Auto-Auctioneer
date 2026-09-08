@@ -23,6 +23,9 @@ export async function PATCH(request: Request) {
   if (body.dayOfWeek !== undefined && body.dayOfWeek !== null && (!Number.isInteger(body.dayOfWeek) || body.dayOfWeek < 0 || body.dayOfWeek > 6)) {
     return NextResponse.json({ error: "Day of week must be an integer between 0 (Sunday) and 6 (Saturday), or null." }, { status: 400 });
   }
+  if (body.extraRunHours !== undefined && (!Array.isArray(body.extraRunHours) || !body.extraRunHours.every((hour: unknown) => Number.isInteger(hour) && (hour as number) >= 0 && (hour as number) <= 23))) {
+    return NextResponse.json({ error: "Additional run hours must be a list of integers between 0 and 23." }, { status: 400 });
+  }
   try {
     await updateScheduleSettings(category, {
       enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
@@ -30,6 +33,7 @@ export async function PATCH(request: Request) {
       hour: body.hour,
       minute: body.minute,
       dayOfWeek: body.dayOfWeek,
+      extraRunHours: body.extraRunHours,
     });
     return NextResponse.json({ ok: true });
   } catch (error) {

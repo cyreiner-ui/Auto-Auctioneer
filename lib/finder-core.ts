@@ -420,6 +420,13 @@ export type FinderScheduleSettings = {
   hour: number; // 0-23, America/New_York local time
   minute: number; // 0-59
   dayOfWeek: number | null; // 0 (Sunday) - 6 (Saturday); only meaningful when frequency === "weekly"
+  // Additional hours (America/New_York, same `minute` as `hour` above) the scheduled scan also
+  // fires at that day/week, on top of `hour` itself — e.g. [14, 22] alongside hour:6 runs the scan
+  // three times a day instead of once. Empty for every category by default; `hour` alone still
+  // fully describes a plain once-a-day/once-a-week schedule; see currentScheduledHour/
+  // currentScheduledRunKeySuffix below for how a non-empty list turns into distinct runs per slot
+  // instead of one idempotent no-op.
+  extraRunHours: number[];
 };
 
 const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
@@ -430,6 +437,29 @@ function easternTimeParts(date: Date) {
   return { hour: Number(value("hour")) % 24, minute: Number(value("minute")), weekday: WEEKDAY_INDEX[value("weekday")] ?? 0 };
 }
 
+// `hour` plus any `extraRunHours`, deduplicated and sorted — the full set of times-of-day this
+// schedule fires at (all sharing the one `minute` field, top-of-hour by default).
+function scheduledHours(schedule: FinderScheduleSettings): number[] {
+  return [...new Set([schedule.hour, ...(schedule.extraRunHours || [])])].sort((a, b) => a - b);
+}
+
+// The latest of this schedule's hours (see scheduledHours) that has already arrived today (or
+// this week's matching day, for a weekly schedule) as of `date` — true from each hour's scheduled
+// minute onward for the rest of the matching day, the same "a missed exact-minute tick shouldn't
+// skip the whole window" tolerance isScheduledRunTime always had, just evaluated per-hour instead
+// of only for the one `hour` field. Returns null before the day/week's first scheduled hour, or
+// when the schedule is disabled/on the wrong weekday. isScheduledRunTime below is just "this
+// returns non-null"; a multi-hour schedule additionally needs the specific hour to key each
+// slot's own run (see currentScheduledRunKeySuffix), so a later slot the same day starts a fresh
+// run instead of being treated as an idempotent no-op of the day's first slot.
+export function currentScheduledHour(schedule: FinderScheduleSettings, date = new Date()): number | null {
+  if (!schedule.enabled) return null;
+  const { hour, minute, weekday } = easternTimeParts(date);
+  if (schedule.frequency === "weekly" && weekday !== schedule.dayOfWeek) return null;
+  const passed = scheduledHours(schedule).filter((scheduledHour) => hour > scheduledHour || (hour === scheduledHour && minute >= schedule.minute));
+  return passed.length ? passed[passed.length - 1] : null;
+}
+
 // True from the scheduled minute onward for the rest of the matching day (the whole day for a
 // daily schedule, or just that one day of the week for a weekly one) — not only at the exact
 // minute. finderTick runs every minute, but a single missed tick (a cold start, a brief outage)
@@ -437,10 +467,20 @@ function easternTimeParts(date: Date) {
 // later tick that same day a cheap no-op once the first one has started the scan, so widening the
 // window here to "at or after the scheduled time" costs nothing extra.
 export function isScheduledRunTime(schedule: FinderScheduleSettings, date = new Date()): boolean {
-  if (!schedule.enabled) return false;
-  const { hour, minute, weekday } = easternTimeParts(date);
-  if (schedule.frequency === "weekly" && weekday !== schedule.dayOfWeek) return false;
-  return hour > schedule.hour || (hour === schedule.hour && minute >= schedule.minute);
+  return currentScheduledHour(schedule, date) !== null;
+}
+
+// Suffix to append to a scheduled run's run_key so a schedule with more than one hour (see
+// extraRunHours) gets a separate, independent run per slot instead of every tick that day
+// resolving to the same day-only run_key and no-opping after the first slot fires. Empty for a
+// plain single-hour schedule (every category today except pocket-knife) — those keep exactly the
+// run_key shape they always had. Ticks within the same slot's window (before the next scheduled
+// hour arrives) still resolve to the same suffix, so the existing run_key-uniqueness no-op inside
+// startFinderRun continues to prevent duplicate runs within one slot.
+export function currentScheduledRunKeySuffix(schedule: FinderScheduleSettings, date = new Date()): string {
+  if (!(schedule.extraRunHours || []).length) return "";
+  const hour = currentScheduledHour(schedule, date);
+  return hour == null ? "" : `:${String(hour).padStart(2, "0")}`;
 }
 
 export function finderPages(requested: number) {

@@ -1405,6 +1405,46 @@ test("finderTick honors a weekly schedule, only firing on the configured day of 
   });
 });
 
+test("finderTick starts a distinct pocket-knife run for each of its extraRunHours slots over the course of a day", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [],
+      finder_schedule_settings: [
+        { category: "pocket_knife", enabled: true, frequency: "daily", run_hour: 6, run_minute: 0, day_of_week: null, extra_run_hours: [14, 22] },
+      ],
+    }, async (fake) => {
+      const morning = await finderTick(new Date("2026-08-06T10:30:00Z")); // 06:30 ET
+      assert.ok(morning.runs.pocket_knife, "the 06:00 slot fires");
+      const stillMorningSlot = await finderTick(new Date("2026-08-06T12:00:00Z")); // 08:00 ET — still within the 06:00 slot's window
+      assert.equal(stillMorningSlot.runs.pocket_knife.created, false, "a later tick still within the same slot's window must not start a second run");
+      const afternoon = await finderTick(new Date("2026-08-06T18:30:00Z")); // 14:30 ET
+      assert.equal(afternoon.runs.pocket_knife.created, true, "the 14:00 slot starts a genuinely new run, not the morning's idempotent no-op");
+      const evening = await finderTick(new Date("2026-08-07T02:30:00Z")); // 22:30 ET (still 2026-08-06 locally)
+      assert.equal(evening.runs.pocket_knife.created, true, "the 22:00 slot also starts its own new run");
+      const pocketKnifeRuns = fake.tables.finder_runs.filter((row) => row.category === "pocket_knife");
+      assert.equal(pocketKnifeRuns.length, 3, "three distinct runs — one per scheduled slot — not one run reused across the whole day");
+    });
+  });
+});
+
+test("finderTick's extraRunHours slots don't affect a category with no extra hours configured", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [],
+      finder_schedule_settings: [
+        { category: "carving_set", enabled: true, frequency: "daily", run_hour: 6, run_minute: 0, day_of_week: null },
+      ],
+    }, async (fake) => {
+      await finderTick(new Date("2026-08-06T10:30:00Z")); // 06:30 ET
+      await finderTick(new Date("2026-08-06T18:30:00Z")); // 14:30 ET — no extra hour configured, so this is still just the same day's single slot
+      const carvingSetRuns = fake.tables.finder_runs.filter((row) => row.category === "carving_set");
+      assert.equal(carvingSetRuns.length, 1, "a plain single-hour schedule still runs once a day, exactly as before extraRunHours existed");
+    });
+  });
+});
+
 const FINDER_MONTHLY_LIMIT = 10_000;
 const FINDER_DAILY_LIMIT = Math.ceil(FINDER_MONTHLY_LIMIT / 30);
 
