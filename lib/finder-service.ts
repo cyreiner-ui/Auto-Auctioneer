@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appToken, getItemDescription, getItemShippingCost, searchEbayBrandCategory, searchEbayByImage, searchEbayCategoryNewlyListed, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
-import { analyzeListingText, calculateDeal, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isScheduledRunTime, isShippingLookupWorthwhile, matchesNegativeKeyword, monthKey, POCKET_KNIFE_BRAND_ASPECT_BY_PHRASE, resolveMaxCostPerKnife, type FinderScheduleSettings } from "./finder-core";
+import { analyzeListingText, calculateDeal, currentScheduledRunKeySuffix, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isScheduledRunTime, isShippingLookupWorthwhile, matchesNegativeKeyword, monthKey, POCKET_KNIFE_BRAND_ASPECT_BY_PHRASE, resolveMaxCostPerKnife, type FinderScheduleSettings } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
 import { ebayBudgetExceeded, getEbayApiCallsToday } from "./ebay-call-tracker";
 import {
@@ -125,7 +125,7 @@ export async function recordNotifyAttempt(result: { ok: boolean; message?: strin
 
 // Matches today's hardcoded default (daily at 6am America/New_York) — used only if a category's
 // row is somehow missing (it's seeded by supabase/migrations/022_finder_schedule_settings.sql).
-const DEFAULT_SCHEDULE: FinderScheduleSettings = { enabled: true, frequency: "daily", hour: 6, minute: 0, dayOfWeek: null };
+const DEFAULT_SCHEDULE: FinderScheduleSettings = { enabled: true, frequency: "daily", hour: 6, minute: 0, dayOfWeek: null, extraRunHours: [] };
 
 async function getScheduleSettings(category: FinderCategory): Promise<FinderScheduleSettings> {
   const { data } = await supabaseAdmin.from("finder_schedule_settings").select("*").eq("category", category).maybeSingle();
@@ -136,16 +136,18 @@ async function getScheduleSettings(category: FinderCategory): Promise<FinderSche
     hour: Number(data.run_hour),
     minute: Number(data.run_minute),
     dayOfWeek: data.day_of_week == null ? null : Number(data.day_of_week),
+    extraRunHours: (data.extra_run_hours || []).map(Number),
   };
 }
 
-export async function updateScheduleSettings(category: FinderCategory, patch: Partial<{ enabled: boolean; frequency: "daily" | "weekly"; hour: number; minute: number; dayOfWeek: number | null }>) {
+export async function updateScheduleSettings(category: FinderCategory, patch: Partial<{ enabled: boolean; frequency: "daily" | "weekly"; hour: number; minute: number; dayOfWeek: number | null; extraRunHours: number[] }>) {
   const values: Record<string, unknown> = { category, updated_at: new Date().toISOString() };
   if (patch.enabled !== undefined) values.enabled = patch.enabled;
   if (patch.frequency !== undefined) values.frequency = patch.frequency;
   if (patch.hour !== undefined) values.run_hour = patch.hour;
   if (patch.minute !== undefined) values.run_minute = patch.minute;
   if (patch.dayOfWeek !== undefined) values.day_of_week = patch.dayOfWeek;
+  if (patch.extraRunHours !== undefined) values.extra_run_hours = patch.extraRunHours;
   const { error } = await supabaseAdmin.from("finder_schedule_settings").upsert(values, { onConflict: "category" });
   if (error) throw new Error(error.message);
 }
@@ -1472,10 +1474,14 @@ export async function finderTick(date = new Date()) {
   // Each finder's automatic scan is independently scheduled and genuinely category-scoped now
   // (unlike the old single unscoped daily call) — one finder firing never touches another's
   // keywords, matching the manual "Run now" buttons' behavior.
-  if (isScheduledRunTime(pocketSchedule, date)) runs.pocket_knife = await startFinderRun("scheduled", `scheduled:pocket_knife:${easternDateKey(date)}`, "pocket_knife");
-  if (isScheduledRunTime(carvingSchedule, date)) runs.carving_set = await startFinderRun("scheduled", `scheduled:carving_set:${easternDateKey(date)}`, "carving_set");
-  if (isScheduledRunTime(gauchoSchedule, date)) runs.gaucho_knife = await startFinderRun("scheduled", `scheduled:gaucho_knife:${easternDateKey(date)}`, "gaucho_knife");
-  if (isScheduledRunTime(mateGourdSchedule, date)) runs.mate_gourd = await startFinderRun("scheduled", `scheduled:mate_gourd:${easternDateKey(date)}`, "mate_gourd");
+  // currentScheduledRunKeySuffix appends nothing for a plain single-hour schedule (every category
+  // except pocket-knife today), so their run_key shape is unchanged; a multi-hour schedule (see
+  // FinderScheduleSettings.extraRunHours) gets a distinct run per slot instead of every slot after
+  // the first no-opping against the day's first run_key.
+  if (isScheduledRunTime(pocketSchedule, date)) runs.pocket_knife = await startFinderRun("scheduled", `scheduled:pocket_knife:${easternDateKey(date)}${currentScheduledRunKeySuffix(pocketSchedule, date)}`, "pocket_knife");
+  if (isScheduledRunTime(carvingSchedule, date)) runs.carving_set = await startFinderRun("scheduled", `scheduled:carving_set:${easternDateKey(date)}${currentScheduledRunKeySuffix(carvingSchedule, date)}`, "carving_set");
+  if (isScheduledRunTime(gauchoSchedule, date)) runs.gaucho_knife = await startFinderRun("scheduled", `scheduled:gaucho_knife:${easternDateKey(date)}${currentScheduledRunKeySuffix(gauchoSchedule, date)}`, "gaucho_knife");
+  if (isScheduledRunTime(mateGourdSchedule, date)) runs.mate_gourd = await startFinderRun("scheduled", `scheduled:mate_gourd:${easternDateKey(date)}${currentScheduledRunKeySuffix(mateGourdSchedule, date)}`, "mate_gourd");
   const queue = await processPendingFinderItems();
   return { runs, queue };
 }
