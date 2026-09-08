@@ -38,7 +38,7 @@ import {
   refreshedMateGourdRow,
   type MateGourdExistingRow,
 } from "./mate-gourd-finder";
-import { isAuctionFormat } from "./gixen-client";
+import { isAuctionFormat } from "./gixen-format";
 import { sendQualifiedItemsEmail, sendRunSummaryEmail } from "./finder-notify";
 import { supabaseAdmin } from "./supabase-admin";
 
