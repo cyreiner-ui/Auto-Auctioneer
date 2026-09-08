@@ -1,5 +1,11 @@
 import type { Browser, BrowserContext, Page } from "playwright-core";
 
+// Re-exported for existing consumers — the real definition lives in
+// gixen-format.ts, which callers that don't need browser automation should
+// import directly so they don't pull this module's playwright-core/
+// @sparticuz/chromium dependency into their deployed function bundle.
+export { isAuctionFormat } from "./gixen-format";
+
 const GIXEN_API_URL = "https://www.gixen.com/api.php";
 const GIXEN_LOGIN_URL = "https://www.gixen.com/main/index.php";
 const DASHBOARD_PATTERN = /home_2\.php\?sessionid=/;
@@ -22,14 +28,6 @@ function automationMode() {
 function gixenItemId(ebayItemId: string) {
   const match = ebayItemId.match(/\|(\d+)\|/);
   return match ? match[1] : ebayItemId;
-}
-
-// Gixen only snipes eBay auctions — a fixed-price (Buy It Now) listing has no
-// bid to time, so Gixen silently rejects it. The finder itself still
-// surfaces fixed-price deals for manual purchase; only auction-format items
-// should ever reach addSnipe.
-export function isAuctionFormat(buyingOptions: string[] | null | undefined) {
-  return Array.isArray(buyingOptions) && buyingOptions.includes("AUCTION");
 }
 
 // --- Dead HTTP API path (Gixen returns "ERROR (501): API DISABLED" for this

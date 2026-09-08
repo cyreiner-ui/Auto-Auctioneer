@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { isFinderCategory, processPendingFinderItems, startFinderRun, type FinderCategory } from "@/lib/finder-service";
 import { requireStaff } from "@/lib/staff-auth";
 
-// Gixen auto-send now drives a headless browser (see lib/gixen-client.ts),
-// which needs the Node runtime and more time than the platform default.
+// startFinderRun/processPendingFinderItems' eBay/Gemini calls need the Node
+// runtime and more time than the platform default. This route does NOT need
+// playwright-core/@sparticuz/chromium (see lib/gixen-format.ts) — keep it
+// that way so this route's deployed function bundle stays small.
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
