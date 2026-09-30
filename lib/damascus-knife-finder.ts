@@ -359,7 +359,7 @@ export function initialDamascusRow(item: EbayFinderItem, keywordPhrases: string[
   if (!Number.isFinite(item.itemPrice) || item.itemPrice < 0) return rejected("invalid_price");
   if (item.itemEndDate && new Date(item.itemEndDate).getTime() <= Date.now()) return rejected("ended");
   if (item.itemLocationCountry && item.itemLocationCountry.toUpperCase() !== DAMASCUS_ITEM_LOCATION_COUNTRY) return rejected("not_us_located", { damascus_notes: `Item located in ${item.itemLocationCountry}` });
-  if (isVariationListing(item.itemId)) return rejected("variation_listing", { damascus_notes: "Multi-variation listing: the price shown is only one option's, not the whole set." });
+  if (isVariationListing(item.itemId) || item.itemGroupType) return rejected("variation_listing", { damascus_notes: "Multi-variation listing: the price shown is only one option's, not the whole set." });
   const negativeMatch = matchesNegativeKeyword(item.title, item.shortDescription, negativePhrases);
   if (negativeMatch) return rejected("negative_keyword_match", { damascus_notes: `Matched negative keyword: "${negativeMatch}"` });
   const text = analyzeDamascusText(item.title, item.shortDescription);

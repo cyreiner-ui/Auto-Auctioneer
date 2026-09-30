@@ -159,6 +159,11 @@ test("multi-option listings are rejected: a variation item id, or choose-an-opti
   assert.equal(analyzeDamascusText("14PCS Damascus Chef Knife Set", "【IDEAL GIFT CHOICE】This knife set is beautifully crafted.").kind, "resolved", "gift-choice boilerplate isn't a selection listing");
 });
 
+test("a search result flagged as part of an item group is a multi-option listing even with a |0 id", () => {
+  const row = initialDamascusRow(item({ itemId: "v1|227498700741|0", itemGroupType: "SELLER_DEFINED_VARIATIONS", title: "14PCS Damascus Chef Knife Set" }), ["damascus chef knife set"], "run-1", settings, []);
+  assert.equal(row.reason, "variation_listing");
+});
+
 test("initialDamascusRow applies staff negative keywords first, and queues ambiguous listings for vision", () => {
   const negative = initialDamascusRow(item({ title: "Damascus Pocket Knife Pendant" }), ["damascus pocket knife"], "run-1", settings, ["pendant"]);
   assert.equal(negative.reason, "negative_keyword_match");
@@ -266,6 +271,36 @@ test("processPendingFinderItems rejects a would-be qualifier whose full descript
         assert.equal(row.reason, "selection_listing");
         assert.equal(row.damascus_description_checked, true);
         assert.equal(sent.length, 0, "no alert email for it");
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems rejects a would-be qualifier that the item lookup reports as part of a variation group", async (t) => {
+  await withEnv(ENV, async () => {
+    const sent = [];
+    mockMailer(t, sent);
+    await withFakeBackend({ finder_items: [pendingItem({ title: "14PCS Damascus Chef Knife Set", knife_count: 14, damascus_kitchen_count: 14, detection_source: "text", item_price: 60, shipping_cost: 0 })] }, async (fake) => {
+      await withFetch([tokenRoute, { test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ description: "Premium Damascus chef knife set.", primaryItemGroup: { itemGroupId: "227498700741", itemGroupType: "SELLER_DEFINED_VARIATIONS" } }) }], async () => {
+        await processPendingFinderItems(5);
+        const [row] = fake.tables.finder_items;
+        assert.equal(row.status, "rejected");
+        assert.equal(row.reason, "variation_listing");
+        assert.equal(sent.length, 0);
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems treats eBay's 'use the item group endpoint' refusal as a variation listing", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({ finder_items: [pendingItem({ title: "14PCS Damascus Chef Knife Set", knife_count: 14, damascus_kitchen_count: 14, detection_source: "text", item_price: 60, shipping_cost: 0 })] }, async (fake) => {
+      await withFetch([tokenRoute, { test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ errors: [{ errorId: 11006, message: "The legacy ID is invalid. Use the get_items_by_item_group call." }] }, { status: 400 }) }], async () => {
+        await processPendingFinderItems(5);
+        const [row] = fake.tables.finder_items;
+        assert.equal(row.status, "rejected");
+        assert.equal(row.reason, "variation_listing");
       });
     });
   });
