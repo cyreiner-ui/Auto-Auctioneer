@@ -35,7 +35,10 @@ const TOKEN_URL = "https://api.sandbox.ebay.com/identity/v1/oauth2/token";
 const SEARCH_URL = "https://api.sandbox.ebay.com/buy/browse/v1/item_summary/search";
 const ITEM_URL = "https://api.sandbox.ebay.com/buy/browse/v1/item/";
 const tokenRoute = { test: (url) => url.startsWith(TOKEN_URL), respond: () => jsonResponse({ access_token: "fake-token" }) };
-const descriptionRoute = (description) => ({ test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ description }) });
+const GROUP_URL = `${ITEM_URL}get_items_by_item_group`;
+// Default for every test that doesn't care: the listing isn't a variation group (eBay answers 404).
+const noGroupRoute = { test: (url) => url.startsWith(GROUP_URL), respond: () => jsonResponse({ errors: [{ errorId: 11006 }] }, { status: 404 }) };
+const descriptionRoute = (description) => ({ test: (url) => url.startsWith(ITEM_URL) && !url.startsWith(GROUP_URL), respond: () => jsonResponse({ description }) });
 const imageRoute = { test: (url) => url.includes("i.ebayimg.com"), respond: () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/jpeg" } }) };
 const geminiRoute = (body) => ({ test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => jsonResponse({ candidates: [{ content: { parts: [{ text: JSON.stringify(body) }] } }] }) });
 
@@ -244,7 +247,7 @@ test("processPendingFinderItems qualifies a mixed Damascus lot on the two-tier c
     const sent = [];
     mockMailer(t, sent);
     await withFakeBackend({ finder_items: [pendingItem()] }, async (fake) => {
-      await withFetch([tokenRoute, imageRoute, descriptionRoute("Four hand-forged Damascus knives from an estate."), geminiRoute({ knifeCount: 4, kitchenKnifeCount: 3, knifeType: "mixed", isSet: true, bladeLooksNonDamascus: false, confidence: 0.95, notes: "3 chef knives and a folder" })], async () => {
+      await withFetch([tokenRoute, imageRoute, noGroupRoute, descriptionRoute("Four hand-forged Damascus knives from an estate."), geminiRoute({ knifeCount: 4, kitchenKnifeCount: 3, knifeType: "mixed", isSet: true, bladeLooksNonDamascus: false, confidence: 0.95, notes: "3 chef knives and a folder" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [row] = fake.tables.finder_items;
@@ -264,7 +267,7 @@ test("processPendingFinderItems rejects a would-be qualifier whose full descript
     const sent = [];
     mockMailer(t, sent);
     await withFakeBackend({ finder_items: [pendingItem({ title: "14PCS Damascus Steak Knife Set", knife_count: 14, damascus_kitchen_count: 14, detection_source: "text", item_price: 20, shipping_cost: 0 })] }, async (fake) => {
-      await withFetch([tokenRoute, descriptionRoute("1PC/3PCS/6PCS/14PCS steak knife, you can choose the quantity.")], async () => {
+      await withFetch([tokenRoute, noGroupRoute, descriptionRoute("1PC/3PCS/6PCS/14PCS steak knife, you can choose the quantity.")], async () => {
         await processPendingFinderItems(5);
         const [row] = fake.tables.finder_items;
         assert.equal(row.status, "rejected");
@@ -306,12 +309,29 @@ test("processPendingFinderItems treats eBay's 'use the item group endpoint' refu
   });
 });
 
+test("processPendingFinderItems rejects a would-be qualifier whose item-group lookup lists several options (number-of-pieces dropdown)", async (t) => {
+  await withEnv(ENV, async () => {
+    const sent = [];
+    mockMailer(t, sent);
+    await withFakeBackend({ finder_items: [pendingItem({ title: "14PCS Damascus Chef Knife Set", knife_count: 14, damascus_kitchen_count: 14, detection_source: "text", item_price: 60, shipping_cost: 0 })] }, async (fake) => {
+      const groupRoute = { test: (url) => url.startsWith(GROUP_URL), respond: () => jsonResponse({ items: [{ itemId: "v1|7|1" }, { itemId: "v1|7|2" }, { itemId: "v1|7|3" }] }) };
+      await withFetch([tokenRoute, groupRoute, descriptionRoute("Premium Damascus chef knife set.")], async () => {
+        await processPendingFinderItems(5);
+        const [row] = fake.tables.finder_items;
+        assert.equal(row.status, "rejected");
+        assert.equal(row.reason, "variation_listing");
+        assert.equal(sent.length, 0);
+      });
+    });
+  });
+});
+
 test("processPendingFinderItems sends a text-counted set to vision when the full description shows the piece count includes accessories", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);
     await withFakeBackend({ finder_items: [pendingItem({ title: "14PCS Damascus Chef Knife Set", knife_count: 14, damascus_kitchen_count: 14, detection_source: "text", item_price: 60, shipping_cost: 0 })] }, async (fake) => {
       let geminiCalled = false;
-      await withFetch([tokenRoute, descriptionRoute("Set includes 8 knives, a sharpening rod, and a leather roll bag."), { test: (url) => url.includes("generativelanguage"), respond: () => { geminiCalled = true; return jsonResponse({}); } }], async () => {
+      await withFetch([tokenRoute, noGroupRoute, descriptionRoute("Set includes 8 knives, a sharpening rod, and a leather roll bag."), { test: (url) => url.includes("generativelanguage"), respond: () => { geminiCalled = true; return jsonResponse({}); } }], async () => {
         await processPendingFinderItems(5);
         const [row] = fake.tables.finder_items;
         assert.equal(row.status, "pending");
@@ -381,7 +401,7 @@ test("startFinderRun('damascus_knife') scans only Damascus keywords and stamps i
       const [row] = fake.tables.finder_items;
       assert.equal(row.item_category, "damascus_knife");
       assert.equal(row.status, "pending", "waits for the full-description check");
-      await withFetch([tokenRoute, descriptionRoute("Five Damascus folding knives, all shown.")], async () => {
+      await withFetch([tokenRoute, noGroupRoute, descriptionRoute("Five Damascus folding knives, all shown.")], async () => {
         await processPendingFinderItems(5);
       });
       assert.equal(row.status, "qualified");
