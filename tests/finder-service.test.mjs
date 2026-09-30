@@ -507,10 +507,12 @@ test("startFinderRun corrects a stale vision count via the title's own stated lo
   await withEnv(ENV, async () => {
     mockMailer(t, []);
     const title = "LOT OF 15 6inch HANDMADE DAMASCUS STEEL SKINER KNIFE USA Duty paid";
+    // Keyword is deliberately not a "damascus" phrase — those route to the separate Damascus finder
+    // (lib/damascus-knife-finder.ts); this test is about the pocket-knife pipeline's own refresh logic.
     await withFakeBackend({
-      finder_keywords: [{ id: "k1", phrase: "damascus skinner knife", enabled: true, created_at: "2026-01-01" }],
+      finder_keywords: [{ id: "k1", phrase: "skinner knife lot", enabled: true, created_at: "2026-01-01" }],
       finder_items: [{
-        ebay_item_id: "v1|1|0", run_id: "old-run", keyword_phrases: ["damascus skinner knife"], title, short_description: "",
+        ebay_item_id: "v1|1|0", run_id: "old-run", keyword_phrases: ["skinner knife lot"], title, short_description: "",
         ebay_url: "https://www.ebay.com/itm/1", image_url: "https://i.ebayimg.com/1.jpg",
         item_price: 129, shipping_cost: 0, currency: "USD", buying_options: ["FIXED_PRICE"],
         status: "qualified", knife_count: 55, contains_folding_knife: true, confidence: 0.92,

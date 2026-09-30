@@ -1,6 +1,6 @@
 import nodemailer from "nodemailer";
 
-export type NotifyKind = "pocket_knife" | "carving_set" | "gaucho_knife" | "mate_gourd";
+export type NotifyKind = "pocket_knife" | "carving_set" | "gaucho_knife" | "mate_gourd" | "damascus_knife";
 
 export type NotifiableFinderItem = {
   ebay_item_id: string;
@@ -21,11 +21,16 @@ export type NotifiableFinderItem = {
   gaucho_match_notes?: string | null;
   mate_gourd_match_confidence?: number | null;
   mate_gourd_match_notes?: string | null;
+  damascus_knife_type?: string | null;
+  damascus_kitchen_count?: number | null;
+  damascus_is_set?: boolean | null;
 };
 
 const usd = (value: number | null) => (value == null ? "—" : Number(value).toLocaleString("en-US", { style: "currency", currency: "USD" }));
 const escapeHtml = (value: string) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char] as string));
-const dealLabel = (kind: NotifyKind) => (kind === "carving_set" ? "carving set" : kind === "gaucho_knife" ? "gaucho knife" : kind === "mate_gourd" ? "maté gourd" : "pocket knife");
+const dealLabel = (kind: NotifyKind) => (kind === "carving_set" ? "carving set" : kind === "gaucho_knife" ? "gaucho knife" : kind === "mate_gourd" ? "maté gourd" : kind === "damascus_knife" ? "Damascus knife" : "pocket knife");
+
+const DAMASCUS_TYPE_LABEL: Record<string, string> = { pocket: "pocket", bowie: "bowie", kitchen: "kitchen/chef", fixed_blade: "fixed blade", mixed: "mixed lot" };
 
 // Same palette as the finder dashboard (see app/globals.css's :root and .finder-card rules) so the
 // alert email reads as the same product rather than a generic transactional email.
@@ -72,6 +77,14 @@ function itemBadges(item: NotifiableFinderItem, kind: NotifyKind): string[] {
     if (item.mate_gourd_match_confidence != null) badges.push(`${Math.round(Number(item.mate_gourd_match_confidence) * 100)}% match confidence`);
     return badges;
   }
+  if (kind === "damascus_knife") {
+    const badges: string[] = [];
+    if (item.damascus_is_set) badges.push(item.knife_count != null && item.knife_count > 1 ? `set of ${item.knife_count}` : "set");
+    else badges.push(item.knife_count != null ? `${item.knife_count} knife${item.knife_count === 1 ? "" : "s"}` : "Knife count unknown");
+    if (item.damascus_knife_type && DAMASCUS_TYPE_LABEL[item.damascus_knife_type]) badges.push(DAMASCUS_TYPE_LABEL[item.damascus_knife_type]);
+    if (item.damascus_knife_type === "mixed" && item.damascus_kitchen_count) badges.push(`${item.damascus_kitchen_count} kitchen`);
+    return badges;
+  }
   return [item.knife_count != null ? `${item.knife_count} knives` : "Knife count unknown"];
 }
 
@@ -90,7 +103,7 @@ function renderItemCard(item: NotifiableFinderItem, kind: NotifyKind) {
   const image = item.image_url
     ? `<img src="${escapeHtml(item.image_url)}" width="260" height="130" alt="${title}" style="display:block;width:100%;height:130px;object-fit:cover;background:${COLORS.bg};border:0;" />`
     : `<div style="height:130px;background:${COLORS.bg};color:${COLORS.muted};font-size:11px;text-align:center;line-height:130px;">No image</div>`;
-  const unitPrice = kind === "pocket_knife" && item.cost_per_knife != null
+  const unitPrice = (kind === "pocket_knife" || kind === "damascus_knife") && item.cost_per_knife != null
     ? `<p style="margin:8px 0;color:${COLORS.lime};font:15px Georgia,serif;">${usd(item.cost_per_knife)}/knife</p>`
     : "";
   const matchNotes = (kind === "gaucho_knife" && item.gaucho_match_notes) || (kind === "mate_gourd" && item.mate_gourd_match_notes) || "";

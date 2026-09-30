@@ -22,6 +22,9 @@ export type EbayFinderItem = {
   currency: string;
   buyingOptions: string[];
   itemEndDate: string | null;
+  // eBay's itemLocation.country (ISO code, e.g. "US") — where the item physically ships from. Only
+  // set when eBay reports it; the Damascus finder rejects anything not located in the US.
+  itemLocationCountry?: string;
 };
 
 // Cached at module scope (not just per-run/per-tick the way startFinderRun's local `token`
@@ -134,7 +137,7 @@ function parseItemSummaries(summaries: Array<Record<string, unknown>>): EbayFind
       itemId?: string; title?: string; shortDescription?: string; itemWebUrl?: string;
       image?: { imageUrl?: string }; price?: { value?: string; currency?: string };
       shippingOptions?: Array<{ shippingCost?: { value?: string; currency?: string } }>;
-      buyingOptions?: string[]; itemEndDate?: string;
+      buyingOptions?: string[]; itemEndDate?: string; itemLocation?: { country?: string };
     };
     if (!item.itemId || !item.title || !item.itemWebUrl) continue;
     const shipping = shippingCost(item);
@@ -150,6 +153,7 @@ function parseItemSummaries(summaries: Array<Record<string, unknown>>): EbayFind
       currency: item.price?.currency || "",
       buyingOptions: item.buyingOptions || [],
       itemEndDate: item.itemEndDate || null,
+      ...(item.itemLocation?.country ? { itemLocationCountry: item.itemLocation.country } : {}),
     });
   }
   return result;
@@ -167,12 +171,17 @@ function parseItemSummaries(summaries: Array<Record<string, unknown>>): EbayFind
 // sort, when passed, is forwarded as-is (e.g. "newlyListed"); omitted, the Browse API defaults to
 // its own relevance ranking ("Best Match"). That default ranking is what every caller used before
 // this parameter existed, and still is unless a caller opts into something else — see
+// itemLocationCountry, when passed (e.g. "US"), restricts results to items physically located in
+// that country (eBay's itemLocationCountry filter) — on top of the deliveryCountry:US filter every
+// search already has, which only means "will ship to the US". The Damascus finder passes "US" so
+// overseas-shipped imports never come back at all.
+//
 // startFinderRun's supplemental newlyListed pass in lib/finder-service.ts for why relevance
 // ranking alone isn't enough: a brand-new, low-engagement listing (no bids/watchers yet) can rank
 // outside even a few hundred best-match results whenever the keyword's total match volume is
 // large, so a purely relevance-ranked search can silently miss it for as long as it stays
 // low-engagement — which, for an auction ending in a few days, may be its entire listing window.
-export async function searchEbayKeyword(keyword: string, requested: number = FINDER_DEFAULTS.resultsPerKeyword, token?: string, extraExcludeTerms: string[] = [], conditionId?: string, sort?: string) {
+export async function searchEbayKeyword(keyword: string, requested: number = FINDER_DEFAULTS.resultsPerKeyword, token?: string, extraExcludeTerms: string[] = [], conditionId?: string, sort?: string, itemLocationCountry?: string) {
   const authToken = token || await appToken();
   const marketplace = process.env.EBAY_MARKETPLACE_ID || "EBAY_US";
   const zip = process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip;
@@ -193,6 +202,7 @@ export async function searchEbayKeyword(keyword: string, requested: number = FIN
     if (sort) url.searchParams.set("sort", sort);
     const filterParts = ["deliveryCountry:US"];
     if (conditionId) filterParts.push(`conditionIds:{${conditionId}}`);
+    if (itemLocationCountry) filterParts.push(`itemLocationCountry:${itemLocationCountry}`);
     url.searchParams.set("filter", filterParts.join(","));
     const response = await fetch(url, {
       headers: {
