@@ -109,7 +109,7 @@ export default function FinderDashboard() {
             : kind === "carving_set"
             ? <>Sheffield/English sets: $200 flat, carbon steel only. German and other cased sets: $10 × piece count + $15. A case is required for all three.</>
             : kind === "damascus_knife"
-            ? <>Damascus pocket, bowie, and kitchen/chef knives · maximum {usd(data?.settings.damascusMaxCostPerKnife ?? 0)} per knife ({usd(data?.settings.damascusKitchenMaxCostPerKnife ?? 0)} per kitchen/chef knife) including shipping · sets and lots listed first</>
+            ? <>Damascus pocket, bowie, and kitchen/chef knives · maximum {usd(data?.settings.damascusMaxCostPerKnife ?? 0)} per knife ({usd(data?.settings.damascusKitchenMaxCostPerKnife ?? 0)} per kitchen/chef knife) including shipping · USA-located only · sets and lots listed first</>
             : kind === "mate_gourd"
             ? <>Discovered by visual match against your reference photos of the specific gourd (plus a keyword-search supplement) — no price cap, review every match yourself.</>
             : <>Discovered by visual match against your reference photos (plus a keyword-search supplement) — no price cap yet, review every match yourself.</>}

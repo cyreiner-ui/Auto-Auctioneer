@@ -175,6 +175,16 @@ test("evaluateDamascusVision rejects non-knives, plain blades, and low confidenc
   assert.equal(known.kitchenCount, 5);
 });
 
+test("initialDamascusRow rejects items located outside the USA or listed as shipping from overseas", () => {
+  const foreign = initialDamascusRow(item({ itemLocationCountry: "PK" }), ["damascus pocket knife lot"], "run-1", settings, []);
+  assert.equal(foreign.status, "rejected");
+  assert.equal(foreign.reason, "not_us_located");
+  const domestic = initialDamascusRow(item({ itemLocationCountry: "US" }), ["damascus pocket knife lot"], "run-1", settings, []);
+  assert.equal(domestic.status, "qualified");
+  const shipsFrom = initialDamascusRow(item({ title: "Lot of 5 Damascus Pocket Knives - Ships from Pakistan" }), ["damascus pocket knife lot"], "run-1", settings, []);
+  assert.equal(shipsFrom.reason, "not_us_located");
+});
+
 function pendingItem(overrides = {}) {
   return {
     ebay_item_id: "v1|7|0", run_id: null, title: "Damascus Knives Estate Collection", short_description: "",
@@ -233,15 +243,18 @@ test("startFinderRun('damascus_knife') scans only Damascus keywords and stamps i
       ],
     }, async (fake) => {
       const searched = [];
+      const filters = [];
       const searchRoute = { test: (url) => url.startsWith(SEARCH_URL), respond: (url) => {
         searched.push(new URL(url).searchParams.get("q"));
-        return jsonResponse({ itemSummaries: [{ itemId: "v1|42|0", title: "Lot of 5 Damascus Steel Pocket Knives", itemWebUrl: "https://www.ebay.com/itm/42", image: { imageUrl: "https://i.ebayimg.com/42.jpg" }, price: { value: "10.00", currency: "USD" }, shippingOptions: [{ shippingCost: { value: "4.00", currency: "USD" } }], buyingOptions: ["AUCTION"] }] });
+        filters.push(new URL(url).searchParams.get("filter"));
+        return jsonResponse({ itemSummaries: [{ itemId: "v1|42|0", title: "Lot of 5 Damascus Steel Pocket Knives", itemWebUrl: "https://www.ebay.com/itm/42", image: { imageUrl: "https://i.ebayimg.com/42.jpg" }, price: { value: "10.00", currency: "USD" }, itemLocation: { country: "US" }, shippingOptions: [{ shippingCost: { value: "4.00", currency: "USD" } }], buyingOptions: ["AUCTION"] }] });
       } };
       await withFetch([tokenRoute, searchRoute], async () => {
         await startFinderRun("manual", undefined, "damascus_knife");
       });
       assert.ok(searched.length > 0);
       assert.ok(searched.every((q) => /damascus/i.test(q)), "only Damascus phrases are searched");
+      assert.ok(filters.length > 0 && filters.every((filter) => filter.includes("itemLocationCountry:US")), "every Damascus search is limited to US-located items");
       const [row] = fake.tables.finder_items;
       assert.equal(row.item_category, "damascus_knife");
       assert.equal(row.status, "qualified");

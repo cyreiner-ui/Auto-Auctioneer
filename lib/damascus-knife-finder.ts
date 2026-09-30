@@ -37,6 +37,12 @@ export type DamascusSettings = { maxCostPerKnife: number; kitchenMaxCostPerKnife
 export const DAMASCUS_DEFAULTS: DamascusSettings = { maxCostPerKnife: 3, kitchenMaxCostPerKnife: 6 };
 export const DAMASCUS_MAX_PLAUSIBLE_KNIFE_COUNT = 50;
 
+// Damascus results must be physically located in the US — no overseas imports. Enforced twice:
+// every Damascus eBay search filters on itemLocationCountry (lib/ebay-finder.ts's
+// searchEbayKeyword), and initialDamascusRow rejects any item whose reported location isn't the US
+// (covers rows discovered before the filter existed, and anything the eBay filter lets slip).
+export const DAMASCUS_ITEM_LOCATION_COUNTRY = "US";
+
 export type DamascusKnifeType = "pocket" | "bowie" | "kitchen" | "fixed_blade" | "mixed";
 
 // The whole listing's budget: each kitchen/chef knife at the kitchen ceiling, every other knife at
@@ -71,6 +77,9 @@ const notKnifePattern = /\b(?:swords?|katana|wakizashi|machetes?|axes?|hatchets?
 const knifeWordPattern = /\bkn(?:ife|ives|ifes)\b|\b(?:pocketknife|penknife|jackknife|santoku|nakiri|gyuto|kiritsuke|cleavers?|daggers?|karambits?|bowie|folder|skinners?|tanto)\b/i;
 const throwingKnifePattern = /\bthrow(?:ing|er)?s?\s*kn(?:ife|ives|ifes)\b|\bkn(?:ife|ives|ifes)\s+throw(?:ing|ers?)?\b/i;
 const keychainKnifePattern = /\bkey[\s-]*(?:chain|ring)\b(?:\s+\w+){0,4}\s*kn(?:ife|ives|ifes)\b|\bkn(?:ife|ives|ifes)\b(?:\s+\w+){0,4}\s*\bkey[\s-]*(?:chain|ring)\b/i;
+// Listing wording that says the item ships from abroad even when eBay's location field says US
+// (e.g. a US "warehouse" listing that actually drop-ships from overseas).
+const shipsFromAbroadPattern = /\b(?:ships?|shipped|shipping|dispatched)\s+(?:directly\s+)?from\s+(?:pakistan|china|india|hong\s*kong|overseas|abroad)\b|\b(?:international|overseas)\s+(?:seller|shipment)\b|\bimported\s+from\b/i;
 const selectionPattern = /\b(?:choose|pick|select)\s+(?:your\s+)?(?:one|1|a|any\s+one)\b|\byour\s+choice\b|\bchoice\s+of\b/i;
 
 const kitchenPattern = /\b(?:chef'?s?|kitchen|cooking|santoku|nakiri|gyuto|kiritsuke|cleavers?|paring|bread\s+kn|boning|fill?ets?|carving\s+kn|slic(?:er|ing)|steak\s+kn|petty|bunka|deba|yanagiba|sujihiki|usuba|cutlery|kni(?:fe|ves)\s+block)\b/i;
@@ -131,6 +140,7 @@ export function analyzeDamascusText(title: string, description = ""): DamascusTe
   const text = clean(`${title} ${description}`);
   if (selectionPattern.test(text)) return { kind: "reject", reason: "selection_listing" };
   if (!damascusPattern.test(text)) return { kind: "reject", reason: "not_damascus" };
+  if (shipsFromAbroadPattern.test(text)) return { kind: "reject", reason: "not_us_located" };
   if (fakeDamascusPattern.test(text)) return { kind: "reject", reason: "fake_damascus" };
   if (knifeMakingPattern.test(text)) return { kind: "reject", reason: "knife_making_supplies" };
   if (notKnifePattern.test(title)) return { kind: "reject", reason: "not_a_knife" };
@@ -302,6 +312,7 @@ export function initialDamascusRow(item: EbayFinderItem, keywordPhrases: string[
   if (item.shippingCost != null && item.shippingCurrency !== "USD") return rejected("non_usd_shipping");
   if (!Number.isFinite(item.itemPrice) || item.itemPrice < 0) return rejected("invalid_price");
   if (item.itemEndDate && new Date(item.itemEndDate).getTime() <= Date.now()) return rejected("ended");
+  if (item.itemLocationCountry && item.itemLocationCountry.toUpperCase() !== DAMASCUS_ITEM_LOCATION_COUNTRY) return rejected("not_us_located", { damascus_notes: `Item located in ${item.itemLocationCountry}` });
   const negativeMatch = matchesNegativeKeyword(item.title, item.shortDescription, negativePhrases);
   if (negativeMatch) return rejected("negative_keyword_match", { damascus_notes: `Matched negative keyword: "${negativeMatch}"` });
   const text = analyzeDamascusText(item.title, item.shortDescription);

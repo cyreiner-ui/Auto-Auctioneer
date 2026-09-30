@@ -84,7 +84,7 @@ export default function DamascusSettingsPanel() {
   const dailyPercent = data ? Math.min(100, Math.round((data.budget.dailyAnalyses / data.budget.dailyLimit) * 100)) : 0;
 
   return <main className="finder-page">
-    <header className="finder-header"><div><Link className="back" href="/staff/finder">← Back to deal finder</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Damascus knife search settings</h1><p className="muted">Damascus-steel pocket, bowie, and kitchen/chef knives. Kitchen/chef knives have their own per-knife ceiling; every other knife uses the standard one. A mixed lot qualifies when its total fits the sum of each knife&apos;s own ceiling. Sets and lots are processed and listed first.</p></div></header>
+    <header className="finder-header"><div><Link className="back" href="/staff/finder">← Back to deal finder</Link><p className="eyebrow">EBAY DISCOVERY</p><h1>Damascus knife search settings</h1><p className="muted">Damascus-steel pocket, bowie, and kitchen/chef knives. Kitchen/chef knives have their own per-knife ceiling; every other knife uses the standard one. A mixed lot qualifies when its total fits the sum of each knife&apos;s own ceiling. Sets and lots are processed and listed first. Only items located in the USA are searched — overseas imports are excluded.</p></div></header>
     {error && <div className="notice finder-error" role="status" aria-live="polite" aria-atomic="true">{error}</div>}
     {!data && !error && <p className="muted" role="status" aria-live="polite">Loading…</p>}
     {data && <section className="finder-layout">

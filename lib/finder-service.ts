@@ -44,6 +44,7 @@ import {
   calculateDamascusDeal,
   compareDamascusPriority,
   DAMASCUS_DEFAULTS,
+  DAMASCUS_ITEM_LOCATION_COUNTRY,
   damascusKnifeGroupForPhrases,
   evaluateDamascusVision,
   isDamascusShippingLookupWorthwhile,
@@ -759,19 +760,22 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
         // in lib/finder-core.ts) — every other keyword (generic pocket-knife lot phrases,
         // carving-set/gaucho-knife/maté-gourd phrases) has no single eBay Brand aspect to filter on.
         const brandAspect = isPocketKnife ? POCKET_KNIFE_BRAND_ASPECT_BY_PHRASE[keyword.phrase] : undefined;
+        // Damascus results must be physically located in the US — no overseas imports (see
+        // DAMASCUS_ITEM_LOCATION_COUNTRY). Every other finder keeps its current location behavior.
+        const locationCountry = keywordCategory(keyword.phrase) === "damascus_knife" ? DAMASCUS_ITEM_LOCATION_COUNTRY : undefined;
         const searches = [
-          searchEbayKeyword(keyword.phrase, bestMatchDepth, token || undefined, extraExcludeTerms, conditionId),
+          searchEbayKeyword(keyword.phrase, bestMatchDepth, token || undefined, extraExcludeTerms, conditionId, undefined, locationCountry),
           // Supplemental pass, sorted chronologically instead of by relevance — see
           // searchEbayKeyword's sort param comment for why the best-match pass above can miss a
           // brand-new, low-engagement listing outright. Deliberately shallow (see
           // FINDER_DEFAULTS.newlyListedResultsPerKeyword); results merge into the same `found` map
           // below, so anything the best-match pass already caught is a harmless no-op here.
-          searchEbayKeyword(keyword.phrase, newlyListedDepth, token || undefined, extraExcludeTerms, conditionId, "newlyListed"),
+          searchEbayKeyword(keyword.phrase, newlyListedDepth, token || undefined, extraExcludeTerms, conditionId, "newlyListed", locationCountry),
           // Third supplemental pass, sorted by soonest-ending — see
           // FINDER_DEFAULTS.endingSoonestResultsPerKeyword for why best-match and newlyListed
           // together still miss an aged, low-engagement auction that's about to close. Same merge
           // and same "harmless no-op if already caught" behavior as the newlyListed pass above.
-          searchEbayKeyword(keyword.phrase, endingSoonestDepth, token || undefined, extraExcludeTerms, conditionId, "endingSoonest"),
+          searchEbayKeyword(keyword.phrase, endingSoonestDepth, token || undefined, extraExcludeTerms, conditionId, "endingSoonest", locationCountry),
         ];
         // Fourth supplemental pass, for named-brand keywords only — a structured "Brand" item
         // specific browse instead of a title search at all. See searchEbayBrandCategory's comment
@@ -954,10 +958,11 @@ export async function debugFindItemAcrossKeywords(itemId: string): Promise<Finde
       const newlyListedDepth = isPocketKnife ? config().pocketKnifeNewlyListedSearchDepth : config().newlyListedSearchDepth;
       const endingSoonestDepth = isPocketKnife ? config().pocketKnifeEndingSoonestSearchDepth : config().endingSoonestSearchDepth;
       const brandAspect = isPocketKnife ? POCKET_KNIFE_BRAND_ASPECT_BY_PHRASE[keyword.phrase] : undefined;
+      const locationCountry = keywordCategory(keyword.phrase) === "damascus_knife" ? DAMASCUS_ITEM_LOCATION_COUNTRY : undefined;
       const [bestMatch, newlyListed, endingSoonest, brandCategory] = await Promise.all([
-        searchEbayKeyword(keyword.phrase, bestMatchDepth, token || undefined, extraExcludeTerms, conditionId),
-        searchEbayKeyword(keyword.phrase, newlyListedDepth, token || undefined, extraExcludeTerms, conditionId, "newlyListed"),
-        searchEbayKeyword(keyword.phrase, endingSoonestDepth, token || undefined, extraExcludeTerms, conditionId, "endingSoonest"),
+        searchEbayKeyword(keyword.phrase, bestMatchDepth, token || undefined, extraExcludeTerms, conditionId, undefined, locationCountry),
+        searchEbayKeyword(keyword.phrase, newlyListedDepth, token || undefined, extraExcludeTerms, conditionId, "newlyListed", locationCountry),
+        searchEbayKeyword(keyword.phrase, endingSoonestDepth, token || undefined, extraExcludeTerms, conditionId, "endingSoonest", locationCountry),
         brandAspect ? searchEbayBrandCategory(config().pocketKnifeBrandCategoryId, brandAspect, config().pocketKnifeBrandCategorySearchDepth, token || undefined, "newlyListed") : Promise.resolve([]),
       ]);
       const bestMatchHit = bestMatch.find((item) => item.itemId.includes(itemId));

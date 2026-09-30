@@ -71,6 +71,7 @@ const REJECTION_REASON_LABEL: Record<string, string> = {
   not_damascus_vision: "Photo showed a plain, non-Damascus blade",
   knife_making_supplies: "Knife-making supplies (blank/billet/scales), not a finished knife",
   not_a_knife: "Not a knife (sword, axe, jewelry, etc.)",
+  not_us_located: "Not located in the USA (imported/ships from overseas)",
 };
 
 function rejectionLabel(reason: string) { return REJECTION_REASON_LABEL[reason] || reason; }
