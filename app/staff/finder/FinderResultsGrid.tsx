@@ -32,7 +32,7 @@ const TYPE_FILTER_LABEL: Record<TypeFilter, string> = { AUCTION: "Bidding", BEST
 // not in this map (a dynamic Gemini/eBay error message, or a not-yet-catalogued code) falls back to
 // showing the raw reason string rather than being silently hidden.
 const REJECTION_REASON_LABEL: Record<string, string> = {
-  selection_listing: "Buyer picks one item from a lot — quantity isn't fixed",
+  selection_listing: "Buyer picks an option/quantity — the price isn't for the whole set",
   no_knives_included: "Listing says no knives are actually included",
   box_cutter: "Box cutter, not a pocket knife",
   credit_card_knife: "Credit-card/wallet novelty knife",
@@ -72,6 +72,7 @@ const REJECTION_REASON_LABEL: Record<string, string> = {
   knife_making_supplies: "Knife-making supplies (blank/billet/scales), not a finished knife",
   not_a_knife: "Not a knife (sword, axe, jewelry, etc.)",
   not_us_located: "Not located in the USA (imported/ships from overseas)",
+  variation_listing: "Multi-option listing — the price is for one option, not the whole set",
 };
 
 function rejectionLabel(reason: string) { return REJECTION_REASON_LABEL[reason] || reason; }

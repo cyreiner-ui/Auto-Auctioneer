@@ -35,6 +35,7 @@ const TOKEN_URL = "https://api.sandbox.ebay.com/identity/v1/oauth2/token";
 const SEARCH_URL = "https://api.sandbox.ebay.com/buy/browse/v1/item_summary/search";
 const ITEM_URL = "https://api.sandbox.ebay.com/buy/browse/v1/item/";
 const tokenRoute = { test: (url) => url.startsWith(TOKEN_URL), respond: () => jsonResponse({ access_token: "fake-token" }) };
+const descriptionRoute = (description) => ({ test: (url) => url.startsWith(ITEM_URL), respond: () => jsonResponse({ description }) });
 const imageRoute = { test: (url) => url.includes("i.ebayimg.com"), respond: () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/jpeg" } }) };
 const geminiRoute = (body) => ({ test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => jsonResponse({ candidates: [{ content: { parts: [{ text: JSON.stringify(body) }] } }] }) });
 
@@ -125,8 +126,16 @@ test("analyzeDamascusText rejects non-Damascus, imitation Damascus, supplies, an
   assert.deepEqual(analyzeDamascusText("Set of 3 Damascus Throwing Knives"), { kind: "reject", reason: "throwing_knife" });
 });
 
-test("initialDamascusRow qualifies a cheap lot, tags every row damascus_knife, and flags sets", () => {
+test("initialDamascusRow never qualifies on the search snippet alone — a would-be qualifier waits for the full-description check", () => {
   const row = initialDamascusRow(item(), ["damascus pocket knife lot"], "run-1", settings, []);
+  assert.equal(row.status, "pending");
+  assert.equal(row.knife_count, 5);
+  assert.equal(row.damascus_description_checked, false);
+  assert.equal(row.cost_per_knife, 2.8);
+});
+
+test("initialDamascusRow qualifies a cheap lot once its description is checked, tags every row damascus_knife, and flags sets", () => {
+  const row = initialDamascusRow(item(), ["damascus pocket knife lot"], "run-1", settings, [], true);
   assert.equal(row.status, "qualified");
   assert.equal(row.item_category, "damascus_knife");
   assert.equal(row.damascus_is_set, true);
@@ -134,8 +143,20 @@ test("initialDamascusRow qualifies a cheap lot, tags every row damascus_knife, a
   const pricey = initialDamascusRow(item({ itemPrice: 20 }), ["damascus pocket knife lot"], "run-1", settings, []);
   assert.equal(pricey.status, "rejected");
   assert.equal(pricey.reason, "over_budget");
-  const kitchen = initialDamascusRow(item({ title: "Damascus 5 pcs Chef Knife Set", itemPrice: 20 }), ["damascus chef knife set"], "run-1", settings, []);
+  const kitchen = initialDamascusRow(item({ title: "Damascus 5 pcs Chef Knife Set", itemPrice: 20 }), ["damascus chef knife set"], "run-1", settings, [], true);
   assert.equal(kitchen.status, "qualified", "$24 for 5 chef knives fits the $6/knife kitchen ceiling");
+});
+
+test("multi-option listings are rejected: a variation item id, or choose-an-option wording", () => {
+  const variation = initialDamascusRow(item({ itemId: "v1|198241880099|497362977121", title: "Damascus Steak Knife Set 6 pcs" }), ["damascus steak knife set"], "run-1", settings, []);
+  assert.equal(variation.reason, "variation_listing");
+  for (const title of ["1-6PCS Kitchen Knife Steak Cleaver Chef Damascus Knives", "Damascus Steak Knife 1PC/3PCS/4PCS/6PCS"]) {
+    assert.deepEqual(analyzeDamascusText(title), { kind: "reject", reason: "selection_listing" }, title);
+  }
+  for (const description of ["1PC/3PCS/4PCS/6PCS Steak Knife (you can choose).", "Please select the set size from the drop down.", "Price is for one knife.", "Knives sold individually."]) {
+    assert.deepEqual(analyzeDamascusText("Damascus 6 pcs Steak Knife Set", description), { kind: "reject", reason: "selection_listing" }, description);
+  }
+  assert.equal(analyzeDamascusText("14PCS Damascus Chef Knife Set", "【IDEAL GIFT CHOICE】This knife set is beautifully crafted.").kind, "resolved", "gift-choice boilerplate isn't a selection listing");
 });
 
 test("initialDamascusRow applies staff negative keywords first, and queues ambiguous listings for vision", () => {
@@ -156,8 +177,11 @@ test("initialDamascusRow queues a shipping lookup only when the price alone stil
 
 test("refreshedDamascusRow reuses a prior vision count, re-priced, instead of re-spending Gemini", () => {
   const existing = { status: "rejected", reason: "over_budget", knife_count: 4, confidence: 0.95, detection_source: "vision", shipping_cost: 5, shipping_source: "listing", damascus_knife_type: "mixed", damascus_kitchen_count: 3, damascus_is_set: true, damascus_notes: "3 chef + 1 folder" };
-  const row = refreshedDamascusRow(item({ title: "Damascus Knives Estate Collection", itemPrice: 15, shippingCost: 5 }), ["damascus knife lot"], "run-2", existing, settings, []);
+  const row = refreshedDamascusRow(item({ title: "Damascus Knives Estate Collection", itemPrice: 15, shippingCost: 5 }), ["damascus knife lot"], "run-2", { ...existing, damascus_description_checked: true, short_description: "Full description." }, settings, []);
   assert.equal(row.status, "qualified", "$20 fits 3×$6 + 1×$3 = $21");
+  assert.equal(row.short_description, "Full description.", "the fetched full description is kept, not overwritten by the snippet");
+  const unchecked = refreshedDamascusRow(item({ title: "Damascus Knives Estate Collection", itemPrice: 15, shippingCost: 5 }), ["damascus knife lot"], "run-2", existing, settings, []);
+  assert.equal(unchecked.status, "pending", "still waits for the full-description check");
   assert.equal(row.detection_source, "vision");
   const stillNotDamascus = refreshedDamascusRow(item({ title: "Damascus Knives Estate Collection" }), ["damascus knife lot"], "run-2", { ...existing, reason: "not_damascus_vision" }, settings, []);
   assert.equal(stillNotDamascus.status, "rejected");
@@ -179,7 +203,7 @@ test("initialDamascusRow rejects items located outside the USA or listed as ship
   const foreign = initialDamascusRow(item({ itemLocationCountry: "PK" }), ["damascus pocket knife lot"], "run-1", settings, []);
   assert.equal(foreign.status, "rejected");
   assert.equal(foreign.reason, "not_us_located");
-  const domestic = initialDamascusRow(item({ itemLocationCountry: "US" }), ["damascus pocket knife lot"], "run-1", settings, []);
+  const domestic = initialDamascusRow(item({ itemLocationCountry: "US" }), ["damascus pocket knife lot"], "run-1", settings, [], true);
   assert.equal(domestic.status, "qualified");
   const shipsFrom = initialDamascusRow(item({ title: "Lot of 5 Damascus Pocket Knives - Ships from Pakistan" }), ["damascus pocket knife lot"], "run-1", settings, []);
   assert.equal(shipsFrom.reason, "not_us_located");
@@ -200,15 +224,50 @@ test("processPendingFinderItems qualifies a mixed Damascus lot on the two-tier c
     const sent = [];
     mockMailer(t, sent);
     await withFakeBackend({ finder_items: [pendingItem()] }, async (fake) => {
-      await withFetch([tokenRoute, imageRoute, geminiRoute({ knifeCount: 4, kitchenKnifeCount: 3, knifeType: "mixed", isSet: true, bladeLooksNonDamascus: false, confidence: 0.95, notes: "3 chef knives and a folder" })], async () => {
+      await withFetch([tokenRoute, imageRoute, descriptionRoute("Four hand-forged Damascus knives from an estate."), geminiRoute({ knifeCount: 4, kitchenKnifeCount: 3, knifeType: "mixed", isSet: true, bladeLooksNonDamascus: false, confidence: 0.95, notes: "3 chef knives and a folder" })], async () => {
         const { processed } = await processPendingFinderItems(5);
         assert.equal(processed, 1);
         const [row] = fake.tables.finder_items;
         assert.equal(row.status, "qualified");
+        assert.equal(row.damascus_description_checked, true);
         assert.equal(row.damascus_kitchen_count, 3);
         assert.equal(row.cost_per_knife, 5);
         assert.equal(sent.length, 1);
         assert.match(sent[0].subject, /Damascus knife/);
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems rejects a would-be qualifier whose full description says the price is for one option", async (t) => {
+  await withEnv(ENV, async () => {
+    const sent = [];
+    mockMailer(t, sent);
+    await withFakeBackend({ finder_items: [pendingItem({ title: "14PCS Damascus Steak Knife Set", knife_count: 14, damascus_kitchen_count: 14, detection_source: "text", item_price: 20, shipping_cost: 0 })] }, async (fake) => {
+      await withFetch([tokenRoute, descriptionRoute("1PC/3PCS/6PCS/14PCS steak knife, you can choose the quantity.")], async () => {
+        await processPendingFinderItems(5);
+        const [row] = fake.tables.finder_items;
+        assert.equal(row.status, "rejected");
+        assert.equal(row.reason, "selection_listing");
+        assert.equal(row.damascus_description_checked, true);
+        assert.equal(sent.length, 0, "no alert email for it");
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems sends a text-counted set to vision when the full description shows the piece count includes accessories", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({ finder_items: [pendingItem({ title: "14PCS Damascus Chef Knife Set", knife_count: 14, damascus_kitchen_count: 14, detection_source: "text", item_price: 60, shipping_cost: 0 })] }, async (fake) => {
+      let geminiCalled = false;
+      await withFetch([tokenRoute, descriptionRoute("Set includes 8 knives, a sharpening rod, and a leather roll bag."), { test: (url) => url.includes("generativelanguage"), respond: () => { geminiCalled = true; return jsonResponse({}); } }], async () => {
+        await processPendingFinderItems(5);
+        const [row] = fake.tables.finder_items;
+        assert.equal(row.status, "pending");
+        assert.equal(row.knife_count, null, "the title's piece count is no longer trusted");
+        assert.equal(row.damascus_description_checked, true);
+        assert.equal(geminiCalled, false, "vision runs on the next tick, not this one");
       });
     });
   });
@@ -257,6 +316,10 @@ test("startFinderRun('damascus_knife') scans only Damascus keywords and stamps i
       assert.ok(filters.length > 0 && filters.every((filter) => filter.includes("itemLocationCountry:US")), "every Damascus search is limited to US-located items");
       const [row] = fake.tables.finder_items;
       assert.equal(row.item_category, "damascus_knife");
+      assert.equal(row.status, "pending", "waits for the full-description check");
+      await withFetch([tokenRoute, descriptionRoute("Five Damascus folding knives, all shown.")], async () => {
+        await processPendingFinderItems(5);
+      });
       assert.equal(row.status, "qualified");
       const damascus = await finderOverview("damascus_knife");
       assert.equal(damascus.results.length, 1);

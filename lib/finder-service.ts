@@ -408,6 +408,8 @@ type FinderRow = {
   carving_handle_material: "stag" | "ivory" | "other" | null;
   damascus_kitchen_count?: number | null;
   damascus_is_set?: boolean | null;
+  damascus_description_checked?: boolean | null;
+  detection_source?: string | null;
 };
 
 // Every column processPendingFinderItems' merged `rows` actually reads (matches FinderRow above,
@@ -415,7 +417,7 @@ type FinderRow = {
 // on every scheduler tick (once a minute, forever), so pulling every column of finder_items
 // (including the many gaucho/carving match fields no batch-processing code path ever reads) here
 // is pure wasted egress at that frequency.
-const FINDER_BATCH_COLUMNS = "ebay_item_id, run_id, keyword_phrases, title, short_description, image_url, item_price, shipping_cost, shipping_source, knife_count, item_category, status, attempts, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, damascus_kitchen_count, damascus_is_set";
+const FINDER_BATCH_COLUMNS = "ebay_item_id, run_id, keyword_phrases, title, short_description, image_url, item_price, shipping_cost, shipping_source, knife_count, item_category, status, attempts, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, damascus_kitchen_count, damascus_is_set, damascus_description_checked, detection_source";
 
 // Categories that never qualify, at any price, regardless of which stage (text or vision)
 // classified them. swiss_army_multi_tool is deliberately absent — it's allowed through at the
@@ -590,6 +592,8 @@ type ExistingFinderRow = {
   damascus_kitchen_count?: number | null;
   damascus_is_set?: boolean | null;
   damascus_notes?: string | null;
+  damascus_description_checked?: boolean | null;
+  short_description?: string | null;
 };
 
 function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, existing: ExistingFinderRow | undefined, maxCost: number, swissArmyMax: number, negativePhrases: string[]) {
@@ -875,7 +879,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const ids = [...found.keys()];
     const existingById = new Map<string, ExistingFinderRow>();
     for (let index = 0; index < ids.length; index += 200) {
-      const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id, keyword_phrases, status, reason, knife_count, contains_folding_knife, confidence, detection_source, item_category, shipping_cost, shipping_source, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, gaucho_match_confidence, gaucho_maker_match, gaucho_matched_reference_id, gaucho_match_notes, mate_gourd_match_confidence, mate_gourd_matched_reference_id, mate_gourd_match_notes, damascus_knife_type, damascus_kitchen_count, damascus_is_set, damascus_notes").in("ebay_item_id", ids.slice(index, index + 200));
+      const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id, keyword_phrases, status, reason, knife_count, contains_folding_knife, confidence, detection_source, item_category, shipping_cost, shipping_source, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, gaucho_match_confidence, gaucho_maker_match, gaucho_matched_reference_id, gaucho_match_notes, mate_gourd_match_confidence, mate_gourd_matched_reference_id, mate_gourd_match_notes, damascus_knife_type, damascus_kitchen_count, damascus_is_set, damascus_notes, damascus_description_checked, short_description").in("ebay_item_id", ids.slice(index, index + 200));
       if (error) throw new Error(error.message);
       for (const row of data || []) existingById.set(row.ebay_item_id, row);
     }
@@ -1444,6 +1448,27 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   }
   // Same shape as the pocket-knife branch of processRow below (shipping-only rows skip Gemini; the
   // rest take one vision call), but with the Damascus text/vision rules and two-tier pricing.
+  // Re-reads a would-be Damascus qualifier against its full eBay description (not just the search
+  // snippet) before it's allowed to qualify: "choose an option" wording (the price is for one knife,
+  // not the set in the title) and "set includes a roll bag and sharpener" piece counts usually only
+  // appear there. One eBay call, spent only on listings that are about to qualify.
+  async function verifyDamascusDescription(row: FinderRow): Promise<
+    | { kind: "reject"; reason: string; notes: string | null; description: string }
+    | { kind: "needs_vision"; description: string }
+    | { kind: "ok"; count: number | null; kitchenCount: number | null; description: string }
+  > {
+    const fetched = await getItemDescription(row.ebay_item_id, await tokenForLookup());
+    const description = fetched || row.short_description;
+    const negativeMatch = matchesNegativeKeyword(row.title, description, damascusNegativePhrases);
+    if (negativeMatch) return { kind: "reject", reason: "negative_keyword_match", notes: `Matched negative keyword: "${negativeMatch}"`, description };
+    const text = analyzeDamascusText(row.title, description);
+    if (text.kind === "reject") return { kind: "reject", reason: text.reason, notes: "Found in the full listing description.", description };
+    if (text.kind === "resolved") return { kind: "ok", count: text.count, kitchenCount: text.kitchenCount, description };
+    // The snippet let text resolve a count, but the full description makes it ambiguous (e.g. the
+    // title's piece count turns out to include accessories) — count the knives from the photo.
+    if (row.detection_source === "text") return { kind: "needs_vision", description };
+    return { kind: "ok", count: null, kitchenCount: null, description };
+  }
   async function processDamascusRow(row: FinderRow) {
     if (row.run_id) runIds.add(row.run_id);
     if (pausedByCategory.get("damascus_knife")) {
@@ -1460,13 +1485,40 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         return;
       }
       if (row.knife_count != null) {
-        // Count and tier split already resolved (by text at discovery); only shipping was missing.
-        const shipping = await getItemShippingCost(row.ebay_item_id, await tokenForLookup());
-        const shippingValue = shipping.value != null && (shipping.currency === "" || shipping.currency === "USD") ? shipping.value : null;
-        const deal = shippingValue != null ? calculateDamascusDeal(Number(row.item_price), shippingValue, row.knife_count, row.damascus_kitchen_count ?? 0, damascusSettings) : null;
+        // Count and tier split already known (text at discovery, or an earlier vision call reused on a
+        // rescan); pending only for a shipping lookup and/or the full-description check (see
+        // verifyDamascusDescription).
+        let shippingValue = row.shipping_cost == null ? null : Number(row.shipping_cost);
+        let shippingSource = row.shipping_source;
+        if (shippingValue == null) {
+          const shipping = await getItemShippingCost(row.ebay_item_id, await tokenForLookup());
+          if (shipping.value != null && (shipping.currency === "" || shipping.currency === "USD")) { shippingValue = shipping.value; shippingSource = "lookup"; }
+        }
+        let knifeCount = row.knife_count;
+        let kitchenCount = row.damascus_kitchen_count ?? 0;
+        let deal = shippingValue != null ? calculateDamascusDeal(Number(row.item_price), shippingValue, knifeCount, kitchenCount, damascusSettings) : null;
+        const descriptionFields: Record<string, unknown> = {};
+        if (deal?.qualifies && !row.damascus_description_checked) {
+          const verified = await verifyDamascusDescription(row);
+          Object.assign(descriptionFields, { short_description: verified.description, damascus_description_checked: true });
+          if (verified.kind === "reject") {
+            const { error: saveError } = await supabaseAdmin.from("finder_items").update({ ...descriptionFields, status: "rejected", reason: verified.reason, damascus_notes: verified.notes, shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
+            if (saveError) throw new Error(saveError.message);
+            processed++;
+            return;
+          }
+          if (verified.kind === "needs_vision") {
+            const { error: saveError } = await supabaseAdmin.from("finder_items").update({ ...descriptionFields, knife_count: null, detection_source: null, confidence: null, total_cost: null, cost_per_knife: null, shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null, status: "pending", reason: null, next_attempt_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
+            if (saveError) throw new Error(saveError.message);
+            deferred++;
+            return;
+          }
+          if (verified.count != null) { knifeCount = verified.count; kitchenCount = verified.kitchenCount ?? 0; }
+          deal = calculateDamascusDeal(Number(row.item_price), shippingValue!, knifeCount, kitchenCount, damascusSettings);
+        }
         const qualifies = Boolean(deal?.qualifies);
         const reason = shippingValue == null ? "missing_shipping" : deal?.reason;
-        const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: qualifies ? "qualified" : "rejected", reason, shipping_cost: shippingValue, shipping_source: shippingValue != null ? "lookup" : null, total_cost: deal && "totalCost" in deal ? deal.totalCost : null, cost_per_knife: deal && "costPerKnife" in deal ? deal.costPerKnife : null, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
+        const { error: saveError } = await supabaseAdmin.from("finder_items").update({ ...descriptionFields, status: qualifies ? "qualified" : "rejected", reason, knife_count: knifeCount, damascus_kitchen_count: kitchenCount, shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null, total_cost: deal && "totalCost" in deal ? deal.totalCost : null, cost_per_knife: deal && "costPerKnife" in deal ? deal.costPerKnife : null, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
         if (saveError) throw new Error(saveError.message);
         if (qualifies && !row.run_id) runlessQualifiedIds.push(row.ebay_item_id);
         processed++;
@@ -1493,13 +1545,27 @@ export async function processPendingFinderItems(limit = config().batchSize) {
           else shippingReason = "missing_shipping";
         }
       }
-      const deal = !decision.reason && shippingValue != null ? calculateDamascusDeal(Number(row.item_price), shippingValue, decision.knifeCount, decision.kitchenCount, damascusSettings) : null;
-      const qualifies = Boolean(deal?.qualifies);
-      const reason = decision.reason || shippingReason || deal?.reason || null;
+      let deal = !decision.reason && shippingValue != null ? calculateDamascusDeal(Number(row.item_price), shippingValue, decision.knifeCount, decision.kitchenCount, damascusSettings) : null;
+      let verifiedReason: string | null = null;
+      let verifiedNotes: string | null = null;
+      const descriptionFields: Record<string, unknown> = {};
+      if (deal?.qualifies && !row.damascus_description_checked) {
+        const verified = await verifyDamascusDescription(row);
+        Object.assign(descriptionFields, { short_description: verified.description, damascus_description_checked: true });
+        if (verified.kind === "reject") { verifiedReason = verified.reason; verifiedNotes = verified.notes; }
+        else if (verified.kind === "ok" && verified.count != null) {
+          decision.knifeCount = verified.count;
+          decision.kitchenCount = verified.kitchenCount ?? 0;
+          deal = calculateDamascusDeal(Number(row.item_price), shippingValue!, decision.knifeCount, decision.kitchenCount, damascusSettings);
+        }
+      }
+      const qualifies = Boolean(!verifiedReason && deal?.qualifies);
+      const reason = verifiedReason || decision.reason || shippingReason || deal?.reason || null;
       const { error: saveError } = await supabaseAdmin.from("finder_items").update({
+        ...descriptionFields,
         status: qualifies ? "qualified" : "rejected", reason,
         knife_count: decision.knifeCount || null, contains_folding_knife: decision.knifeType === "pocket", confidence: vision.confidence, detection_source: "vision", item_category: "damascus_knife",
-        damascus_knife_type: decision.knifeType, damascus_kitchen_count: decision.kitchenCount, damascus_is_set: decision.isSet, damascus_notes: vision.notes,
+        damascus_knife_type: decision.knifeType, damascus_kitchen_count: decision.kitchenCount, damascus_is_set: decision.isSet, damascus_notes: verifiedNotes || vision.notes,
         shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null,
         total_cost: deal && "totalCost" in deal ? deal.totalCost : null, cost_per_knife: deal && "costPerKnife" in deal ? deal.costPerKnife : null,
         attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),

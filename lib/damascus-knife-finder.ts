@@ -81,6 +81,21 @@ const keychainKnifePattern = /\bkey[\s-]*(?:chain|ring)\b(?:\s+\w+){0,4}\s*kn(?:
 // (e.g. a US "warehouse" listing that actually drop-ships from overseas).
 const shipsFromAbroadPattern = /\b(?:ships?|shipped|shipping|dispatched)\s+(?:directly\s+)?from\s+(?:pakistan|china|india|hong\s*kong|overseas|abroad)\b|\b(?:international|overseas)\s+(?:seller|shipment)\b|\bimported\s+from\b/i;
 const selectionPattern = /\b(?:choose|pick|select)\s+(?:your\s+)?(?:one|1|a|any\s+one)\b|\byour\s+choice\b|\bchoice\s+of\b/i;
+// "Buyer chooses an option" wording, where the listed price is only one option's (usually the
+// cheapest, e.g. a single knife) rather than the whole set in the title. Found in real Damascus
+// results: "1-6PCS ... Knives" / "1PC/3PCS/4PCS/6PCS (you can choose)". Deliberately phrase-anchored:
+// sellers' "IDEAL GIFT CHOICE" boilerplate must not trigger it.
+const optionSelectionPattern = new RegExp([
+  // A range or list of piece counts: "1-6PCS", "1PC/3PCS/6PCS", "2 or 3 pcs", "1 to 5 pieces".
+  "\\b\\d{1,2}\\s*(?:pcs?|pieces?)?\\s*(?:-|/|\\bor\\b|\\bto\\b)\\s*\\d{1,2}\\s*(?:pcs?|pieces?)\\b",
+  "\\byou\\s+(?:can|may|will|need\\s+to|have\\s+to|must)\\s+(?:choose|select|pick)\\b",
+  "\\b(?:please|kindly)\\s+(?:choose|select|pick)\\b",
+  "\\b(?:choose|select|pick)\\s+(?:from|the|your)\\s+(?:\\w+\\s+){0,2}(?:options?|variations?|drop[\\s-]*down|menu|quantity|qty|size|sets?|models?|styles?|colou?rs?|pieces?|knife|knives)\\b",
+  "\\b(?:options?|variations?)\\s+(?:are\\s+)?available\\b",
+  "\\bprice\\s+(?:is\\s+|shown\\s+)?(?:for|per)\\s+(?:one|1|a\\s+single|single|each|the\\s+first)\\b",
+  "\\bprice\\s+(?:is\\s+)?per\\s+(?:piece|pc|knife|item|unit)\\b",
+  "\\bsold\\s+(?:individually|separately|each|per\\s+piece)\\b",
+].join("|"), "i");
 
 const kitchenPattern = /\b(?:chef'?s?|kitchen|cooking|santoku|nakiri|gyuto|kiritsuke|cleavers?|paring|bread\s+kn|boning|fill?ets?|carving\s+kn|slic(?:er|ing)|steak\s+kn|petty|bunka|deba|yanagiba|sujihiki|usuba|cutlery|kni(?:fe|ves)\s+block)\b/i;
 const pocketPattern = /\b(?:pocket\s*kn(?:ife|ives|ifes)|pocketknife|pen\s*kn(?:ife|ives)|penknife|jack\s*kn(?:ife|ives)|jackknife|folding|foldable|folders?|flipper|liner\s*lock|lock\s*back|back\s*lock|frame\s*lock)\b/i;
@@ -138,7 +153,7 @@ export type DamascusTextAnalysis =
 
 export function analyzeDamascusText(title: string, description = ""): DamascusTextAnalysis {
   const text = clean(`${title} ${description}`);
-  if (selectionPattern.test(text)) return { kind: "reject", reason: "selection_listing" };
+  if (selectionPattern.test(text) || optionSelectionPattern.test(text)) return { kind: "reject", reason: "selection_listing" };
   if (!damascusPattern.test(text)) return { kind: "reject", reason: "not_damascus" };
   if (shipsFromAbroadPattern.test(text)) return { kind: "reject", reason: "not_us_located" };
   if (fakeDamascusPattern.test(text)) return { kind: "reject", reason: "fake_damascus" };
@@ -273,8 +288,18 @@ function baseRow(item: EbayFinderItem, keywordPhrases: string[], runId: string) 
   };
 }
 
+// eBay's Browse API item id is "v1|<listing id>|<variation id>"; a non-zero variation id means a
+// multi-variation listing, whose search-result price is only the matched variation's (typically
+// the cheapest option, e.g. one knife out of a "1-6PCS" listing) — never the set in the title.
+export function isVariationListing(itemId: string) {
+  const variationId = itemId.split("|")[2];
+  return Boolean(variationId) && variationId !== "0";
+}
+
 export type DamascusExistingRow = {
   status?: string;
+  short_description?: string | null;
+  damascus_description_checked?: boolean | null;
   reason?: string | null;
   knife_count: number | null;
   confidence: number | null;
@@ -287,7 +312,12 @@ export type DamascusExistingRow = {
   damascus_notes?: string | null;
 };
 
-function pricedRow<T extends object>(row: T, item: EbayFinderItem, count: number, kitchenCount: number, settings: DamascusSettings) {
+// descriptionChecked: whether the listing's full eBay description (not just the search snippet) has
+// already been read. A listing is never qualified on the snippet alone — sellers put "choose an
+// option" wording and "set includes a roll bag and sharpener" piece counts in the full description —
+// so a would-be qualifier stays pending until lib/finder-service.ts's processDamascusRow fetches the
+// full description and re-checks it (one eBay call, spent only on listings about to qualify).
+function pricedRow<T extends object>(row: T, item: EbayFinderItem, count: number, kitchenCount: number, settings: DamascusSettings, descriptionChecked = false) {
   if (item.shippingCost == null) {
     if (!isDamascusShippingLookupWorthwhile(item.itemPrice, count, kitchenCount, settings)) {
       return { ...row, status: "rejected", reason: "over_budget", processed_at: new Date().toISOString() };
@@ -295,6 +325,9 @@ function pricedRow<T extends object>(row: T, item: EbayFinderItem, count: number
     return { ...row, status: "pending", reason: null, next_attempt_at: new Date().toISOString() };
   }
   const deal = calculateDamascusDeal(item.itemPrice, item.shippingCost, count, kitchenCount, settings);
+  if (deal.qualifies && !descriptionChecked) {
+    return { ...row, status: "pending", reason: null, total_cost: deal.totalCost, cost_per_knife: deal.costPerKnife, next_attempt_at: new Date().toISOString() };
+  }
   return {
     ...row,
     status: deal.qualifies ? "qualified" : "rejected",
@@ -305,7 +338,7 @@ function pricedRow<T extends object>(row: T, item: EbayFinderItem, count: number
   };
 }
 
-export function initialDamascusRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, settings: DamascusSettings, negativePhrases: string[]) {
+export function initialDamascusRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, settings: DamascusSettings, negativePhrases: string[], descriptionChecked = false) {
   const base = baseRow(item, keywordPhrases, runId);
   const rejected = (reason: string, extra: Record<string, unknown> = {}) => ({ ...base, ...extra, status: "rejected", reason, processed_at: new Date().toISOString() });
   if (item.currency !== "USD") return rejected("non_usd_currency");
@@ -313,13 +346,14 @@ export function initialDamascusRow(item: EbayFinderItem, keywordPhrases: string[
   if (!Number.isFinite(item.itemPrice) || item.itemPrice < 0) return rejected("invalid_price");
   if (item.itemEndDate && new Date(item.itemEndDate).getTime() <= Date.now()) return rejected("ended");
   if (item.itemLocationCountry && item.itemLocationCountry.toUpperCase() !== DAMASCUS_ITEM_LOCATION_COUNTRY) return rejected("not_us_located", { damascus_notes: `Item located in ${item.itemLocationCountry}` });
+  if (isVariationListing(item.itemId)) return rejected("variation_listing", { damascus_notes: "Multi-variation listing: the price shown is only one option's, not the whole set." });
   const negativeMatch = matchesNegativeKeyword(item.title, item.shortDescription, negativePhrases);
   if (negativeMatch) return rejected("negative_keyword_match", { damascus_notes: `Matched negative keyword: "${negativeMatch}"` });
   const text = analyzeDamascusText(item.title, item.shortDescription);
   if (text.kind === "reject") return rejected(text.reason);
   if (text.kind === "resolved") {
     const known = { ...base, knife_count: text.count, contains_folding_knife: text.knifeType === "pocket", confidence: text.confidence, detection_source: "text" as const, damascus_knife_type: text.knifeType, damascus_kitchen_count: text.kitchenCount, damascus_is_set: text.isSet };
-    return pricedRow(known, item, text.count, text.kitchenCount, settings);
+    return pricedRow({ ...known, damascus_description_checked: descriptionChecked }, item, text.count, text.kitchenCount, settings, descriptionChecked);
   }
   if (!item.imageUrl) return rejected("missing_image", { damascus_is_set: text.isSet });
   return { ...base, damascus_is_set: text.isSet, status: "pending", reason: null, next_attempt_at: new Date().toISOString() };
@@ -328,10 +362,15 @@ export function initialDamascusRow(item: EbayFinderItem, keywordPhrases: string[
 export function refreshedDamascusRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, existing: DamascusExistingRow | undefined, settings: DamascusSettings, negativePhrases: string[]) {
   // Reuse a per-item shipping lookup across refreshes rather than re-spending an eBay call.
   const preservedShipping = existing?.shipping_source === "lookup" && existing.shipping_cost != null;
-  const effectiveItem = item.shippingCost == null && preservedShipping
+  const shippedItem = item.shippingCost == null && preservedShipping
     ? { ...item, shippingCost: Number(existing!.shipping_cost), shippingCurrency: "USD" }
     : item;
-  const fresh = initialDamascusRow(effectiveItem, keywordPhrases, runId, settings, negativePhrases);
+  // Once the full description has been fetched, keep analyzing against it (and keep it stored)
+  // instead of the much shorter search snippet, so a rescan neither re-spends that eBay call nor
+  // loses the selection/accessory wording that only the full description contains.
+  const descriptionChecked = Boolean(existing?.damascus_description_checked && existing.short_description);
+  const effectiveItem = descriptionChecked ? { ...shippedItem, shortDescription: existing!.short_description! } : shippedItem;
+  const fresh = initialDamascusRow(effectiveItem, keywordPhrases, runId, settings, negativePhrases, descriptionChecked);
   const freshRow = preservedShipping ? { ...fresh, shipping_source: "lookup" as const } : fresh;
   // Fresh text always wins when it has an opinion (rejected or resolved); only a still-ambiguous
   // listing reuses a previous vision verdict, re-priced against today's price and settings.
@@ -351,7 +390,7 @@ export function refreshedDamascusRow(item: EbayFinderItem, keywordPhrases: strin
   if (existing.status === "rejected" && existing.reason && existing.reason !== "over_budget" && existing.reason !== "missing_shipping") {
     return { ...visionFields, status: "rejected", reason: existing.reason, next_attempt_at: null, processed_at: new Date().toISOString() };
   }
-  return { ...pricedRow(visionFields, effectiveItem, existing.knife_count, existing.damascus_kitchen_count ?? 0, settings) };
+  return { ...pricedRow({ ...visionFields, damascus_description_checked: descriptionChecked }, effectiveItem, existing.knife_count, existing.damascus_kitchen_count ?? 0, settings, descriptionChecked) };
 }
 
 // Sets/lots first, then the most knives, then newest — the dashboard's and alert emails' order.
