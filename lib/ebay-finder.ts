@@ -148,6 +148,22 @@ export async function getItemDetails(itemId: string, token?: string): Promise<{ 
   return { description: payload.description ? htmlToText(payload.description).slice(0, 4000) : "", itemGroupType };
 }
 
+// Asks eBay directly for the listing's variation group (e.g. a "Number of pieces: 5 / 8 / 14"
+// dropdown). This is the only reliable signal for some multi-option listings: their search result id
+// ends in "|0" and the single-item lookup reports no item group, yet the listed price is only the
+// cheapest option's. Returns the number of variations (0 when the listing isn't a variation group,
+// which eBay answers with a 4xx).
+export async function getItemGroupVariationCount(itemId: string, token?: string): Promise<number> {
+  const legacyId = itemId.split("|")[1] || itemId;
+  const url = `${ebayApiBaseUrl()}/buy/browse/v1/item/get_items_by_item_group?item_group_id=${encodeURIComponent(legacyId)}`;
+  const response = await fetch(url, { headers: await browseHeaders(token), signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS) });
+  await recordEbayApiCall();
+  if (response.status >= 400 && response.status < 500) return 0;
+  if (!response.ok) throw new Error(`eBay item group lookup for "${itemId}" failed (${response.status}).`);
+  const payload = await response.json() as { items?: unknown[] };
+  return payload.items?.length ?? 0;
+}
+
 function parseItemSummaries(summaries: Array<Record<string, unknown>>): EbayFinderItem[] {
   const result: EbayFinderItem[] = [];
   for (const raw of summaries) {
