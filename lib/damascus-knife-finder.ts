@@ -158,7 +158,7 @@ function damascusKnifeCount(title: string, description: string): { count: number
 export type DamascusTextAnalysis =
   | { kind: "reject"; reason: string }
   | { kind: "resolved"; count: number; kitchenCount: number; knifeType: DamascusKnifeType; isSet: boolean; confidence: number }
-  | { kind: "vision"; knownCount?: number; isSet: boolean };
+  | { kind: "vision"; knownCount?: number; maxCount?: number; isSet: boolean };
 
 export function analyzeDamascusText(title: string, description = ""): DamascusTextAnalysis {
   const text = clean(`${title} ${description}`);
@@ -177,8 +177,14 @@ export function analyzeDamascusText(title: string, description = ""): DamascusTe
   const kitchen = kitchenPattern.test(title);
   const nonKitchenFamilies = [pocketPattern.test(title) && "pocket", bowiePattern.test(title) && "bowie", fixedBladePattern.test(title) && "fixed_blade"].filter(Boolean) as DamascusKnifeType[];
   const counted = damascusKnifeCount(title, description);
-  const piecesUntrusted = counted?.fromPieces && setAccessoryPattern.test(text);
+  // A kitchen set's "N pcs" is never a knife count: these sets routinely count a roll bag, sheaths,
+  // a sharpener, or scissors among the pieces without saying so anywhere in the listing ("14PCS
+  // chef knife set" turned out to be 7 knives and 7 accessories). The piece count is kept only as
+  // an upper bound (maxCount) and the knives are counted from the photo.
+  const kitchenPieces = Boolean(counted?.fromPieces && kitchen);
+  const piecesUntrusted = counted?.fromPieces && (kitchenPieces || setAccessoryPattern.test(text));
   const count = counted && !piecesUntrusted && counted.count <= DAMASCUS_MAX_PLAUSIBLE_KNIFE_COUNT ? counted.count : null;
+  const maxCount = kitchenPieces && counted!.count <= DAMASCUS_MAX_PLAUSIBLE_KNIFE_COUNT ? counted!.count : undefined;
   const isSet = setPattern.test(title) || pluralKnifePattern.test(title) || (counted?.count ?? 0) > 1;
 
   // A kitchen set that also includes a pocket/bowie knife needs vision to split the two tiers.
@@ -188,7 +194,7 @@ export function analyzeDamascusText(title: string, description = ""): DamascusTe
     if (count) return { kind: "resolved", count, kitchenCount: kitchen ? count : 0, knifeType, isSet: isSet || count > 1, confidence: 0.99 };
     if (!isSet) return { kind: "resolved", count: 1, kitchenCount: kitchen ? 1 : 0, knifeType, isSet: false, confidence: 0.95 };
   }
-  return { kind: "vision", ...(count ? { knownCount: count } : {}), isSet };
+  return { kind: "vision", ...(count ? { knownCount: count } : {}), ...(maxCount ? { maxCount } : {}), isSet };
 }
 
 export const DAMASCUS_VISION_KNIFE_TYPES = ["pocket", "bowie", "kitchen", "fixed_blade", "mixed", "not_a_knife"] as const;
@@ -368,8 +374,14 @@ export function initialDamascusRow(item: EbayFinderItem, keywordPhrases: string[
     const known = { ...base, knife_count: text.count, contains_folding_knife: text.knifeType === "pocket", confidence: text.confidence, detection_source: "text" as const, damascus_knife_type: text.knifeType, damascus_kitchen_count: text.kitchenCount, damascus_is_set: text.isSet };
     return pricedRow({ ...known, damascus_description_checked: descriptionChecked }, item, text.count, text.kitchenCount, settings, descriptionChecked);
   }
+  // Even if every piece were a knife the set couldn't qualify — no photo count can change that.
+  if (text.maxCount && Number(item.itemPrice) + Number(item.shippingCost ?? 0) > damascusCeiling(text.maxCount, text.maxCount, settings)) {
+    return rejected("over_budget", { damascus_is_set: text.isSet, damascus_notes: `Over budget even if all ${text.maxCount} pieces were knives.` });
+  }
   if (!item.imageUrl) return rejected("missing_image", { damascus_is_set: text.isSet });
-  return { ...base, damascus_is_set: text.isSet, status: "pending", reason: null, next_attempt_at: new Date().toISOString() };
+  // Counts are cleared explicitly so a rescan of a row an earlier rule had text-counted doesn't keep
+  // that stale count (an upsert leaves columns it doesn't mention untouched).
+  return { ...base, knife_count: null, detection_source: null, confidence: null, damascus_is_set: text.isSet, status: "pending", reason: null, next_attempt_at: new Date().toISOString() };
 }
 
 export function refreshedDamascusRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, existing: DamascusExistingRow | undefined, settings: DamascusSettings, negativePhrases: string[]) {
@@ -387,7 +399,7 @@ export function refreshedDamascusRow(item: EbayFinderItem, keywordPhrases: strin
   const freshRow = preservedShipping ? { ...fresh, shipping_source: "lookup" as const } : fresh;
   // Fresh text always wins when it has an opinion (rejected or resolved); only a still-ambiguous
   // listing reuses a previous vision verdict, re-priced against today's price and settings.
-  if (freshRow.status !== "pending" || "knife_count" in freshRow) return freshRow;
+  if (freshRow.status !== "pending" || (freshRow as { knife_count?: number | null }).knife_count != null) return freshRow;
   if (!existing || existing.detection_source !== "vision" || existing.knife_count == null) return freshRow;
   const visionFields = {
     ...freshRow,

@@ -91,7 +91,7 @@ test("analyzeDamascusText resolves counted pocket, bowie, and kitchen listings f
   const pocket = analyzeDamascusText("Lot of 5 Damascus Steel Pocket Knives");
   assert.equal(pocket.kind, "resolved");
   assert.equal(pocket.count, 5); assert.equal(pocket.kitchenCount, 0); assert.equal(pocket.knifeType, "pocket"); assert.equal(pocket.isSet, true);
-  const chef = analyzeDamascusText("Damascus Steel 5 pcs Chef Kitchen Knife Set VG-10 67 Layer");
+  const chef = analyzeDamascusText("Damascus Steel 5 Chef Knives Kitchen Set VG-10 67 Layer");
   assert.equal(chef.kind, "resolved");
   assert.equal(chef.count, 5); assert.equal(chef.kitchenCount, 5); assert.equal(chef.knifeType, "kitchen");
   const bowie = analyzeDamascusText("Custom Handmade Damascus Bowie Knife 12\" w/ Leather Sheath");
@@ -146,7 +146,7 @@ test("initialDamascusRow qualifies a cheap lot once its description is checked, 
   const pricey = initialDamascusRow(item({ itemPrice: 20 }), ["damascus pocket knife lot"], "run-1", settings, []);
   assert.equal(pricey.status, "rejected");
   assert.equal(pricey.reason, "over_budget");
-  const kitchen = initialDamascusRow(item({ title: "Damascus 5 pcs Chef Knife Set", itemPrice: 20 }), ["damascus chef knife set"], "run-1", settings, [], true);
+  const kitchen = initialDamascusRow(item({ title: "Damascus 5 Chef Knives Set", itemPrice: 20 }), ["damascus chef knife set"], "run-1", settings, [], true);
   assert.equal(kitchen.status, "qualified", "$24 for 5 chef knives fits the $6/knife kitchen ceiling");
 });
 
@@ -159,12 +159,28 @@ test("multi-option listings are rejected: a variation item id, or choose-an-opti
   for (const description of ["1PC/3PCS/4PCS/6PCS Steak Knife (you can choose).", "Please select the set size from the drop down.", "Price is for one knife.", "Knives sold individually."]) {
     assert.deepEqual(analyzeDamascusText("Damascus 6 pcs Steak Knife Set", description), { kind: "reject", reason: "selection_listing" }, description);
   }
-  assert.equal(analyzeDamascusText("14PCS Damascus Chef Knife Set", "【IDEAL GIFT CHOICE】This knife set is beautifully crafted.").kind, "resolved", "gift-choice boilerplate isn't a selection listing");
+  assert.equal(analyzeDamascusText("14PCS Damascus Chef Knife Set", "【IDEAL GIFT CHOICE】This knife set is beautifully crafted.").kind, "vision", "gift-choice boilerplate isn't a selection listing");
 });
 
 test("a search result flagged as part of an item group is a multi-option listing even with a |0 id", () => {
   const row = initialDamascusRow(item({ itemId: "v1|227498700741|0", itemGroupType: "SELLER_DEFINED_VARIATIONS", title: "14PCS Damascus Chef Knife Set" }), ["damascus chef knife set"], "run-1", settings, []);
   assert.equal(row.reason, "variation_listing");
+});
+
+test("a kitchen set's piece count is only an upper bound: the knives are counted from the photo", () => {
+  const text = analyzeDamascusText("14PCS Handmade HAND FORGED DAMASCUS STEEL CHEF KNIFE Set Kitchen Knives Butcher", "【IDEAL GIFT CHOICE】This knife set is beautifully crafted.");
+  assert.equal(text.kind, "vision");
+  assert.equal(text.knownCount, undefined);
+  assert.equal(text.maxCount, 14);
+  const pending = initialDamascusRow(item({ title: "14PCS Damascus Chef Knife Set Kitchen Knives", itemPrice: 69.99, shippingCost: 0 }), ["damascus chef knife set"], "run-1", settings, []);
+  assert.equal(pending.status, "pending");
+  assert.equal(pending.knife_count, null, "a stale text count is cleared");
+  const hopeless = initialDamascusRow(item({ title: "14PCS Damascus Chef Knife Set Kitchen Knives", itemPrice: 120, shippingCost: 0 }), ["damascus chef knife set"], "run-1", settings, []);
+  assert.equal(hopeless.status, "rejected");
+  assert.equal(hopeless.reason, "over_budget", "$120 is over $6 x 14 even if every piece were a knife");
+  const pocketLot = analyzeDamascusText("10 pcs Damascus Folding Pocket Knife Lot");
+  assert.equal(pocketLot.kind, "resolved", "a pocket-knife lot's piece count is still trusted");
+  assert.equal(pocketLot.count, 10);
 });
 
 test("initialDamascusRow applies staff negative keywords first, and queues ambiguous listings for vision", () => {
@@ -326,18 +342,25 @@ test("processPendingFinderItems rejects a would-be qualifier whose item-group lo
   });
 });
 
-test("processPendingFinderItems rejects a would-be qualifier that eBay's legacy-id lookup refuses as a variation listing", async (t) => {
+test("processPendingFinderItems prices a 14PCS kitchen set on the knives vision counts, capped at the piece count", async (t) => {
   await withEnv(ENV, async () => {
     const sent = [];
     mockMailer(t, sent);
-    await withFakeBackend({ finder_items: [pendingItem({ title: "14PCS Damascus Chef Knife Set", knife_count: 14, damascus_kitchen_count: 14, detection_source: "text", item_price: 60, shipping_cost: 0 })] }, async (fake) => {
-      const legacyRoute = { test: (url) => url.startsWith(`${ITEM_URL}get_item_by_legacy_id`), respond: () => jsonResponse({ errors: [{ errorId: 11006, message: "The legacy Id is of an item group. Please provide legacy_variation_id or legacy_variation_sku." }] }, { status: 400 }) };
-      await withFetch([tokenRoute, noGroupRoute, legacyRoute, descriptionRoute("Premium Damascus chef knife set.")], async () => {
+    const title = "14PCS Handmade HAND FORGED DAMASCUS STEEL CHEF KNIFE Set Kitchen Knives";
+    await withFakeBackend({ finder_items: [pendingItem({ ebay_item_id: "v1|7|0", title, item_price: 69.99, shipping_cost: 0, buying_options: ["FIXED_PRICE"] }), pendingItem({ ebay_item_id: "v1|8|0", title, item_price: 69.99, shipping_cost: 0, buying_options: ["FIXED_PRICE"] })] }, async (fake) => {
+      let call = 0;
+      const vision = [
+        { knifeCount: 7, kitchenKnifeCount: 7, knifeType: "kitchen", isSet: true, bladeLooksNonDamascus: false, confidence: 0.95, notes: "7 knives, a roll bag, and accessories" },
+        { knifeCount: 30, kitchenKnifeCount: 30, knifeType: "kitchen", isSet: true, bladeLooksNonDamascus: false, confidence: 0.95, notes: "whole stock photo" },
+      ];
+      const gemini = { test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => jsonResponse({ candidates: [{ content: { parts: [{ text: JSON.stringify(vision[call++]) }] } }] }) };
+      await withFetch([tokenRoute, imageRoute, noGroupRoute, descriptionRoute("Premium Damascus chef knife set."), gemini], async () => {
         await processPendingFinderItems(5);
-        const [row] = fake.tables.finder_items;
-        assert.equal(row.status, "rejected");
-        assert.equal(row.reason, "variation_listing");
-        assert.equal(sent.length, 0);
+        const seven = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|7|0");
+        const capped = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|8|0");
+        assert.equal(seven.status, "rejected");
+        assert.equal(seven.reason, "over_budget", "$69.99 for 7 chef knives is over $6/knife");
+        assert.equal(capped.knife_count, 14, "vision's count never exceeds the set's piece count");
       });
     });
   });
