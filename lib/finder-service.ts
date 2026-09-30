@@ -43,6 +43,7 @@ import {
   analyzeDamascusWithGemini,
   calculateDamascusDeal,
   compareDamascusPriority,
+  damascusCeiling,
   DAMASCUS_DEFAULTS,
   DAMASCUS_ITEM_LOCATION_COUNTRY,
   damascusKnifeGroupForPhrases,
@@ -1533,6 +1534,12 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       const textAnalysis = analyzeDamascusText(row.title, row.short_description);
       const knownCount = textAnalysis.kind === "vision" ? textAnalysis.knownCount : undefined;
       const decision = evaluateDamascusVision(vision, knownCount, config().confidence);
+      // Price before confidence: a listing that's over budget even at its stated/counted quantity is
+      // reported as over_budget, not "photo analysis wasn't confident" — the confidence question only
+      // matters for a listing that could otherwise qualify.
+      if (decision.reason === "low_confidence" && decision.knifeCount > 0 && Number(row.item_price) + Number(row.shipping_cost ?? 0) > damascusCeiling(decision.knifeCount, decision.kitchenCount, damascusSettings)) {
+        decision.reason = "over_budget";
+      }
       let shippingValue = row.shipping_cost == null ? null : Number(row.shipping_cost);
       let shippingSource = row.shipping_source;
       let shippingReason: string | null = null;
