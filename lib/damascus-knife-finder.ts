@@ -35,7 +35,10 @@ export function damascusKnifeGroupForPhrases(phrases: string[]): boolean {
 
 export type DamascusSettings = { maxCostPerKnife: number; kitchenMaxCostPerKnife: number };
 export const DAMASCUS_DEFAULTS: DamascusSettings = { maxCostPerKnife: 3, kitchenMaxCostPerKnife: 6 };
-export const DAMASCUS_MAX_PLAUSIBLE_KNIFE_COUNT = 50;
+// Higher than the pocket-knife pipeline's 50: Damascus bulk lots of 60-100 knives are common and real
+// (e.g. "Lot of 100 pcs Handmade Damascus Skinner Knife").
+export const DAMASCUS_MAX_PLAUSIBLE_KNIFE_COUNT = 200;
+export const DAMASCUS_STATED_COUNT_CONFIDENCE = 0.75;
 
 // Damascus results must be physically located in the US — no overseas imports. Enforced twice:
 // every Damascus eBay search filters on itemLocationCountry (lib/ebay-finder.ts's
@@ -107,7 +110,10 @@ const setPattern = /\b(?:sets?|lots?|bundle|collection|pcs?|pieces?|pair|kits?)\
 const pluralKnifePattern = /\bkn(?:ives|ifes)\b/i;
 // A "N-piece kitchen set" often counts a block, scissors, or a sharpening steel among the pieces,
 // so a piece count is only trusted as a knife count when none of these are mentioned.
-const setAccessoryPattern = /\b(?:block|stand|holder|scissors|shears|sharpener|sharpening|honing|whetstone|stone|roll|bag|magnetic|peeler|forks?|sheaths?|pouch|case|box)\b/i;
+// Sheaths, pouches, cases, and boxes are deliberately absent: they ship one per knife and sellers
+// don't count them as pieces ("Lot of 20 pcs Skinner Knife with Sheath" is 20 knives). Including
+// them sent every sheathed lot to Gemini, where a sample photo got it wrongly rejected.
+const setAccessoryPattern = /\b(?:block|stand|holder|scissors|shears|sharpener|sharpening|honing|whetstone|stone|roll|bag|magnetic|peeler|forks?)\b/i;
 
 const numberWords: Record<string, number> = {
   two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11,
@@ -128,8 +134,11 @@ function damascusKnifeCount(title: string, description: string): { count: number
   const titleValues = values(cleanTitle);
   if (titleValues.length > 1) return { count: titleValues.reduce((sum, value) => sum + value, 0), fromPieces: false };
   if (titleValues.length === 1) return { count: titleValues[0], fromPieces: false };
+  // "Lot of N" states a knife quantity, not a piece count, so it's trusted even when accessories
+  // are mentioned; "set of N"/"N pcs" can include a block or sharpener among the pieces.
+  const lotValue = Number(cleanTitle.match(/\blot\s+of\s+(\d{1,3})\b/i)?.[1]);
+  if (Number.isInteger(lotValue) && lotValue > 0) return { count: lotValue, fromPieces: false };
   const pieceCountPatterns = [
-    /\blot\s+of\s+(\d{1,3})\b/i,
     /\bset\s+of\s+(\d{1,3})\b/i,
     /(?<![A-Za-z]-)\b(\d{1,3})[\s-]*(?:pcs?|pieces?|pk|pack)\b/i,
   ];
@@ -204,7 +213,7 @@ export async function analyzeDamascusWithGemini(input: { title: string; descript
   if (!key) throw new Error("GEMINI_API_KEY is not configured.");
   await reserveUsage();
   const model = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
-  const prompt = `Analyze this eBay listing for a buyer of Damascus-steel knives (pocket/folding knives, bowie knives, and kitchen/chef knives). Count every physical knife included in one purchase. Do not count cases, sheaths, knife blocks, scissors, sharpening steels, forks, or repeated views of the same knife. Separately count how many of those knives are kitchen/culinary knives (chef, santoku, nakiri, paring, bread, boning, fillet, slicing, carving, steak, cleaver, utility kitchen knives); pocket/folding, bowie, hunting, and other fixed-blade knives are NOT kitchen knives. Set knifeType to pocket, bowie, kitchen, or fixed_blade when every knife is that kind, mixed when the lot combines kinds, or not_a_knife when the item is not a knife at all (a sword, axe, blank/billet, ring, jewelry, sheath only, etc.). Set isSet to true when the purchase is a matched set or a multi-knife lot. Damascus steel shows a visible wavy/layered pattern across the blade; set bladeLooksNonDamascus to true ONLY if a blade is clearly visible and plainly shows no such pattern (plain polished, satin, or painted steel) — a closed folding knife or a blade hidden in a block/sheath is not evidence either way, so leave it false then. If this is a choose-one/selection listing, the image is unclear, items overlap too much, or the exact included count cannot be established, lower confidence and explain why in notes. Title: ${input.title.slice(0, 300)}. Description: ${input.description.slice(0, 1200)}.`;
+  const prompt = `Analyze this eBay listing for a buyer of Damascus-steel knives (pocket/folding knives, bowie knives, and kitchen/chef knives). Count every physical knife included in one purchase. Do not count cases, sheaths, knife blocks, scissors, sharpening steels, forks, or repeated views of the same knife. Separately count how many of those knives are kitchen/culinary knives (chef, santoku, nakiri, paring, bread, boning, fillet, slicing, carving, steak, cleaver, utility kitchen knives); pocket/folding, bowie, hunting, and other fixed-blade knives are NOT kitchen knives. Set knifeType to pocket, bowie, kitchen, or fixed_blade when every knife is that kind, mixed when the lot combines kinds, or not_a_knife when the item is not a knife at all (a sword, axe, blank/billet, ring, jewelry, sheath only, etc.). Set isSet to true when the purchase is a matched set or a multi-knife lot. Damascus steel shows a visible wavy/layered pattern across the blade; set bladeLooksNonDamascus to true ONLY if a blade is clearly visible and plainly shows no such pattern (plain polished, satin, or painted steel) — a closed folding knife or a blade hidden in a block/sheath is not evidence either way, so leave it false then. If the title or description states the quantity (e.g. "Lot of 60", "5 pcs"), use that stated quantity as knifeCount and do NOT lower confidence just because the photo shows only one or a few sample knives — sellers of bulk lots routinely photograph a sample; confidence should then reflect whether these are Damascus knives of the kind described. Lower confidence (and explain why in notes) only if this is a choose-one/selection listing, the image is too unclear to tell what the knives are, or no quantity is stated and the included count can't be established from the photo. Title: ${input.title.slice(0, 300)}. Description: ${input.description.slice(0, 1200)}.`;
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -255,12 +264,16 @@ export async function analyzeDamascusWithGemini(input: { title: string; descript
 // counting a seller's whole stock photo.
 export function evaluateDamascusVision(vision: DamascusVisionResult, knownCount: number | undefined, confidenceThreshold: number): { reason: string | null; knifeCount: number; kitchenCount: number; knifeType: DamascusKnifeType | null; isSet: boolean } {
   const knifeCount = knownCount ?? vision.knifeCount;
+  // When the title states the quantity, the count doesn't come from the photo — a photo showing only
+  // a sample of a "Lot of 60" is normal and shouldn't sink the listing, so a lower bar applies to
+  // what vision still decides (is it a Damascus knife, and which kind).
+  const threshold = knownCount != null ? Math.min(confidenceThreshold, DAMASCUS_STATED_COUNT_CONFIDENCE) : confidenceThreshold;
   const kitchenCount = vision.knifeType === "kitchen" ? knifeCount : Math.min(vision.kitchenKnifeCount, knifeCount);
   const knifeType = vision.knifeType === "not_a_knife" ? null : vision.knifeType;
   const isSet = vision.isSet || knifeCount > 1;
   const reason = vision.knifeType === "not_a_knife" ? "not_a_knife"
     : vision.bladeLooksNonDamascus ? "not_damascus_vision"
-    : vision.confidence < confidenceThreshold ? "low_confidence"
+    : vision.confidence < threshold ? "low_confidence"
     : knifeCount < 1 ? "invalid_count"
     : knifeCount > DAMASCUS_MAX_PLAUSIBLE_KNIFE_COUNT ? "implausible_count"
     : null;

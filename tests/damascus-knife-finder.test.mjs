@@ -209,6 +209,21 @@ test("initialDamascusRow rejects items located outside the USA or listed as ship
   assert.equal(shipsFrom.reason, "not_us_located");
 });
 
+test("a stated lot count is trusted even when the listing mentions sheaths, so sheathed lots resolve from text", () => {
+  const result = analyzeDamascusText("LOT OF 60 CUSTOM HANDMADE DAMASCUS STEEL HUNTING SKINNER KNIFE HANDLE CAMEL BONE", "Each knife comes with a leather sheath.");
+  assert.equal(result.kind, "resolved");
+  assert.equal(result.count, 60);
+  const pcs = analyzeDamascusText("Lot of 20 pcs 8in Handmade Damascus Steel Skinner knife with sheath Bone Handle");
+  assert.equal(pcs.kind, "resolved");
+  assert.equal(pcs.count, 20);
+});
+
+test("evaluateDamascusVision applies a lower confidence bar when the title states the quantity (sample photos are normal)", () => {
+  const vision = { knifeCount: 1, kitchenKnifeCount: 0, knifeType: "fixed_blade", isSet: true, bladeLooksNonDamascus: false, confidence: 0.8, notes: "Title says lot of 5; photo shows one." };
+  assert.equal(evaluateDamascusVision(vision, 5, 0.9).reason, null);
+  assert.equal(evaluateDamascusVision(vision, undefined, 0.9).reason, "low_confidence");
+});
+
 function pendingItem(overrides = {}) {
   return {
     ebay_item_id: "v1|7|0", run_id: null, title: "Damascus Knives Estate Collection", short_description: "",
@@ -268,6 +283,20 @@ test("processPendingFinderItems sends a text-counted set to vision when the full
         assert.equal(row.knife_count, null, "the title's piece count is no longer trusted");
         assert.equal(row.damascus_description_checked, true);
         assert.equal(geminiCalled, false, "vision runs on the next tick, not this one");
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems reports an over-budget listing as over_budget, not low confidence", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({ finder_items: [pendingItem({ title: "Damascus Hunting Knives Estate", item_price: 120, shipping_cost: 0 })] }, async (fake) => {
+      await withFetch([tokenRoute, imageRoute, geminiRoute({ knifeCount: 5, kitchenKnifeCount: 0, knifeType: "fixed_blade", isSet: true, bladeLooksNonDamascus: false, confidence: 0.6, notes: "unclear" })], async () => {
+        await processPendingFinderItems(5);
+        const [row] = fake.tables.finder_items;
+        assert.equal(row.status, "rejected");
+        assert.equal(row.reason, "over_budget", "$120 for 5 knives can't qualify at $3/knife, whatever the confidence");
       });
     });
   });
