@@ -326,6 +326,23 @@ test("processPendingFinderItems rejects a would-be qualifier whose item-group lo
   });
 });
 
+test("processPendingFinderItems rejects a would-be qualifier that eBay's legacy-id lookup refuses as a variation listing", async (t) => {
+  await withEnv(ENV, async () => {
+    const sent = [];
+    mockMailer(t, sent);
+    await withFakeBackend({ finder_items: [pendingItem({ title: "14PCS Damascus Chef Knife Set", knife_count: 14, damascus_kitchen_count: 14, detection_source: "text", item_price: 60, shipping_cost: 0 })] }, async (fake) => {
+      const legacyRoute = { test: (url) => url.startsWith(`${ITEM_URL}get_item_by_legacy_id`), respond: () => jsonResponse({ errors: [{ errorId: 11006, message: "The legacy Id is of an item group. Please provide legacy_variation_id or legacy_variation_sku." }] }, { status: 400 }) };
+      await withFetch([tokenRoute, noGroupRoute, legacyRoute, descriptionRoute("Premium Damascus chef knife set.")], async () => {
+        await processPendingFinderItems(5);
+        const [row] = fake.tables.finder_items;
+        assert.equal(row.status, "rejected");
+        assert.equal(row.reason, "variation_listing");
+        assert.equal(sent.length, 0);
+      });
+    });
+  });
+});
+
 test("processPendingFinderItems sends a text-counted set to vision when the full description shows the piece count includes accessories", async (t) => {
   await withEnv(ENV, async () => {
     mockMailer(t, []);

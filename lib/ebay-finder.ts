@@ -140,10 +140,16 @@ export async function getItemDetails(itemId: string, token?: string): Promise<{ 
     // endpoint instead (errorId 11006, "get_items_by_item_group") — that refusal is itself the
     // answer: it's a multi-variation listing.
     const body = await response.text().catch(() => "");
+    console.info(`[finder-diag] getItem ${itemId} status=${response.status} body=${body.slice(0, 1500)}`);
     if (response.status === 400 && /11006|item_group/i.test(body)) return { description: "", itemGroupType: "SELLER_DEFINED_VARIATIONS" };
     throw new Error(`eBay item lookup for "${itemId}" failed (${response.status}).`);
   }
   const payload = await response.json() as { description?: string; primaryItemGroup?: { itemGroupType?: string; itemGroupId?: string } };
+  // TEMPORARY diagnostics: number-of-pieces dropdown listings still qualify, so record exactly what
+  // eBay returns for a would-be Damascus qualifier (everything but the long HTML description).
+  const { description: _omit, ...rest } = payload as Record<string, unknown>;
+  void _omit;
+  console.info(`[finder-diag] getItem ${itemId} status=${response.status} payload=${JSON.stringify(rest).slice(0, 6000)}`);
   const itemGroupType = payload.primaryItemGroup ? (payload.primaryItemGroup.itemGroupType || "SELLER_DEFINED_VARIATIONS") : null;
   return { description: payload.description ? htmlToText(payload.description).slice(0, 4000) : "", itemGroupType };
 }
@@ -158,10 +164,35 @@ export async function getItemGroupVariationCount(itemId: string, token?: string)
   const url = `${ebayApiBaseUrl()}/buy/browse/v1/item/get_items_by_item_group?item_group_id=${encodeURIComponent(legacyId)}`;
   const response = await fetch(url, { headers: await browseHeaders(token), signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS) });
   await recordEbayApiCall();
+  // TEMPORARY diagnostics (see getItemDetails).
+  const diagBody = await response.clone().text().catch(() => "");
+  console.info(`[finder-diag] itemGroup ${itemId} status=${response.status} body=${diagBody.slice(0, 1500)}`);
   if (response.status >= 400 && response.status < 500) return 0;
   if (!response.ok) throw new Error(`eBay item group lookup for "${itemId}" failed (${response.status}).`);
   const payload = await response.json() as { items?: unknown[] };
   return payload.items?.length ?? 0;
+}
+
+// eBay's documented variation signal: looking a listing up by its legacy (numeric) id without a
+// variation id is refused with errorId 11006 when the listing has variations (e.g. a "Number of
+// pieces" dropdown) — the caller must name one option. Any other outcome means a single-price
+// listing. Also reports a primaryItemGroup, should eBay answer with the default variation instead.
+export async function isLegacyVariationListing(itemId: string, token?: string): Promise<boolean> {
+  const legacyId = itemId.split("|")[1] || itemId;
+  const url = `${ebayApiBaseUrl()}/buy/browse/v1/item/get_item_by_legacy_id?legacy_item_id=${encodeURIComponent(legacyId)}`;
+  const response = await fetch(url, { headers: await browseHeaders(token), signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS) });
+  await recordEbayApiCall();
+  const body = await response.text().catch(() => "");
+  // TEMPORARY diagnostics (see getItemDetails).
+  console.info(`[finder-diag] legacyItem ${itemId} status=${response.status} body=${body.replace(/"description":"(?:[^"\\]|\\.)*"/, '"description":"…"').slice(0, 3000)}`);
+  if (response.status >= 500) throw new Error(`eBay legacy item lookup for "${itemId}" failed (${response.status}).`);
+  if (!response.ok) return /11006|item_group|variation/i.test(body);
+  try {
+    const payload = JSON.parse(body) as { primaryItemGroup?: unknown };
+    return Boolean(payload.primaryItemGroup);
+  } catch {
+    return false;
+  }
 }
 
 function parseItemSummaries(summaries: Array<Record<string, unknown>>): EbayFinderItem[] {

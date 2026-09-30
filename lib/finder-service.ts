@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appToken, getItemDescription, getItemDetails, getItemGroupVariationCount, getItemShippingCost, searchEbayBrandCategory, searchEbayByImage, searchEbayCategoryNewlyListed, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
+import { appToken, getItemDescription, getItemDetails, getItemGroupVariationCount, getItemShippingCost, isLegacyVariationListing, searchEbayBrandCategory, searchEbayByImage, searchEbayCategoryNewlyListed, searchEbayKeyword, type EbayFinderItem } from "./ebay-finder";
 import { analyzeListingText, calculateDeal, currentScheduledRunKeySuffix, dayKey, effectiveMaxCostPerKnife, FINDER_DEFAULTS, isScheduledRunTime, isShippingLookupWorthwhile, matchesNegativeKeyword, monthKey, POCKET_KNIFE_BRAND_ASPECT_BY_PHRASE, resolveMaxCostPerKnife, type FinderScheduleSettings } from "./finder-core";
 import { countKnivesWithGemini, VisionBudgetError, VisionQuotaError } from "./gemini-vision";
 import { ebayBudgetExceeded, getEbayApiCallsToday } from "./ebay-call-tracker";
@@ -1467,6 +1467,7 @@ export async function processPendingFinderItems(limit = config().batchSize) {
     // result nor the item lookup — only eBay's item-group lookup reveals them. One more eBay call,
     // spent only on a listing that is about to qualify.
     if (await getItemGroupVariationCount(row.ebay_item_id, await tokenForLookup()) > 1) return { kind: "reject", reason: "variation_listing", notes: "Multi-variation listing (e.g. a number-of-pieces dropdown): the price shown is only one option's, not the whole set.", description };
+    if (await isLegacyVariationListing(row.ebay_item_id, await tokenForLookup())) return { kind: "reject", reason: "variation_listing", notes: "Multi-variation listing (e.g. a number-of-pieces dropdown): the price shown is only one option's, not the whole set.", description };
     const negativeMatch = matchesNegativeKeyword(row.title, description, damascusNegativePhrases);
     if (negativeMatch) return { kind: "reject", reason: "negative_keyword_match", notes: `Matched negative keyword: "${negativeMatch}"`, description };
     const text = analyzeDamascusText(row.title, description);
