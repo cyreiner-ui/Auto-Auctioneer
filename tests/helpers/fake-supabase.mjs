@@ -41,7 +41,7 @@ class Builder {
     this._payload = null;
     this._onConflict = null;
     this._ignoreDuplicates = false;
-    this._order = null;
+    this._orders = [];
     this._limit = null;
     this._single = null;
     this._head = false;
@@ -88,7 +88,8 @@ class Builder {
     this.filters.push({ type: "or", clauses });
     return this;
   }
-  order(col, opts) { this._order = { col, ascending: opts?.ascending !== false }; return this; }
+  // Chained .order() calls sort by each key in turn, like PostgREST (first call = primary key).
+  order(col, opts) { this._orders.push({ col, ascending: opts?.ascending !== false }); return this; }
   limit(n) { this._limit = n; return this; }
   single() { this._single = "single"; return this; }
   maybeSingle() { this._single = "maybeSingle"; return this; }
@@ -137,9 +138,14 @@ class Builder {
 
     // Plain select.
     let rows = table.filter((row) => matchesFilters(row, this.filters));
-    if (this._order) {
-      const { col, ascending } = this._order;
-      rows = [...rows].sort((a, b) => (ascending ? compare(a[col], b[col]) : compare(b[col], a[col])));
+    if (this._orders.length) {
+      rows = [...rows].sort((a, b) => {
+        for (const { col, ascending } of this._orders) {
+          const result = ascending ? compare(a[col], b[col]) : compare(b[col], a[col]);
+          if (result) return result;
+        }
+        return 0;
+      });
     }
     if (this._limit != null) rows = rows.slice(0, this._limit);
     if (this._head) return { data: null, error: null, count: rows.length };

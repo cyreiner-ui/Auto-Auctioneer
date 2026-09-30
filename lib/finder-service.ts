@@ -38,6 +38,19 @@ import {
   refreshedMateGourdRow,
   type MateGourdExistingRow,
 } from "./mate-gourd-finder";
+import {
+  analyzeDamascusText,
+  analyzeDamascusWithGemini,
+  calculateDamascusDeal,
+  compareDamascusPriority,
+  DAMASCUS_DEFAULTS,
+  damascusKnifeGroupForPhrases,
+  evaluateDamascusVision,
+  isDamascusShippingLookupWorthwhile,
+  refreshedDamascusRow,
+  type DamascusExistingRow,
+  type DamascusSettings,
+} from "./damascus-knife-finder";
 import { isAuctionFormat } from "./gixen-format";
 import { sendQualifiedItemsEmail, sendRunSummaryEmail } from "./finder-notify";
 import { supabaseAdmin } from "./supabase-admin";
@@ -48,9 +61,9 @@ import { supabaseAdmin } from "./supabase-admin";
 // Threaded through startFinderRun/finderOverview/archivedFinderItems/notifyNewlyQualified so a
 // manual run, a results/settings page, or a qualification email for one track never touches
 // another's data.
-export type FinderCategory = "pocket_knife" | "carving_set" | "gaucho_knife" | "mate_gourd";
+export type FinderCategory = "pocket_knife" | "carving_set" | "gaucho_knife" | "mate_gourd" | "damascus_knife";
 
-export const FINDER_CATEGORIES = ["pocket_knife", "carving_set", "gaucho_knife", "mate_gourd"] as const;
+export const FINDER_CATEGORIES = ["pocket_knife", "carving_set", "gaucho_knife", "mate_gourd", "damascus_knife"] as const;
 export function isFinderCategory(value: unknown): value is FinderCategory {
   return typeof value === "string" && (FINDER_CATEGORIES as readonly string[]).includes(value);
 }
@@ -65,6 +78,20 @@ export function keywordCategory(phrase: string): FinderCategory {
   if (carvingSetGroupForPhrases([phrase])) return "carving_set";
   if (gauchoKnifeGroupForPhrases([phrase])) return "gaucho_knife";
   if (mateGourdGroupForPhrases([phrase])) return "mate_gourd";
+  // Any phrase mentioning "damascus" (see lib/damascus-knife-finder.ts) — checked after the three
+  // phrase-list categories above so it can never steal one of their phrases.
+  if (damascusKnifeGroupForPhrases([phrase])) return "damascus_knife";
+  return "pocket_knife";
+}
+
+// Per-row counterpart of keywordCategory for a finder_items row's full keyword_phrases array —
+// same precedence, so every dispatch point (scan, pending queue, emails) agrees on one category.
+export function rowCategory(phrases: string[] | null | undefined): FinderCategory {
+  const list = phrases || [];
+  if (carvingSetGroupForPhrases(list)) return "carving_set";
+  if (gauchoKnifeGroupForPhrases(list)) return "gaucho_knife";
+  if (mateGourdGroupForPhrases(list)) return "mate_gourd";
+  if (damascusKnifeGroupForPhrases(list)) return "damascus_knife";
   return "pocket_knife";
 }
 
@@ -90,11 +117,15 @@ function scopeToCategory<Q extends { overlaps: (col: string, val: string) => any
   // which is null for a plain non-Swiss-Army knife), regardless of which discovery path found it.
   if (category === "gaucho_knife") return query.eq("item_category", "gaucho_knife");
   if (category === "mate_gourd") return query.eq("item_category", "mate_gourd");
+  // Damascus rows are matched by "contains damascus" (not a fixed phrase list an array-overlap
+  // could test), so like gaucho/maté-gourd they're scoped by the item_category every Damascus row
+  // carries unconditionally (see lib/damascus-knife-finder.ts's baseRow).
+  if (category === "damascus_knife") return query.eq("item_category", "damascus_knife");
   // pocket_knife: neither a carving-set phrase nor a gaucho_knife/mate_gourd item_category. The
   // `.or` clause must explicitly include NULL — a plain `.not("item_category", "in", "(...)")`
   // would silently exclude every ordinary pocket-knife row (item_category is null for those),
   // since SQL's `IN`/`NOT IN` against NULL evaluates to NULL, not true.
-  return query.not("keyword_phrases", "ov", pgTextArrayLiteral(CARVING_SET_PHRASES)).or("item_category.is.null,item_category.not.in.(gaucho_knife,mate_gourd)");
+  return query.not("keyword_phrases", "ov", pgTextArrayLiteral(CARVING_SET_PHRASES)).or("item_category.is.null,item_category.not.in.(gaucho_knife,mate_gourd,damascus_knife)");
 }
 
 type FinderNotifyMode = "auctions_only" | "all_qualified";
@@ -176,6 +207,29 @@ export async function updatePocketKnifeSettings(patch: Partial<PocketKnifeSettin
   if (error) throw new Error(error.message);
 }
 
+// The Damascus pipeline's two staff-editable per-knife ceilings (see /staff/finder/damascus-knives/settings):
+// kitchen/chef knives get their own, higher ceiling; every other Damascus knife uses the standard one.
+// Seeded by supabase/migrations/047_finder_damascus_knives.sql; the defaults are used only if the
+// singleton row is somehow missing.
+async function getDamascusSettings(): Promise<DamascusSettings> {
+  const { data } = await supabaseAdmin.from("finder_damascus_settings").select("*").eq("id", true).maybeSingle();
+  if (!data) return DAMASCUS_DEFAULTS;
+  return { maxCostPerKnife: Number(data.max_cost_per_knife), kitchenMaxCostPerKnife: Number(data.kitchen_max_cost_per_knife) };
+}
+
+export async function updateDamascusSettings(patch: Partial<DamascusSettings>) {
+  const values: Record<string, unknown> = { id: true, updated_at: new Date().toISOString() };
+  for (const [key, column] of [["maxCostPerKnife", "max_cost_per_knife"], ["kitchenMaxCostPerKnife", "kitchen_max_cost_per_knife"]] as const) {
+    const value = patch[key];
+    if (value === undefined) continue;
+    if (!Number.isFinite(value) || value <= 0) throw new Error("Enter a valid per-knife price greater than 0.");
+    values[column] = value;
+  }
+  if (Object.keys(values).length === 2) return;
+  const { error } = await supabaseAdmin.from("finder_damascus_settings").upsert(values, { onConflict: "id" });
+  if (error) throw new Error(error.message);
+}
+
 type GauchoSettings = { keywordSearchEnabled: boolean };
 
 // Matches the seeded default (supabase/migrations/041_finder_gaucho_settings.sql) — used only if
@@ -241,6 +295,7 @@ type NotifyRow = {
   buying_options: string[]; keyword_phrases: string[] | null; carving_piece_count: number | null; carving_has_case: boolean | null; carving_carbon_steel: boolean | null;
   gaucho_match_confidence?: number | string | null; gaucho_maker_match?: boolean | null; gaucho_match_notes?: string | null;
   mate_gourd_match_confidence?: number | string | null; mate_gourd_match_notes?: string | null;
+  damascus_knife_type?: string | null; damascus_kitchen_count?: number | null; damascus_is_set?: boolean | null;
 };
 
 // Sends the qualified-item alert email for one category's bucket of rows, using the shared
@@ -303,7 +358,7 @@ async function notifyNewlyQualified(ebayItemIds: string[]) {
   if (!ebayItemIds.length) return;
   const { data, error } = await supabaseAdmin
     .from("finder_items")
-    .select("ebay_item_id, title, ebay_url, image_url, item_price, shipping_cost, total_cost, cost_per_knife, knife_count, notified_at, gixen_status, buying_options, keyword_phrases, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, gaucho_match_confidence, gaucho_maker_match, gaucho_match_notes, mate_gourd_match_confidence, mate_gourd_match_notes")
+    .select("ebay_item_id, title, ebay_url, image_url, item_price, shipping_cost, total_cost, cost_per_knife, knife_count, notified_at, gixen_status, buying_options, keyword_phrases, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, gaucho_match_confidence, gaucho_maker_match, gaucho_match_notes, mate_gourd_match_confidence, mate_gourd_match_notes, damascus_knife_type, damascus_kitchen_count, damascus_is_set")
     .eq("status", "qualified")
     .in("ebay_item_id", ebayItemIds);
   if (error || !data?.length) return;
@@ -311,14 +366,13 @@ async function notifyNewlyQualified(ebayItemIds: string[]) {
   // Split by category before sending — a single run/batch that qualifies items across multiple
   // categories must never combine them into one email, even though the notify mode and recipient
   // list are the same shared settings for all four.
-  const carvingRows = data.filter((row) => carvingSetGroupForPhrases(row.keyword_phrases || []));
-  const gauchoRows = data.filter((row) => gauchoKnifeGroupForPhrases(row.keyword_phrases || []));
-  const mateGourdRows = data.filter((row) => mateGourdGroupForPhrases(row.keyword_phrases || []));
-  const pocketRows = data.filter((row) => !carvingSetGroupForPhrases(row.keyword_phrases || []) && !gauchoKnifeGroupForPhrases(row.keyword_phrases || []) && !mateGourdGroupForPhrases(row.keyword_phrases || []));
-  await notifyBucket(pocketRows, mode, recipients, "pocket_knife");
-  await notifyBucket(carvingRows, mode, recipients, "carving_set");
-  await notifyBucket(gauchoRows, mode, recipients, "gaucho_knife");
-  await notifyBucket(mateGourdRows, mode, recipients, "mate_gourd");
+  const rowsFor = (category: FinderCategory) => data.filter((row) => rowCategory(row.keyword_phrases) === category);
+  await notifyBucket(rowsFor("pocket_knife"), mode, recipients, "pocket_knife");
+  await notifyBucket(rowsFor("carving_set"), mode, recipients, "carving_set");
+  await notifyBucket(rowsFor("gaucho_knife"), mode, recipients, "gaucho_knife");
+  await notifyBucket(rowsFor("mate_gourd"), mode, recipients, "mate_gourd");
+  // Sets/lots lead the Damascus email (see compareDamascusPriority) — the finder prioritizes them.
+  await notifyBucket(rowsFor("damascus_knife").sort(compareDamascusPriority), mode, recipients, "damascus_knife");
   const notAuction = data.filter((row) => !row.gixen_status && !isAuctionFormat(row.buying_options));
   if (notAuction.length) {
     await supabaseAdmin.from("finder_items").update({
@@ -351,6 +405,8 @@ type FinderRow = {
   carving_has_case: boolean | null;
   carving_carbon_steel: boolean | null;
   carving_handle_material: "stag" | "ivory" | "other" | null;
+  damascus_kitchen_count?: number | null;
+  damascus_is_set?: boolean | null;
 };
 
 // Every column processPendingFinderItems' merged `rows` actually reads (matches FinderRow above,
@@ -358,7 +414,7 @@ type FinderRow = {
 // on every scheduler tick (once a minute, forever), so pulling every column of finder_items
 // (including the many gaucho/carving match fields no batch-processing code path ever reads) here
 // is pure wasted egress at that frequency.
-const FINDER_BATCH_COLUMNS = "ebay_item_id, run_id, keyword_phrases, title, short_description, image_url, item_price, shipping_cost, shipping_source, knife_count, item_category, status, attempts, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material";
+const FINDER_BATCH_COLUMNS = "ebay_item_id, run_id, keyword_phrases, title, short_description, image_url, item_price, shipping_cost, shipping_source, knife_count, item_category, status, attempts, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, damascus_kitchen_count, damascus_is_set";
 
 // Categories that never qualify, at any price, regardless of which stage (text or vision)
 // classified them. swiss_army_multi_tool is deliberately absent — it's allowed through at the
@@ -529,6 +585,10 @@ type ExistingFinderRow = {
   mate_gourd_match_confidence?: number | string | null;
   mate_gourd_matched_reference_id?: string | null;
   mate_gourd_match_notes?: string | null;
+  damascus_knife_type?: "pocket" | "bowie" | "kitchen" | "fixed_blade" | "mixed" | null;
+  damascus_kitchen_count?: number | null;
+  damascus_is_set?: boolean | null;
+  damascus_notes?: string | null;
 };
 
 function refreshedRow(item: EbayFinderItem, keywordPhrases: string[], runId: string, existing: ExistingFinderRow | undefined, maxCost: number, swissArmyMax: number, negativePhrases: string[]) {
@@ -627,6 +687,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const { data: allKeywords, error: keywordError } = await supabaseAdmin.from("finder_keywords").select("phrase, max_cost_per_knife").eq("enabled", true).order("created_at");
     if (keywordError) throw new Error(keywordError.message);
     const pocketKnifeSettings = await getPocketKnifeSettings();
+    const damascusSettings = (!category || category === "damascus_knife") ? await getDamascusSettings() : DAMASCUS_DEFAULTS;
     // No category column on finder_keywords — a scoped run filters in JS by whether each phrase
     // resolves to the carving-set/gaucho-knife algorithm, the same test the per-item dispatch
     // already uses (see keywordCategory above).
@@ -810,7 +871,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const ids = [...found.keys()];
     const existingById = new Map<string, ExistingFinderRow>();
     for (let index = 0; index < ids.length; index += 200) {
-      const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id, keyword_phrases, status, reason, knife_count, contains_folding_knife, confidence, detection_source, item_category, shipping_cost, shipping_source, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, gaucho_match_confidence, gaucho_maker_match, gaucho_matched_reference_id, gaucho_match_notes, mate_gourd_match_confidence, mate_gourd_matched_reference_id, mate_gourd_match_notes").in("ebay_item_id", ids.slice(index, index + 200));
+      const { data, error } = await supabaseAdmin.from("finder_items").select("ebay_item_id, keyword_phrases, status, reason, knife_count, contains_folding_knife, confidence, detection_source, item_category, shipping_cost, shipping_source, carving_piece_count, carving_has_case, carving_carbon_steel, carving_handle_material, gaucho_match_confidence, gaucho_maker_match, gaucho_matched_reference_id, gaucho_match_notes, mate_gourd_match_confidence, mate_gourd_matched_reference_id, mate_gourd_match_notes, damascus_knife_type, damascus_kitchen_count, damascus_is_set, damascus_notes").in("ebay_item_id", ids.slice(index, index + 200));
       if (error) throw new Error(error.message);
       for (const row of data || []) existingById.set(row.ebay_item_id, row);
     }
@@ -823,6 +884,9 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
     const { data: pocketKnifeNegativeKeywordRows, error: pocketKnifeNegativeKeywordError } = await supabaseAdmin.from("finder_pocket_knife_negative_keywords").select("phrase").eq("enabled", true);
     if (pocketKnifeNegativeKeywordError) throw new Error(pocketKnifeNegativeKeywordError.message);
     const pocketKnifeNegativePhrases = (pocketKnifeNegativeKeywordRows || []).map((row) => row.phrase);
+    const { data: damascusNegativeKeywordRows, error: damascusNegativeKeywordError } = await supabaseAdmin.from("finder_damascus_negative_keywords").select("phrase").eq("enabled", true);
+    if (damascusNegativeKeywordError) throw new Error(damascusNegativeKeywordError.message);
+    const damascusNegativePhrases = (damascusNegativeKeywordRows || []).map((row) => row.phrase);
     const textRows = [...found.values()].map(({ item, phrases }) => {
       const existing = existingById.get(item.itemId);
       // A category-scoped run only ever searches its own keyword set (see the keywords filter
@@ -839,6 +903,7 @@ export async function startFinderRun(trigger: "scheduled" | "manual", runKey?: s
       if (carvingGroup) return refreshedCarvingSetRow(item, mergedPhrases, run.id, existing as CarvingSetExistingRow | undefined, carvingGroup);
       if (gauchoKnifeGroupForPhrases(mergedPhrases)) return refreshedGauchoKnifeRow(item, mergedPhrases, run.id, existing as GauchoKnifeExistingRow | undefined, negativePhrases);
       if (mateGourdGroupForPhrases(mergedPhrases)) return refreshedMateGourdRow(item, mergedPhrases, run.id, existing as MateGourdExistingRow | undefined, mateGourdNegativePhrases);
+      if (damascusKnifeGroupForPhrases(mergedPhrases)) return refreshedDamascusRow(item, mergedPhrases, run.id, existing as DamascusExistingRow | undefined, damascusSettings, damascusNegativePhrases);
       return refreshedRow(item, mergedPhrases, run.id, existing, resolveMaxCostPerKnife(mergedPhrases, keywordMaxCost, pocketKnifeSettings.maxCostPerKnife), config().swissArmyMaxCost, pocketKnifeNegativePhrases);
     });
     const added = ids.filter((id) => !existingById.has(id)).length;
@@ -972,9 +1037,13 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   // smaller per-category share) so a category with the only backlog left still gets a full batch,
   // same as before this fix — round-robin below is what actually enforces fairness when more than
   // one category has pending work.
-  const categoryResults = await Promise.all(FINDER_CATEGORIES.map((category) =>
-    scopeToCategory(supabaseAdmin.from("finder_items").select(FINDER_BATCH_COLUMNS).eq("status", "pending").lte("next_attempt_at", now).order("discovered_at").limit(limit), category)
-  ));
+  // The Damascus queue drains sets/lots first (damascus_is_set, stamped from text at discovery) so
+  // a limited Gemini budget goes to the listings that finder prioritizes.
+  const categoryResults = await Promise.all(FINDER_CATEGORIES.map((category) => {
+    const base = supabaseAdmin.from("finder_items").select(FINDER_BATCH_COLUMNS).eq("status", "pending").lte("next_attempt_at", now);
+    const ordered = category === "damascus_knife" ? base.order("damascus_is_set", { ascending: false, nullsFirst: false }).order("discovered_at") : base.order("discovered_at");
+    return scopeToCategory(ordered.limit(limit), category);
+  }));
   const queues = categoryResults.map((result) => {
     if (result.error) throw new Error(result.error.message);
     return (result.data || []) as FinderRow[];
@@ -1042,10 +1111,22 @@ export async function processPendingFinderItems(limit = config().batchSize) {
   // Same "fetch once per batch, only when needed" shape as the gaucho block above — needed
   // whenever this batch has a plain pocket-knife row (i.e. none of the other three tracks).
   const pocketKnifeNegativePhrases: string[] = [];
-  if (rows.some((row) => !carvingSetGroupForPhrases(row.keyword_phrases || []) && !gauchoKnifeGroupForPhrases(row.keyword_phrases || []) && !mateGourdGroupForPhrases(row.keyword_phrases || []))) {
+  if (rows.some((row) => rowCategory(row.keyword_phrases) === "pocket_knife")) {
     const { data: pocketKnifeNegativeRows, error: pocketKnifeNegativeError } = await supabaseAdmin.from("finder_pocket_knife_negative_keywords").select("phrase").eq("enabled", true);
     if (pocketKnifeNegativeError) throw new Error(pocketKnifeNegativeError.message);
     pocketKnifeNegativePhrases.push(...(pocketKnifeNegativeRows || []).map((row) => row.phrase));
+  }
+  // Same shape again, for the Damascus pipeline (its own negative keywords and two-tier ceilings).
+  const damascusNegativePhrases: string[] = [];
+  let damascusSettings: DamascusSettings = DAMASCUS_DEFAULTS;
+  if (rows.some((row) => rowCategory(row.keyword_phrases) === "damascus_knife")) {
+    const [negativeResult, settings] = await Promise.all([
+      supabaseAdmin.from("finder_damascus_negative_keywords").select("phrase").eq("enabled", true),
+      getDamascusSettings(),
+    ]);
+    if (negativeResult.error) throw new Error(negativeResult.error.message);
+    damascusNegativePhrases.push(...(negativeResult.data || []).map((row) => row.phrase));
+    damascusSettings = settings;
   }
   let processed = 0;
   let deferred = 0;
@@ -1356,11 +1437,88 @@ export async function processPendingFinderItems(limit = config().batchSize) {
       await supabaseAdmin.from("finder_items").update({ status: attempts >= 3 ? "error" : "pending", reason: itemError instanceof Error ? itemError.message : "Vision analysis failed.", attempts, next_attempt_at: attempts >= 3 ? null : new Date(Date.now() + 15 * 60 * 1000).toISOString(), processed_at: attempts >= 3 ? new Date().toISOString() : null }).eq("ebay_item_id", row.ebay_item_id);
     }
   }
+  // Same shape as the pocket-knife branch of processRow below (shipping-only rows skip Gemini; the
+  // rest take one vision call), but with the Damascus text/vision rules and two-tier pricing.
+  async function processDamascusRow(row: FinderRow) {
+    if (row.run_id) runIds.add(row.run_id);
+    if (pausedByCategory.get("damascus_knife")) {
+      await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: "Damascus-knife processing is paused by staff." }).eq("ebay_item_id", row.ebay_item_id);
+      deferred++;
+      return;
+    }
+    try {
+      const negativeMatch = matchesNegativeKeyword(row.title, row.short_description, damascusNegativePhrases);
+      if (negativeMatch) {
+        const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: "rejected", reason: "negative_keyword_match", damascus_notes: `Matched negative keyword: "${negativeMatch}"`, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
+        if (saveError) throw new Error(saveError.message);
+        processed++;
+        return;
+      }
+      if (row.knife_count != null) {
+        // Count and tier split already resolved (by text at discovery); only shipping was missing.
+        const shipping = await getItemShippingCost(row.ebay_item_id, await tokenForLookup());
+        const shippingValue = shipping.value != null && (shipping.currency === "" || shipping.currency === "USD") ? shipping.value : null;
+        const deal = shippingValue != null ? calculateDamascusDeal(Number(row.item_price), shippingValue, row.knife_count, row.damascus_kitchen_count ?? 0, damascusSettings) : null;
+        const qualifies = Boolean(deal?.qualifies);
+        const reason = shippingValue == null ? "missing_shipping" : deal?.reason;
+        const { error: saveError } = await supabaseAdmin.from("finder_items").update({ status: qualifies ? "qualified" : "rejected", reason, shipping_cost: shippingValue, shipping_source: shippingValue != null ? "lookup" : null, total_cost: deal && "totalCost" in deal ? deal.totalCost : null, cost_per_knife: deal && "costPerKnife" in deal ? deal.costPerKnife : null, attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString() }).eq("ebay_item_id", row.ebay_item_id);
+        if (saveError) throw new Error(saveError.message);
+        if (qualifies && !row.run_id) runlessQualifiedIds.push(row.ebay_item_id);
+        processed++;
+        return;
+      }
+      if (visionExhaustedMessage) {
+        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: visionExhaustedMessage }).eq("ebay_item_id", row.ebay_item_id);
+        deferred++;
+        return;
+      }
+      const vision = await analyzeDamascusWithGemini({ title: row.title, description: row.short_description, imageUrl: row.image_url || "" });
+      const textAnalysis = analyzeDamascusText(row.title, row.short_description);
+      const knownCount = textAnalysis.kind === "vision" ? textAnalysis.knownCount : undefined;
+      const decision = evaluateDamascusVision(vision, knownCount, config().confidence);
+      let shippingValue = row.shipping_cost == null ? null : Number(row.shipping_cost);
+      let shippingSource = row.shipping_source;
+      let shippingReason: string | null = null;
+      if (!decision.reason && shippingValue == null) {
+        if (!isDamascusShippingLookupWorthwhile(Number(row.item_price), decision.knifeCount, decision.kitchenCount, damascusSettings)) {
+          shippingReason = "over_budget";
+        } else {
+          const shipping = await getItemShippingCost(row.ebay_item_id, await tokenForLookup());
+          if (shipping.value != null && (shipping.currency === "" || shipping.currency === "USD")) { shippingValue = shipping.value; shippingSource = "lookup"; }
+          else shippingReason = "missing_shipping";
+        }
+      }
+      const deal = !decision.reason && shippingValue != null ? calculateDamascusDeal(Number(row.item_price), shippingValue, decision.knifeCount, decision.kitchenCount, damascusSettings) : null;
+      const qualifies = Boolean(deal?.qualifies);
+      const reason = decision.reason || shippingReason || deal?.reason || null;
+      const { error: saveError } = await supabaseAdmin.from("finder_items").update({
+        status: qualifies ? "qualified" : "rejected", reason,
+        knife_count: decision.knifeCount || null, contains_folding_knife: decision.knifeType === "pocket", confidence: vision.confidence, detection_source: "vision", item_category: "damascus_knife",
+        damascus_knife_type: decision.knifeType, damascus_kitchen_count: decision.kitchenCount, damascus_is_set: decision.isSet, damascus_notes: vision.notes,
+        shipping_cost: shippingValue, shipping_source: shippingValue != null ? shippingSource : null,
+        total_cost: deal && "totalCost" in deal ? deal.totalCost : null, cost_per_knife: deal && "costPerKnife" in deal ? deal.costPerKnife : null,
+        attempts: row.attempts + 1, next_attempt_at: null, processed_at: new Date().toISOString(),
+      }).eq("ebay_item_id", row.ebay_item_id);
+      if (saveError) throw new Error(saveError.message);
+      if (qualifies && !row.run_id) runlessQualifiedIds.push(row.ebay_item_id);
+      processed++;
+    } catch (itemError) {
+      if (itemError instanceof VisionQuotaError || itemError instanceof VisionBudgetError) {
+        await supabaseAdmin.from("finder_items").update({ next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), reason: itemError.message }).eq("ebay_item_id", row.ebay_item_id);
+        deferred++;
+        visionExhaustedMessage = itemError.message;
+        return;
+      }
+      const attempts = row.attempts + 1;
+      await supabaseAdmin.from("finder_items").update({ status: attempts >= 3 ? "error" : "pending", reason: itemError instanceof Error ? itemError.message : "Vision analysis failed.", attempts, next_attempt_at: attempts >= 3 ? null : new Date(Date.now() + 15 * 60 * 1000).toISOString(), processed_at: attempts >= 3 ? new Date().toISOString() : null }).eq("ebay_item_id", row.ebay_item_id);
+    }
+  }
   async function processRow(row: FinderRow) {
     const carvingGroup = carvingSetGroupForPhrases(row.keyword_phrases || []);
     if (carvingGroup) return processCarvingSetRow(row, carvingGroup);
     if (gauchoKnifeGroupForPhrases(row.keyword_phrases || [])) return processGauchoKnifeRow(row);
     if (mateGourdGroupForPhrases(row.keyword_phrases || [])) return processMateGourdRow(row);
+    if (damascusKnifeGroupForPhrases(row.keyword_phrases || [])) return processDamascusRow(row);
     if (row.run_id) runIds.add(row.run_id);
     // Staff-paused (see updateProcessingPaused) — defer without spending an eBay/Gemini call or
     // counting against the row's attempts, same shape as the carving-set/gaucho-knife pause checks.
@@ -1464,11 +1622,12 @@ export async function finderTick(date = new Date()) {
   // "failed" (and the dashboard stops showing it as active) within a minute of going stale, rather
   // than waiting for the next automatic scan or a staff member clicking "Run now".
   await reconcileOrphanedRuns();
-  const [pocketSchedule, carvingSchedule, gauchoSchedule, mateGourdSchedule] = await Promise.all([
+  const [pocketSchedule, carvingSchedule, gauchoSchedule, mateGourdSchedule, damascusSchedule] = await Promise.all([
     getScheduleSettings("pocket_knife"),
     getScheduleSettings("carving_set"),
     getScheduleSettings("gaucho_knife"),
     getScheduleSettings("mate_gourd"),
+    getScheduleSettings("damascus_knife"),
   ]);
   const runs: Partial<Record<FinderCategory, Awaited<ReturnType<typeof startFinderRun>>>> = {};
   // Each finder's automatic scan is independently scheduled and genuinely category-scoped now
@@ -1482,6 +1641,7 @@ export async function finderTick(date = new Date()) {
   if (isScheduledRunTime(carvingSchedule, date)) runs.carving_set = await startFinderRun("scheduled", `scheduled:carving_set:${easternDateKey(date)}${currentScheduledRunKeySuffix(carvingSchedule, date)}`, "carving_set");
   if (isScheduledRunTime(gauchoSchedule, date)) runs.gaucho_knife = await startFinderRun("scheduled", `scheduled:gaucho_knife:${easternDateKey(date)}${currentScheduledRunKeySuffix(gauchoSchedule, date)}`, "gaucho_knife");
   if (isScheduledRunTime(mateGourdSchedule, date)) runs.mate_gourd = await startFinderRun("scheduled", `scheduled:mate_gourd:${easternDateKey(date)}${currentScheduledRunKeySuffix(mateGourdSchedule, date)}`, "mate_gourd");
+  if (isScheduledRunTime(damascusSchedule, date)) runs.damascus_knife = await startFinderRun("scheduled", `scheduled:damascus_knife:${easternDateKey(date)}${currentScheduledRunKeySuffix(damascusSchedule, date)}`, "damascus_knife");
   const queue = await processPendingFinderItems();
   return { runs, queue };
 }
@@ -1489,7 +1649,10 @@ export async function finderTick(date = new Date()) {
 export async function finderOverview(category?: FinderCategory) {
   const [allKeywords, results, runs, pending, rejected, qualified, usage, dailyUsage, notifySettingsRow, notifyRecipientRows, schedule, ebayCallsToday] = await Promise.all([
     supabaseAdmin.from("finder_keywords").select("*").order("created_at"),
-    scopeToCategory(supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").is("dismissed_at", null).order("discovered_at", { ascending: false }).limit(500), category),
+    // Damascus results lead with sets/lots — the order the dashboard shows by default.
+    scopeToCategory((category === "damascus_knife"
+      ? supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").is("dismissed_at", null).order("damascus_is_set", { ascending: false, nullsFirst: false }).order("discovered_at", { ascending: false })
+      : supabaseAdmin.from("finder_items").select("*").eq("status", "qualified").is("dismissed_at", null).order("discovered_at", { ascending: false })).limit(500), category),
     category ? supabaseAdmin.from("finder_runs").select("*").or(`category.is.null,category.eq.${category}`).order("started_at", { ascending: false }).limit(10) : supabaseAdmin.from("finder_runs").select("*").order("started_at", { ascending: false }).limit(10),
     scopeToCategory(supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).eq("status", "pending"), category),
     scopeToCategory(supabaseAdmin.from("finder_items").select("ebay_item_id", { count: "exact", head: true }).in("status", ["rejected", "error"]), category),
@@ -1526,6 +1689,8 @@ export async function finderOverview(category?: FinderCategory) {
       ])
     : category === "pocket_knife"
     ? [await supabaseAdmin.from("finder_pocket_knife_negative_keywords").select("*").order("created_at"), { data: [], error: null }]
+    : category === "damascus_knife"
+    ? [await supabaseAdmin.from("finder_damascus_negative_keywords").select("*").order("created_at"), { data: [], error: null }]
     : [{ data: [], error: null }, { data: [], error: null }];
   if (negativeKeywords.error) throw new Error(negativeKeywords.error.message);
   if (referenceImages.error) throw new Error(referenceImages.error.message);
@@ -1542,6 +1707,7 @@ export async function finderOverview(category?: FinderCategory) {
   const pocketKnifeSettings = await getPocketKnifeSettings();
   const gauchoSettings = category === "gaucho_knife" ? await getGauchoSettings() : DEFAULT_GAUCHO_SETTINGS;
   const mateGourdSettings = category === "mate_gourd" ? await getMateGourdSettings() : DEFAULT_MATE_GOURD_SETTINGS;
+  const damascusSettings = category === "damascus_knife" ? await getDamascusSettings() : DAMASCUS_DEFAULTS;
   return {
     keywords, results: results.data || [], runs: runs.data || [],
     negativeKeywords: negativeKeywords.data || [], referenceImages: referenceImagesWithUrls,
@@ -1584,7 +1750,7 @@ export async function finderOverview(category?: FinderCategory) {
         return key.length > 10 ? `${key.slice(0, 6)}…${key.slice(-4)}` : `${key.slice(0, 2)}…`;
       })(),
     },
-    settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: pocketKnifeSettings.maxCostPerKnife, gauchoKeywordSearchEnabled: gauchoSettings.keywordSearchEnabled, mateGourdKeywordSearchEnabled: mateGourdSettings.keywordSearchEnabled },
+    settings: { zip: process.env.EBAY_FINDER_ZIP || FINDER_DEFAULTS.zip, maxCostPerKnife: pocketKnifeSettings.maxCostPerKnife, gauchoKeywordSearchEnabled: gauchoSettings.keywordSearchEnabled, mateGourdKeywordSearchEnabled: mateGourdSettings.keywordSearchEnabled, damascusMaxCostPerKnife: damascusSettings.maxCostPerKnife, damascusKitchenMaxCostPerKnife: damascusSettings.kitchenMaxCostPerKnife },
   };
 }
 

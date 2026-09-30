@@ -1,0 +1,255 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import nodemailer from "nodemailer";
+import {
+  analyzeDamascusText,
+  calculateDamascusDeal,
+  damascusCeiling,
+  damascusKnifeGroupForPhrases,
+  DAMASCUS_DEFAULTS,
+  DAMASCUS_KNIFE_PHRASES,
+  evaluateDamascusVision,
+  initialDamascusRow,
+  refreshedDamascusRow,
+} from "../lib/damascus-knife-finder.ts";
+import { finderOverview, keywordCategory, processPendingFinderItems, rowCategory, startFinderRun } from "../lib/finder-service.ts";
+import { supabaseAdmin } from "../lib/supabase-admin.ts";
+import { createFakeSupabase } from "./helpers/fake-supabase.mjs";
+import { jsonResponse, withEnv, withFetch } from "./helpers/fake-fetch.mjs";
+
+const ENV = {
+  EBAY_CLIENT_ID: "client-id",
+  EBAY_CLIENT_SECRET: "client-secret",
+  EBAY_ENVIRONMENT: "sandbox",
+  GEMINI_API_KEY: "gemini-key",
+  GEMINI_CONFIDENCE_THRESHOLD: "0.90",
+  SMTP_HOST: "smtp.gmail.com",
+  SMTP_PORT: "587",
+  SMTP_USER: "alerts@example.test",
+  SMTP_PASSWORD: "app-password",
+  FINDER_ALERT_EMAIL_FROM: "alerts@example.test",
+  FINDER_ALERT_EMAILS: "owner@example.test",
+};
+
+const TOKEN_URL = "https://api.sandbox.ebay.com/identity/v1/oauth2/token";
+const SEARCH_URL = "https://api.sandbox.ebay.com/buy/browse/v1/item_summary/search";
+const ITEM_URL = "https://api.sandbox.ebay.com/buy/browse/v1/item/";
+const tokenRoute = { test: (url) => url.startsWith(TOKEN_URL), respond: () => jsonResponse({ access_token: "fake-token" }) };
+const imageRoute = { test: (url) => url.includes("i.ebayimg.com"), respond: () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/jpeg" } }) };
+const geminiRoute = (body) => ({ test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => jsonResponse({ candidates: [{ content: { parts: [{ text: JSON.stringify(body) }] } }] }) });
+
+const settings = DAMASCUS_DEFAULTS;
+
+function item(overrides = {}) {
+  return {
+    itemId: "v1|1|0", title: "Lot of 5 Damascus Steel Pocket Knives", shortDescription: "", itemWebUrl: "https://www.ebay.com/itm/1",
+    imageUrl: "https://i.ebayimg.com/1.jpg", itemPrice: 10, currency: "USD", shippingCost: 4, shippingCurrency: "USD",
+    buyingOptions: ["AUCTION"], itemEndDate: null, ...overrides,
+  };
+}
+
+async function withFakeBackend(seed, fn) {
+  const fake = createFakeSupabase(seed);
+  fake.setRpc("reserve_finder_vision_usage", () => ({ data: { reserved: true }, error: null }));
+  const restoreFrom = supabaseAdmin.from;
+  const restoreRpc = supabaseAdmin.rpc;
+  supabaseAdmin.from = fake.from.bind(fake);
+  supabaseAdmin.rpc = fake.rpc.bind(fake);
+  try { await fn(fake); } finally { supabaseAdmin.from = restoreFrom; supabaseAdmin.rpc = restoreRpc; }
+}
+
+function mockMailer(t, capture) {
+  t.mock.method(nodemailer, "createTransport", () => ({ sendMail: async (message) => { capture.push(message); return { messageId: "test" }; } }));
+}
+
+test("any phrase mentioning damascus is a Damascus phrase, and keywordCategory routes it there without stealing other finders' phrases", () => {
+  for (const phrase of DAMASCUS_KNIFE_PHRASES) assert.equal(keywordCategory(phrase), "damascus_knife", phrase);
+  assert.equal(keywordCategory("Damascus hunting knife lot"), "damascus_knife");
+  assert.equal(keywordCategory("pocket knife lot"), "pocket_knife");
+  assert.equal(keywordCategory("sheffield carving set"), "carving_set");
+  assert.equal(keywordCategory("mate gourd"), "mate_gourd");
+  assert.equal(damascusKnifeGroupForPhrases(["knife lot"]), false);
+  assert.equal(rowCategory(["pocket knife lot", "damascus pocket knife lot"]), "damascus_knife");
+});
+
+test("ceiling is $3 per standard knife and $6 per kitchen/chef knife, summed for a mixed lot", () => {
+  assert.equal(damascusCeiling(5, 0, settings), 15);
+  assert.equal(damascusCeiling(5, 5, settings), 30);
+  assert.equal(damascusCeiling(4, 3, settings), 21);
+  assert.equal(calculateDamascusDeal(12, 3, 5, 0, settings).qualifies, true);
+  assert.equal(calculateDamascusDeal(12, 4, 5, 0, settings).reason, "over_budget");
+  const kitchen = calculateDamascusDeal(25, 5, 5, 5, settings);
+  assert.equal(kitchen.qualifies, true);
+  assert.equal(kitchen.costPerKnife, 6);
+});
+
+test("analyzeDamascusText resolves counted pocket, bowie, and kitchen listings from text alone", () => {
+  const pocket = analyzeDamascusText("Lot of 5 Damascus Steel Pocket Knives");
+  assert.equal(pocket.kind, "resolved");
+  assert.equal(pocket.count, 5); assert.equal(pocket.kitchenCount, 0); assert.equal(pocket.knifeType, "pocket"); assert.equal(pocket.isSet, true);
+  const chef = analyzeDamascusText("Damascus Steel 5 pcs Chef Kitchen Knife Set VG-10 67 Layer");
+  assert.equal(chef.kind, "resolved");
+  assert.equal(chef.count, 5); assert.equal(chef.kitchenCount, 5); assert.equal(chef.knifeType, "kitchen");
+  const bowie = analyzeDamascusText("Custom Handmade Damascus Bowie Knife 12\" w/ Leather Sheath");
+  assert.equal(bowie.kind, "resolved");
+  assert.equal(bowie.count, 1); assert.equal(bowie.knifeType, "bowie"); assert.equal(bowie.isSet, false);
+});
+
+test("analyzeDamascusText never reads layer counts, inch lengths, or steel codes as a knife count", () => {
+  const single = analyzeDamascusText("67 Layer VG10 Damascus 8 Inch Chef Knife");
+  assert.equal(single.kind, "resolved");
+  assert.equal(single.count, 1);
+});
+
+test("analyzeDamascusText distrusts a piece count when the set includes a block or other accessories", () => {
+  const result = analyzeDamascusText("Damascus 8 Piece Kitchen Knife Set with Wood Block");
+  assert.equal(result.kind, "vision");
+  assert.equal(result.knownCount, undefined);
+  assert.equal(result.isSet, true);
+});
+
+test("analyzeDamascusText sends a kitchen set that also includes a pocket knife to vision to split the price tiers", () => {
+  const result = analyzeDamascusText("Lot of 4 Damascus Knives - 3 Chef Knives and a Folding Pocket Knife");
+  assert.equal(result.kind, "vision");
+  assert.equal(result.isSet, true);
+});
+
+test("analyzeDamascusText rejects non-Damascus, imitation Damascus, supplies, and non-knife items", () => {
+  assert.deepEqual(analyzeDamascusText("Lot of 5 Pocket Knives"), { kind: "reject", reason: "not_damascus" });
+  assert.deepEqual(analyzeDamascusText("Damascus Style Etched Pocket Knife Lot of 10"), { kind: "reject", reason: "fake_damascus" });
+  assert.deepEqual(analyzeDamascusText("Laser Etched Damascus Pattern Chef Knife"), { kind: "reject", reason: "fake_damascus" });
+  assert.deepEqual(analyzeDamascusText("Damascus Steel Billet for Knife Making"), { kind: "reject", reason: "knife_making_supplies" });
+  assert.deepEqual(analyzeDamascusText("5 Damascus Knife Blanks"), { kind: "reject", reason: "knife_making_supplies" });
+  assert.deepEqual(analyzeDamascusText("Damascus Steel Katana Sword"), { kind: "reject", reason: "not_a_knife" });
+  assert.deepEqual(analyzeDamascusText("Damascus Steel Ring Size 10"), { kind: "reject", reason: "not_a_knife" });
+  assert.deepEqual(analyzeDamascusText("Set of 3 Damascus Throwing Knives"), { kind: "reject", reason: "throwing_knife" });
+});
+
+test("initialDamascusRow qualifies a cheap lot, tags every row damascus_knife, and flags sets", () => {
+  const row = initialDamascusRow(item(), ["damascus pocket knife lot"], "run-1", settings, []);
+  assert.equal(row.status, "qualified");
+  assert.equal(row.item_category, "damascus_knife");
+  assert.equal(row.damascus_is_set, true);
+  assert.equal(row.cost_per_knife, 2.8);
+  const pricey = initialDamascusRow(item({ itemPrice: 20 }), ["damascus pocket knife lot"], "run-1", settings, []);
+  assert.equal(pricey.status, "rejected");
+  assert.equal(pricey.reason, "over_budget");
+  const kitchen = initialDamascusRow(item({ title: "Damascus 5 pcs Chef Knife Set", itemPrice: 20 }), ["damascus chef knife set"], "run-1", settings, []);
+  assert.equal(kitchen.status, "qualified", "$24 for 5 chef knives fits the $6/knife kitchen ceiling");
+});
+
+test("initialDamascusRow applies staff negative keywords first, and queues ambiguous listings for vision", () => {
+  const negative = initialDamascusRow(item({ title: "Damascus Pocket Knife Pendant" }), ["damascus pocket knife"], "run-1", settings, ["pendant"]);
+  assert.equal(negative.reason, "negative_keyword_match");
+  const ambiguous = initialDamascusRow(item({ title: "Damascus Knives Estate Collection" }), ["damascus knife lot"], "run-1", settings, []);
+  assert.equal(ambiguous.status, "pending");
+  assert.equal(ambiguous.damascus_is_set, true);
+});
+
+test("initialDamascusRow queues a shipping lookup only when the price alone still fits", () => {
+  const worthwhile = initialDamascusRow(item({ shippingCost: null }), ["damascus pocket knife lot"], "run-1", settings, []);
+  assert.equal(worthwhile.status, "pending");
+  assert.equal(worthwhile.knife_count, 5);
+  const hopeless = initialDamascusRow(item({ shippingCost: null, itemPrice: 16 }), ["damascus pocket knife lot"], "run-1", settings, []);
+  assert.equal(hopeless.reason, "over_budget");
+});
+
+test("refreshedDamascusRow reuses a prior vision count, re-priced, instead of re-spending Gemini", () => {
+  const existing = { status: "rejected", reason: "over_budget", knife_count: 4, confidence: 0.95, detection_source: "vision", shipping_cost: 5, shipping_source: "listing", damascus_knife_type: "mixed", damascus_kitchen_count: 3, damascus_is_set: true, damascus_notes: "3 chef + 1 folder" };
+  const row = refreshedDamascusRow(item({ title: "Damascus Knives Estate Collection", itemPrice: 15, shippingCost: 5 }), ["damascus knife lot"], "run-2", existing, settings, []);
+  assert.equal(row.status, "qualified", "$20 fits 3×$6 + 1×$3 = $21");
+  assert.equal(row.detection_source, "vision");
+  const stillNotDamascus = refreshedDamascusRow(item({ title: "Damascus Knives Estate Collection" }), ["damascus knife lot"], "run-2", { ...existing, reason: "not_damascus_vision" }, settings, []);
+  assert.equal(stillNotDamascus.status, "rejected");
+  assert.equal(stillNotDamascus.reason, "not_damascus_vision");
+});
+
+test("evaluateDamascusVision rejects non-knives, plain blades, and low confidence, and trusts a title-stated count", () => {
+  const base = { knifeCount: 6, kitchenKnifeCount: 6, knifeType: "kitchen", isSet: true, bladeLooksNonDamascus: false, confidence: 0.95, notes: "" };
+  assert.equal(evaluateDamascusVision(base, undefined, 0.9).reason, null);
+  assert.equal(evaluateDamascusVision({ ...base, knifeType: "not_a_knife" }, undefined, 0.9).reason, "not_a_knife");
+  assert.equal(evaluateDamascusVision({ ...base, bladeLooksNonDamascus: true }, undefined, 0.9).reason, "not_damascus_vision");
+  assert.equal(evaluateDamascusVision({ ...base, confidence: 0.5 }, undefined, 0.9).reason, "low_confidence");
+  const known = evaluateDamascusVision(base, 5, 0.9);
+  assert.equal(known.knifeCount, 5);
+  assert.equal(known.kitchenCount, 5);
+});
+
+function pendingItem(overrides = {}) {
+  return {
+    ebay_item_id: "v1|7|0", run_id: null, title: "Damascus Knives Estate Collection", short_description: "",
+    image_url: "https://i.ebayimg.com/7.jpg", item_price: 15, shipping_cost: 5, buying_options: ["AUCTION"], item_category: "damascus_knife",
+    keyword_phrases: ["damascus knife lot"], status: "pending", attempts: 0, knife_count: null, damascus_is_set: true,
+    next_attempt_at: new Date(Date.now() - 60_000).toISOString(), discovered_at: new Date(Date.now() - 60_000).toISOString(),
+    ...overrides,
+  };
+}
+
+test("processPendingFinderItems qualifies a mixed Damascus lot on the two-tier ceiling and emails it as a Damascus deal", async (t) => {
+  await withEnv(ENV, async () => {
+    const sent = [];
+    mockMailer(t, sent);
+    await withFakeBackend({ finder_items: [pendingItem()] }, async (fake) => {
+      await withFetch([tokenRoute, imageRoute, geminiRoute({ knifeCount: 4, kitchenKnifeCount: 3, knifeType: "mixed", isSet: true, bladeLooksNonDamascus: false, confidence: 0.95, notes: "3 chef knives and a folder" })], async () => {
+        const { processed } = await processPendingFinderItems(5);
+        assert.equal(processed, 1);
+        const [row] = fake.tables.finder_items;
+        assert.equal(row.status, "qualified");
+        assert.equal(row.damascus_kitchen_count, 3);
+        assert.equal(row.cost_per_knife, 5);
+        assert.equal(sent.length, 1);
+        assert.match(sent[0].subject, /Damascus knife/);
+      });
+    });
+  });
+});
+
+test("processPendingFinderItems drains Damascus sets before single knives", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    const older = new Date(Date.now() - 120_000).toISOString();
+    await withFakeBackend({
+      finder_items: [
+        pendingItem({ ebay_item_id: "single", title: "Damascus Knife", damascus_is_set: false, discovered_at: older }),
+        pendingItem({ ebay_item_id: "set", damascus_is_set: true }),
+      ],
+    }, async (fake) => {
+      await withFetch([tokenRoute, imageRoute, geminiRoute({ knifeCount: 4, kitchenKnifeCount: 0, knifeType: "pocket", isSet: true, bladeLooksNonDamascus: false, confidence: 0.95, notes: "" })], async () => {
+        await processPendingFinderItems(1);
+        assert.notEqual(fake.tables.finder_items.find((row) => row.ebay_item_id === "set").status, "pending", "the set is processed first");
+        assert.equal(fake.tables.finder_items.find((row) => row.ebay_item_id === "single").status, "pending");
+      });
+    });
+  });
+});
+
+test("startFinderRun('damascus_knife') scans only Damascus keywords and stamps its rows damascus_knife, invisible to the pocket-knife dashboard", async (t) => {
+  await withEnv(ENV, async () => {
+    mockMailer(t, []);
+    await withFakeBackend({
+      finder_keywords: [
+        { id: "k1", phrase: "pocket knife lot", enabled: true, created_at: "2026-01-01" },
+        { id: "k2", phrase: "damascus pocket knife lot", enabled: true, created_at: "2026-01-02" },
+      ],
+    }, async (fake) => {
+      const searched = [];
+      const searchRoute = { test: (url) => url.startsWith(SEARCH_URL), respond: (url) => {
+        searched.push(new URL(url).searchParams.get("q"));
+        return jsonResponse({ itemSummaries: [{ itemId: "v1|42|0", title: "Lot of 5 Damascus Steel Pocket Knives", itemWebUrl: "https://www.ebay.com/itm/42", image: { imageUrl: "https://i.ebayimg.com/42.jpg" }, price: { value: "10.00", currency: "USD" }, shippingOptions: [{ shippingCost: { value: "4.00", currency: "USD" } }], buyingOptions: ["AUCTION"] }] });
+      } };
+      await withFetch([tokenRoute, searchRoute], async () => {
+        await startFinderRun("manual", undefined, "damascus_knife");
+      });
+      assert.ok(searched.length > 0);
+      assert.ok(searched.every((q) => /damascus/i.test(q)), "only Damascus phrases are searched");
+      const [row] = fake.tables.finder_items;
+      assert.equal(row.item_category, "damascus_knife");
+      assert.equal(row.status, "qualified");
+      const damascus = await finderOverview("damascus_knife");
+      assert.equal(damascus.results.length, 1);
+      assert.deepEqual(damascus.keywords.map((keyword) => keyword.phrase), ["damascus pocket knife lot"]);
+      const pocket = await finderOverview("pocket_knife");
+      assert.equal(pocket.results.length, 0);
+    });
+  });
+});

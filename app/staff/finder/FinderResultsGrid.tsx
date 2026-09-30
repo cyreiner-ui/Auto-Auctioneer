@@ -8,9 +8,14 @@ export type FinderResult = {
   carving_piece_count?: number | null; carving_has_case?: boolean | null; carving_carbon_steel?: boolean | null; carving_handle_material?: "stag" | "ivory" | "other" | null;
   gaucho_match_confidence?: number | null; gaucho_maker_match?: boolean | null; gaucho_match_notes?: string | null;
   mate_gourd_match_confidence?: number | null; mate_gourd_match_notes?: string | null;
+  damascus_knife_type?: "pocket" | "bowie" | "kitchen" | "fixed_blade" | "mixed" | null; damascus_kitchen_count?: number | null; damascus_is_set?: boolean | null; damascus_notes?: string | null;
   reason?: string | null;
 };
-export type FinderResultsVariant = "pocket_knife" | "carving_set" | "gaucho_knife" | "mate_gourd";
+export type FinderResultsVariant = "pocket_knife" | "carving_set" | "gaucho_knife" | "mate_gourd" | "damascus_knife";
+
+const DAMASCUS_TYPE_LABEL: Record<string, string> = { pocket: "Pocket", bowie: "Bowie", kitchen: "Kitchen/chef", fixed_blade: "Fixed blade", mixed: "Mixed lot" };
+// Count-and-price variants, where a per-knife price is meaningful.
+const perKnifeVariant = (variant: FinderResultsVariant) => variant === "pocket_knife" || variant === "damascus_knife";
 
 type ResultAction = { label: string; className?: string; visible?: (result: FinderResult) => boolean; onClick: (result: FinderResult) => void };
 type BulkAction = { label: string; className?: string; onClick: (ids: string[]) => void };
@@ -61,6 +66,11 @@ const REJECTION_REASON_LABEL: Record<string, string> = {
   not_stag_handle: "Handle material isn't stag/antler (or, for Sheffield, ivory)",
   not_stag_handle_vision: "Photo didn't confirm a stag/antler (or, for Sheffield, ivory) handle",
   negative_keyword_match: "Matched a negative keyword before any photo analysis",
+  not_damascus: "Listing never says \"Damascus\"",
+  fake_damascus: "Imitation Damascus (style/etched/printed pattern)",
+  not_damascus_vision: "Photo showed a plain, non-Damascus blade",
+  knife_making_supplies: "Knife-making supplies (blank/billet/scales), not a finished knife",
+  not_a_knife: "Not a knife (sword, axe, jewelry, etc.)",
 };
 
 function rejectionLabel(reason: string) { return REJECTION_REASON_LABEL[reason] || reason; }
@@ -113,8 +123,8 @@ export default function FinderResultsGrid({ results, busy, emptyMessage, actions
                 <option value="discovered_desc">Newest first</option>
                 <option value="price_asc">Price: low to high</option>
                 <option value="price_desc">Price: high to low</option>
-                {variant === "pocket_knife" && <option value="cpk_asc">Cost per knife: low to high</option>}
-                {variant === "pocket_knife" && <option value="cpk_desc">Cost per knife: high to low</option>}
+                {perKnifeVariant(variant) && <option value="cpk_asc">Cost per knife: low to high</option>}
+                {perKnifeVariant(variant) && <option value="cpk_desc">Cost per knife: high to low</option>}
               </select>
             </div>
             <div className="finder-filter-group">
@@ -150,14 +160,22 @@ export default function FinderResultsGrid({ results, busy, emptyMessage, actions
               ? <>
                   {result.mate_gourd_match_confidence != null && <span>{Math.round(result.mate_gourd_match_confidence * 100)}% match</span>}
                 </>
+              : variant === "damascus_knife"
+              ? <>
+                  {result.damascus_is_set && <span>{result.knife_count != null && result.knife_count > 1 ? `Set of ${result.knife_count}` : "Set"}</span>}
+                  {!result.damascus_is_set && <span>{result.knife_count != null ? `${result.knife_count} knife${result.knife_count === 1 ? "" : "s"}` : "Knife count unknown"}</span>}
+                  {result.damascus_knife_type && <span>{DAMASCUS_TYPE_LABEL[result.damascus_knife_type] || result.damascus_knife_type}</span>}
+                  {result.damascus_knife_type === "mixed" && result.damascus_kitchen_count ? <span>{result.damascus_kitchen_count} kitchen</span> : null}
+                </>
               : <span>{result.knife_count != null ? `${result.knife_count} knives` : "Knife count unknown"}</span>}
             {result.gixen_status && <span className={result.gixen_status === "failed" ? "gixen-failed" : undefined} title={result.gixen_message || undefined}>{GIXEN_BADGE[result.gixen_status] || result.gixen_status}</span>}
           </div>
           <h3>{result.title}</h3>
           <p className="finder-price-line">{usd(result.item_price)}{result.shipping_cost != null ? ` + ${usd(result.shipping_cost)} shipping` : ""}{result.total_cost != null ? ` = ${usd(result.total_cost)} total` : ""}</p>
-          {variant === "pocket_knife" && result.cost_per_knife != null && <strong className="finder-unit-price">{usd(result.cost_per_knife)} / knife</strong>}
+          {perKnifeVariant(variant) && result.cost_per_knife != null && <strong className="finder-unit-price">{usd(result.cost_per_knife)} / knife</strong>}
           {variant === "gaucho_knife" && result.gaucho_match_notes && <p className="finder-snapshot">{result.gaucho_match_notes}</p>}
           {variant === "mate_gourd" && result.mate_gourd_match_notes && <p className="finder-snapshot">{result.mate_gourd_match_notes}</p>}
+          {variant === "damascus_knife" && result.damascus_notes && <p className="finder-snapshot">{result.damascus_notes}</p>}
           {result.reason && <p className="finder-reject-reason">Not a match: {rejectionLabel(result.reason)}</p>}
           <p className="finder-snapshot">Price captured {new Date(result.discovered_at).toLocaleString()}. Verify the current price on eBay.</p>
           {bidAction && isAuctionFormat(result.buying_options) && result.gixen_status !== "sent" && result.gixen_status !== "not_auction" &&
