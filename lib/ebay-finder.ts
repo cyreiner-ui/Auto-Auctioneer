@@ -25,6 +25,9 @@ export type EbayFinderItem = {
   // eBay's itemLocation.country (ISO code, e.g. "US") — where the item physically ships from. Only
   // set when eBay reports it; the Damascus finder rejects anything not located in the US.
   itemLocationCountry?: string;
+  // Set when the search result is (part of) a multi-variation listing — eBay returns itemGroupType/
+  // itemGroupHref for those, and the price shown is only one variation's (usually the cheapest).
+  itemGroupType?: string;
 };
 
 // Cached at module scope (not just per-run/per-tick the way startFinderRun's local `token`
@@ -121,13 +124,28 @@ function htmlToText(html: string) {
 // getItemShippingCost separately, to avoid two requests for one listing. Truncated to a few KB,
 // matching the truncation already applied to Gemini prompts elsewhere in this codebase.
 export async function getItemDescription(itemId: string, token?: string) {
+  return (await getItemDetails(itemId, token)).description;
+}
+
+// Same single-item call as getItemDescription (one eBay request), also reporting whether the
+// listing is a multi-variation ("choose an option") listing: the Browse API returns a
+// primaryItemGroup for an item that belongs to a seller-defined variation group, and its price is
+// then only that one variation's — not whatever set size the title advertises.
+export async function getItemDetails(itemId: string, token?: string): Promise<{ description: string; itemGroupType: string | null }> {
   const url = `${ebayApiBaseUrl()}/buy/browse/v1/item/${encodeURIComponent(itemId)}`;
   const response = await fetch(url, { headers: await browseHeaders(token), signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS) });
   await recordEbayApiCall();
-  if (!response.ok) throw new Error(`eBay item lookup for "${itemId}" failed (${response.status}).`);
-  const payload = await response.json() as { description?: string };
-  if (!payload.description) return "";
-  return htmlToText(payload.description).slice(0, 4000);
+  if (!response.ok) {
+    // eBay refuses a plain item id for a listing that has variations, pointing at the item-group
+    // endpoint instead (errorId 11006, "get_items_by_item_group") — that refusal is itself the
+    // answer: it's a multi-variation listing.
+    const body = await response.text().catch(() => "");
+    if (response.status === 400 && /11006|item_group/i.test(body)) return { description: "", itemGroupType: "SELLER_DEFINED_VARIATIONS" };
+    throw new Error(`eBay item lookup for "${itemId}" failed (${response.status}).`);
+  }
+  const payload = await response.json() as { description?: string; primaryItemGroup?: { itemGroupType?: string; itemGroupId?: string } };
+  const itemGroupType = payload.primaryItemGroup ? (payload.primaryItemGroup.itemGroupType || "SELLER_DEFINED_VARIATIONS") : null;
+  return { description: payload.description ? htmlToText(payload.description).slice(0, 4000) : "", itemGroupType };
 }
 
 function parseItemSummaries(summaries: Array<Record<string, unknown>>): EbayFinderItem[] {
@@ -137,7 +155,7 @@ function parseItemSummaries(summaries: Array<Record<string, unknown>>): EbayFind
       itemId?: string; title?: string; shortDescription?: string; itemWebUrl?: string;
       image?: { imageUrl?: string }; price?: { value?: string; currency?: string };
       shippingOptions?: Array<{ shippingCost?: { value?: string; currency?: string } }>;
-      buyingOptions?: string[]; itemEndDate?: string; itemLocation?: { country?: string };
+      buyingOptions?: string[]; itemEndDate?: string; itemLocation?: { country?: string }; itemGroupType?: string; itemGroupHref?: string;
     };
     if (!item.itemId || !item.title || !item.itemWebUrl) continue;
     const shipping = shippingCost(item);
@@ -154,6 +172,7 @@ function parseItemSummaries(summaries: Array<Record<string, unknown>>): EbayFind
       buyingOptions: item.buyingOptions || [],
       itemEndDate: item.itemEndDate || null,
       ...(item.itemLocation?.country ? { itemLocationCountry: item.itemLocation.country } : {}),
+      ...(item.itemGroupType || item.itemGroupHref ? { itemGroupType: item.itemGroupType || "SELLER_DEFINED_VARIATIONS" } : {}),
     });
   }
   return result;
