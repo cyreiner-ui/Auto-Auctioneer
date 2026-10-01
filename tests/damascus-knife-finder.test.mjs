@@ -353,7 +353,8 @@ test("processPendingFinderItems prices a 14PCS kitchen set on the knives vision 
         { knifeCount: 7, kitchenKnifeCount: 7, knifeType: "kitchen", isSet: true, bladeLooksNonDamascus: false, confidence: 0.95, notes: "7 knives, a roll bag, and accessories" },
         { knifeCount: 30, kitchenKnifeCount: 30, knifeType: "kitchen", isSet: true, bladeLooksNonDamascus: false, confidence: 0.95, notes: "whole stock photo" },
       ];
-      const gemini = { test: (url) => url.includes("generativelanguage.googleapis.com"), respond: () => jsonResponse({ candidates: [{ content: { parts: [{ text: JSON.stringify(vision[call++]) }] } }] }) };
+      const prompts = [];
+      const gemini = { test: (url) => url.includes("generativelanguage.googleapis.com"), respond: (_url, init) => { prompts.push(JSON.parse(init.body).contents[0].parts[0].text); return jsonResponse({ candidates: [{ content: { parts: [{ text: JSON.stringify(vision[call++]) }] } }] }); } };
       await withFetch([tokenRoute, imageRoute, noGroupRoute, descriptionRoute("Premium Damascus chef knife set."), gemini], async () => {
         await processPendingFinderItems(5);
         const seven = fake.tables.finder_items.find((row) => row.ebay_item_id === "v1|7|0");
@@ -361,6 +362,11 @@ test("processPendingFinderItems prices a 14PCS kitchen set on the knives vision 
         assert.equal(seven.status, "rejected");
         assert.equal(seven.reason, "over_budget", "$69.99 for 7 chef knives is over $6/knife");
         assert.equal(capped.knife_count, 14, "vision's count never exceeds the set's piece count");
+        assert.equal(prompts.length, 2);
+        for (const prompt of prompts) {
+          assert.match(prompt, /IGNORE the title's number/, "vision is told to count the knives, not repeat the piece count");
+          assert.doesNotMatch(prompt, /use that stated quantity/);
+        }
       });
     });
   });

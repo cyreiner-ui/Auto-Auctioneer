@@ -1537,8 +1537,8 @@ export async function processPendingFinderItems(limit = config().batchSize) {
         deferred++;
         return;
       }
-      const vision = await analyzeDamascusWithGemini({ title: row.title, description: row.short_description, imageUrl: row.image_url || "" });
       const textAnalysis = analyzeDamascusText(row.title, row.short_description);
+      const vision = await analyzeDamascusWithGemini({ title: row.title, description: row.short_description, imageUrl: row.image_url || "", countFromPhoto: textAnalysis.kind === "vision" && textAnalysis.maxCount != null });
       const knownCount = textAnalysis.kind === "vision" ? textAnalysis.knownCount : undefined;
       const decision = evaluateDamascusVision(vision, knownCount, config().confidence);
       // A kitchen set's piece count caps the photo count: vision sometimes counts a seller's whole
